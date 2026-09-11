@@ -75,11 +75,26 @@ dan level/clock audio tetap harus divalidasi pada PCB final.
 
 ## Build
 
+PlatformIO is the single build backend for both local development and GitHub Actions.
+The repository `Makefile` provides the same entry points locally and in CI.
+
 ```text
-pio run
-pio run -t upload
-pio device monitor
+make build
+make clean
+make upload
+make monitor
+make preflight
 ```
+
+For a local deployment that needs Wi-Fi credentials, copy
+`include/LocalConfig.example.h` to `include/LocalConfig.h` and edit the values.
+`LocalConfig.h` is ignored by Git and is not created or injected by GitHub Actions.
+
+The CI workflow deliberately does not pass credentials, tokens, or other secret
+values to the compiler. It runs the repository preflight before compilation and
+fails if a credential-like file or known secret pattern is present in tracked
+content. The preflight suppresses matching content so a detected secret is not
+printed into the Actions log.
 
 ## Audio capabilities and runtime controls
 

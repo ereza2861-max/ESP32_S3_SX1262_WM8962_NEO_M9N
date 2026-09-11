@@ -53,41 +53,16 @@ jobs:
       - name: Validate PlatformIO configuration
         run: pio project config
 
-      - name: Check repository for obvious secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Scan every tracked text file, not only a hand-maintained directory list.
-          if git grep -nI -E \
-            '(^|[^A-Za-z0-9_])(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' \
-            -- .; then
-            echo "ERROR: Potential secret detected in tracked files."
-            exit 1
-          fi
-
-          if git ls-files -z | grep -zE \
-            '(^|/)(\.env(\..*)?|credentials/|secrets/|LocalConfig\.h|.*\.(pem|key|p12|pfx|crt|der|jks|keystore))$' \
-            >/dev/null; then
-            echo "ERROR: Credential-like file is tracked by Git."
-            git ls-files | grep -E \
-              '(^|/)(\.env(\..*)?|credentials/|secrets/|LocalConfig\.h|.*\.(pem|key|p12|pfx|crt|der|jks|keystore))$'
-            exit 1
-          fi
-
-          # The real credential file must never be present in the repository checkout.
-          if test -e include/LocalConfig.h; then
-            echo "ERROR: include/LocalConfig.h must not be committed or built in CI."
-            exit 1
-          fi
+      - name: Run repository preflight
+        run: make preflight
 
       - name: Verify generated files are ignored
         shell: bash
         run: |
           set -euo pipefail
 
-          for path in .pio sdkconfig sdkconfig.old; do
-            if git check-ignore -q "$path"; then
+          for path in .pio/ sdkconfig sdkconfig.old; do
+            if git check-ignore -q --no-index "$path"; then
               echo "OK: $path is ignored"
             else
               echo "ERROR: $path is not ignored"
@@ -95,14 +70,14 @@ jobs:
             fi
           done
 
-      - name: Resolve PlatformIO dependencies
+      - name: Verify local credential file is absent
+        shell: bash
         run: |
           set -euo pipefail
-          pio pkg install -e esp32-s3-wroom-1
-          pio pkg list -e esp32-s3-wroom-1
+          test ! -e include/LocalConfig.h
 
       - name: Build ESP32-S3 firmware
-        run: pio run -e esp32-s3-wroom-1
+        run: make ci-build
 
       - name: Collect firmware artifacts
         shell: bash
