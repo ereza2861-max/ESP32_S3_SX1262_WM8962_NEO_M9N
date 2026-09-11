@@ -6,6 +6,7 @@
 #include <freertos/semphr.h>
 #include <freertos/stream_buffer.h>
 #include <usb_device_uac.h>
+#include <esp_aec.h>
 
 class AudioManager {
 public:
@@ -28,6 +29,9 @@ public:
   bool setUsbMonitor(bool enabled);
   bool setUsbPlaybackTransport(bool enabled);
   bool setLoopback(bool enabled);
+  bool setAec(bool enabled);
+  bool aecEnabled() const { return aecEnabled_; }
+  uint32_t usbSampleRate() const { return usbSampleRate_; }
   bool playTone(uint16_t frequencyHz, uint16_t durationMs, uint8_t percent = 35);
   bool captureVoiceFrame(uint8_t* out, size_t capacity, size_t& written);
   bool playVoiceFrame(const uint8_t* data, size_t len);
@@ -59,6 +63,15 @@ private:
   StreamBufferHandle_t usbMicBuffer_ = nullptr;
   StreamBufferHandle_t playbackBuffer_ = nullptr;
   StreamBufferHandle_t usbTransportBuffer_ = nullptr;
+  StreamBufferHandle_t aecRefBuffer_ = nullptr;
+  aec_handle_t aec_ = nullptr;
+  bool aecEnabled_ = Config::AEC_ENABLED_BY_DEFAULT;
+  uint16_t aecFrameSize_ = 0;
+  uint32_t usbSampleRate_ = Config::AUDIO_SAMPLE_RATE;
+  uint32_t usbRatePhase_ = 0;
+  int16_t aecMic_[Config::AEC_FRAME_SAMPLES] = {};
+  int16_t aecRef_[Config::AEC_FRAME_SAMPLES] = {};
+  int16_t aecOut_[Config::AEC_FRAME_SAMPLES] = {};
   volatile bool usbPlaybackTransport_ = false;
   void* simpleDecoder_ = nullptr;
   uint8_t decoderType_ = 0;
@@ -100,6 +113,10 @@ private:
   bool playDecodedBuffer();
   bool playNextQueued();
   void discardRecordingFile();
+  bool initAec();
+  void deinitAec();
+  void updateUsbSampleRate(size_t len);
+  void queueUsbAecReference(const uint8_t* data, size_t len);
   static esp_err_t usbOutputCallback(uint8_t* data, size_t len, void* ctx);
   static esp_err_t usbInputCallback(uint8_t* data, size_t len, size_t* bytesRead, void* ctx);
   static void usbMuteCallback(uint32_t mute, void* ctx);

@@ -1,0 +1,571 @@
+diff --git a/.gitignore b/.gitignore
+index 36905c1..2f08081 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -50,3 +50,8 @@ dist/
+ 
+ # ESP-IDF component-manager output
+ managed_components/
++
++# Authentication material
++*.token
++*.tokens
++.github-token
+diff --git a/Makefile b/Makefile
+index 3a6cb5b..aef97d2 100644
+--- a/Makefile
++++ b/Makefile
+@@ -15,7 +15,7 @@ PROJECT_PATH := $(abspath $(PROJECT_DIR))
+ PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
+ 
+ .PHONY: all build ci-build clean upload monitor preflight check-secrets \
+-        info help
++        auth-help info help
+ 
+ all: build
+ 
+@@ -46,6 +46,11 @@ preflight:
+ 
+ check-secrets: preflight
+ 
++auth-help:
++	@echo "GitHub authentication: see docs/GITHUB_AUTH.md"
++	@echo "Preferred local login: gh auth login (browser/SSH or credential manager)"
++	@echo "Do not put PATs in source, build flags, or tracked files."
++
+ info:
+ 	@set -eu; \
+ 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
+diff --git a/README.md b/README.md
+index 73d3770..fa59cdf 100644
+--- a/README.md
++++ b/README.md
+@@ -108,8 +108,15 @@ uses the UAC input callback. Codec-side ALC and noise gate are enabled only for
+ the microphone source; line inputs are kept at unity boost to avoid applying
+ microphone dynamics processing to external line-level equipment.
+ 
+-The patch intentionally does not add MP3/Opus/ADPCM, AEC/NS, seek/pause/queue,
+-pre-buffer/VOX, or LoRa voice transport. Those features require additional
+-buffering, codec/decoder components, or a transport protocol and should be
+-implemented as separate changes rather than hidden behind the existing
+-44.1-kHz PCM path.
++The firmware now enables ESP-SR AEC for the LoRa voice capture path when a
++USB speaker reference is available. AEC runs at 16 kHz and uses the USB speaker
++stream as the far-end reference; if no reference is available, voice capture
++falls back to the raw microphone path.
++
++USB packet-rate detection is also exposed as `usbSampleRate` in `/api/status`.
++This is diagnostic/adaptive transport support, not true host-side sample-rate
++negotiation: `espressif/usb_device_uac` 1.3.1 explicitly does not support
++dynamic MIC/SPK sampling-rate configuration. The WM8960 clock remains at the
++PCB's fixed 44.1 kHz configuration. A future true dynamic-rate implementation
++must replace or fork the UAC descriptor/driver rather than pretending that a
++runtime packet-size check changes the negotiated USB format.
+diff --git a/docs/GITHUB_AUTH.md b/docs/GITHUB_AUTH.md
+new file mode 100644
+index 0000000..fd4cf59
+--- /dev/null
++++ b/docs/GITHUB_AUTH.md
+@@ -0,0 +1,50 @@
++# GitHub authentication and PAT migration
++
++## Recommended path
++
++Do not put a GitHub PAT in this repository, PlatformIO build flags, `LocalConfig.h`, a Makefile, or a GitHub Actions secret for this build. The current Actions workflow only needs `contents: read` and `actions/checkout` with `persist-credentials: false`.
++
++For local Git operations, prefer GitHub CLI browser authentication or SSH. GitHub recommends fine-grained PATs instead of classic PATs when a token is actually required. A classic PAT that has expired is not renewed in place: create a replacement credential, verify it, then revoke the old credential if it is still present.
++
++### GitHub CLI
++
++Install GitHub CLI, then authenticate interactively:
++
++```sh
++gh auth login
++gh auth status
++git remote -v
++```
++
++Choose GitHub.com, your normal Git protocol (SSH is preferred for a long-lived local setup), and browser authentication. Do not paste a token into the shell command line. This keeps credentials outside the repository and avoids shell history leakage.
++
++### If a token is unavoidable
++
++Create a fine-grained PAT restricted to only the repository that needs it and grant the minimum repository permissions. For ordinary Git push/pull, use the smallest repository permissions offered by GitHub for that operation. Give it a short expiration and store it in the OS credential manager or GitHub CLI, not in a file tracked by Git.
++
++Do not use a classic PAT merely because an old script used one. Fine-grained PATs can be repository-scoped, while classic PATs can reach every repository the user can access.
++
++### When the old classic PAT is already expired
++
++1. Stop using the old PAT. An expired token cannot be used as a safe migration credential.
++2. Check GitHub Settings → Developer settings → Personal access tokens and revoke any old token that is still active.
++3. Use `gh auth login` for local Git access, or create a fine-grained PAT only if a token is genuinely required.
++4. Run `make preflight` before the first push.
++5. If the old PAT was ever committed, treat it as compromised even if it is now expired: rotate/revoke it and clean the Git history before publishing that history.
++
++### GitHub Actions
++
++This repository does not need a PAT to compile firmware. `actions/checkout` obtains the workflow's ephemeral `GITHUB_TOKEN`; `persist-credentials: false` prevents checkout from leaving that credential in the local Git configuration. The workflow does not pass a token to PlatformIO or the compiler.
++
++If a future deployment needs a cloud credential, prefer GitHub Actions OIDC and short-lived cloud credentials rather than adding a long-lived PAT to the workflow.
++
++### Local verification
++
++Run:
++
++```sh
++make preflight
++make build
++```
++
++The preflight checks tracked content, staged changes, untracked files, reachable push history, credential-like paths, and Git remotes for embedded credentials. It deliberately suppresses matching secret content.
+diff --git a/include/AppState.h b/include/AppState.h
+index bae9b8d..0c30778 100644
+--- a/include/AppState.h
++++ b/include/AppState.h
+@@ -39,6 +39,8 @@ struct RuntimeState {
+   uint8_t usbVolume = 100;
+   bool usbMonitor = false;
+   bool usbPlaybackTransport = false;
++  bool aecEnabled = false;
++  uint32_t usbSampleRate = 44100;
+   bool audioLoopback = false;
+   float audioPeak = 0.0f;
+   float audioRms = 0.0f;
+diff --git a/include/AudioManager.h b/include/AudioManager.h
+index 47568c7..1bfadea 100644
+--- a/include/AudioManager.h
++++ b/include/AudioManager.h
+@@ -6,6 +6,7 @@
+ #include <freertos/semphr.h>
+ #include <freertos/stream_buffer.h>
+ #include <usb_device_uac.h>
++#include <esp_aec.h>
+ 
+ class AudioManager {
+ public:
+@@ -28,6 +29,9 @@ public:
+   bool setUsbMonitor(bool enabled);
+   bool setUsbPlaybackTransport(bool enabled);
+   bool setLoopback(bool enabled);
++  bool setAec(bool enabled);
++  bool aecEnabled() const { return aecEnabled_; }
++  uint32_t usbSampleRate() const { return usbSampleRate_; }
+   bool playTone(uint16_t frequencyHz, uint16_t durationMs, uint8_t percent = 35);
+   bool captureVoiceFrame(uint8_t* out, size_t capacity, size_t& written);
+   bool playVoiceFrame(const uint8_t* data, size_t len);
+@@ -59,6 +63,15 @@ private:
+   StreamBufferHandle_t usbMicBuffer_ = nullptr;
+   StreamBufferHandle_t playbackBuffer_ = nullptr;
+   StreamBufferHandle_t usbTransportBuffer_ = nullptr;
++  StreamBufferHandle_t aecRefBuffer_ = nullptr;
++  aec_handle_t aec_ = nullptr;
++  bool aecEnabled_ = Config::AEC_ENABLED_BY_DEFAULT;
++  uint16_t aecFrameSize_ = 0;
++  uint32_t usbSampleRate_ = Config::AUDIO_SAMPLE_RATE;
++  uint32_t usbRatePhase_ = 0;
++  int16_t aecMic_[Config::AEC_FRAME_SAMPLES] = {};
++  int16_t aecRef_[Config::AEC_FRAME_SAMPLES] = {};
++  int16_t aecOut_[Config::AEC_FRAME_SAMPLES] = {};
+   volatile bool usbPlaybackTransport_ = false;
+   void* simpleDecoder_ = nullptr;
+   uint8_t decoderType_ = 0;
+@@ -100,6 +113,10 @@ private:
+   bool playDecodedBuffer();
+   bool playNextQueued();
+   void discardRecordingFile();
++  bool initAec();
++  void deinitAec();
++  void updateUsbSampleRate(size_t len);
++  void queueUsbAecReference(const uint8_t* data, size_t len);
+   static esp_err_t usbOutputCallback(uint8_t* data, size_t len, void* ctx);
+   static esp_err_t usbInputCallback(uint8_t* data, size_t len, size_t* bytesRead, void* ctx);
+   static void usbMuteCallback(uint32_t mute, void* ctx);
+diff --git a/include/Config.h b/include/Config.h
+index 49a05e9..172f3af 100644
+--- a/include/Config.h
++++ b/include/Config.h
+@@ -62,6 +62,12 @@ constexpr uint8_t AUDIO_SOURCE_LINEIN3 = 2;
+ constexpr uint8_t AUDIO_SOURCE_USB = 3;
+ constexpr size_t USB_RECORD_BUFFER_BYTES = 32768;
+ constexpr size_t USB_MIC_BUFFER_BYTES = 16384;
++constexpr size_t USB_AEC_REFERENCE_BYTES = 65536;
++constexpr bool AEC_ENABLED_BY_DEFAULT = true;
++constexpr uint32_t AEC_SAMPLE_RATE = 16000;
++constexpr uint16_t AEC_FRAME_SAMPLES = 512; // 32 ms @ 16 kHz
++constexpr uint8_t AEC_FILTER_LENGTH = 4;
++constexpr uint8_t USB_DYNAMIC_RATE_MIN = 16000 / 1000;
+ constexpr uint32_t RECORD_MAX_SECONDS = 300;
+ constexpr uint16_t I2S_DMA_BUF_COUNT = 8;
+ constexpr uint16_t I2S_DMA_BUF_LEN = 256;
+@@ -87,6 +93,13 @@ constexpr size_t MAX_WEB_BODY = 4096;
+ constexpr size_t MAX_WEB_FILES = 128;
+ constexpr size_t MAX_PATH = 96;
+ constexpr size_t AUDIO_IO_BYTES = 1024;
++constexpr size_t PLAYBACK_PREBUFFER_BYTES = 16384;
++constexpr size_t USB_TRANSPORT_BUFFER_BYTES = 16384;
++constexpr uint8_t PLAYBACK_QUEUE_DEPTH = 16;
++constexpr uint32_t RECORD_SPLIT_SECONDS = 300;
++constexpr float VOX_THRESHOLD = 0.08f;
++constexpr uint32_t VOX_HANG_MS = 700;
++constexpr uint32_t VOICE_FRAME_MS = 20;
+ constexpr uint32_t AUDIO_TONE_MAX_MS = 2000;
+ constexpr uint32_t AUDIO_VU_HOLD_MS = 250;
+ 
+diff --git a/src/AudioManager.cpp b/src/AudioManager.cpp
+index 3e5f599..02ff033 100644
+--- a/src/AudioManager.cpp
++++ b/src/AudioManager.cpp
+@@ -122,6 +122,71 @@ bool AudioManager::initI2S() {
+   return true;
+ }
+ 
++
++bool AudioManager::initAec() {
++  if (!Config::AEC_ENABLED_BY_DEFAULT) return true;
++  aec_ = aec_create(Config::AEC_SAMPLE_RATE, Config::AEC_FILTER_LENGTH, 1,
++                    AEC_MODE_FD_LOW_COST);
++  if (!aec_) return false;
++  const int frameSize = aec_get_chunksize(aec_);
++  if (frameSize <= 0 || frameSize > static_cast<int>(Config::AEC_FRAME_SAMPLES)) {
++    aec_destroy(aec_);
++    aec_ = nullptr;
++    return false;
++  }
++  aecFrameSize_ = static_cast<uint16_t>(frameSize);
++  aecEnabled_ = true;
++  return true;
++}
++
++void AudioManager::deinitAec() {
++  if (aec_) {
++    aec_destroy(aec_);
++    aec_ = nullptr;
++  }
++  aecFrameSize_ = 0;
++}
++
++void AudioManager::updateUsbSampleRate(size_t len) {
++  // usb_device_uac 1.3.1 exposes a fixed descriptor and explicitly does not
++  // implement host-driven dynamic sample-rate negotiation. Detect the packet
++  // size nevertheless so the firmware can diagnose non-native host rates.
++  const size_t frames = len / (Config::AUDIO_CHANNELS * sizeof(int16_t));
++  if (frames >= 90 && frames <= 220) {
++    if (frames >= 188) usbSampleRate_ = 48000;
++    else if (frames >= 172) usbSampleRate_ = 44100;
++    else if (frames >= 120) usbSampleRate_ = 32000;
++    else usbSampleRate_ = 24000;
++  }
++  StateLock lock(gState);
++  if (lock.ok()) {
++    gState.usbSampleRate = usbSampleRate_;
++    gState.aecEnabled = aecEnabled_;
++  }
++}
++
++void AudioManager::queueUsbAecReference(const uint8_t* data, size_t len) {
++  if (!aecEnabled_ || !aecRefBuffer_ || !data || len < 4) return;
++  const uint32_t inputRate = usbSampleRate_ ? usbSampleRate_ : Config::AUDIO_SAMPLE_RATE;
++  const size_t frames = len / (Config::AUDIO_CHANNELS * sizeof(int16_t));
++  const int16_t* pcm = reinterpret_cast<const int16_t*>(data);
++
++  // Cheap mono decimator with a persistent phase accumulator. AEC itself is
++  // fixed at 16 kHz; this stage only builds the far-end reference stream.
++  for (size_t i = 0; i < frames; ++i) {
++    usbRatePhase_ += Config::AEC_SAMPLE_RATE;
++    if (usbRatePhase_ < inputRate) continue;
++    usbRatePhase_ -= inputRate;
++    const int32_t mono =
++        (static_cast<int32_t>(pcm[i * 2]) + static_cast<int32_t>(pcm[i * 2 + 1])) / 2;
++    const int16_t sample = static_cast<int16_t>(constrain(mono, -32768, 32767));
++    if (xStreamBufferSend(aecRefBuffer_, &sample, sizeof(sample), 0) != sizeof(sample)) {
++      StateLock lock(gState);
++      if (lock.ok()) gState.audioDrops++;
++    }
++  }
++}
++
+ bool AudioManager::begin() {
+   instance_ = this;
+   mutex_ = xSemaphoreCreateMutex();
+@@ -130,11 +195,13 @@ bool AudioManager::begin() {
+   usbMicBuffer_ = xStreamBufferCreate(Config::USB_MIC_BUFFER_BYTES, 1);
+   playbackBuffer_ = xStreamBufferCreate(Config::PLAYBACK_PREBUFFER_BYTES, 1);
+   usbTransportBuffer_ = xStreamBufferCreate(Config::USB_TRANSPORT_BUFFER_BYTES, 1);
+-  if (!mutex_ || !i2sMutex_ || !usbRecordBuffer_ || !usbMicBuffer_ || !playbackBuffer_ || !usbTransportBuffer_) {
++  aecRefBuffer_ = xStreamBufferCreate(Config::USB_AEC_REFERENCE_BYTES, sizeof(int16_t));
++  if (!mutex_ || !i2sMutex_ || !usbRecordBuffer_ || !usbMicBuffer_ || !playbackBuffer_ || !usbTransportBuffer_ || !aecRefBuffer_) {
+     if (usbRecordBuffer_) { vStreamBufferDelete(usbRecordBuffer_); usbRecordBuffer_ = nullptr; }
+     if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
+     if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
+     if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
++    if (aecRefBuffer_) { vStreamBufferDelete(aecRefBuffer_); aecRefBuffer_ = nullptr; }
+     if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
+     if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
+     StateLock lock(gState);
+@@ -146,6 +213,7 @@ bool AudioManager::begin() {
+     if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
+     if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
+     if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
++    if (aecRefBuffer_) { vStreamBufferDelete(aecRefBuffer_); aecRefBuffer_ = nullptr; }
+     if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
+     if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
+     StateLock lock(gState);
+@@ -160,6 +228,7 @@ bool AudioManager::begin() {
+     if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
+     if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
+     if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
++    if (aecRefBuffer_) { vStreamBufferDelete(aecRefBuffer_); aecRefBuffer_ = nullptr; }
+     if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
+     if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
+     StateLock lock(gState);
+@@ -170,11 +239,21 @@ bool AudioManager::begin() {
+     return false;
+   }
+ 
++  if (!initAec()) {
++    StateLock lock(gState);
++    if (lock.ok()) gState.lastError = "ESP-SR AEC init failed; continuing without AEC";
++    aecEnabled_ = false;
++  }
++
+   initialized_ = true;
+   (void)setRecordSource(gConfig.audioRecordSource);
+   setVolume(volume_);
+   StateLock lock(gState);
+-  if (lock.ok()) gState.codecReady = true;
++  if (lock.ok()) {
++    gState.codecReady = true;
++    gState.aecEnabled = aecEnabled_;
++    gState.usbSampleRate = usbSampleRate_;
++  }
+   return true;
+ }
+ 
+@@ -316,6 +395,7 @@ bool AudioManager::startRecording() {
+       captureWm8960Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC;
+       if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
+       if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
++      if (aecRefBuffer_) (void)xStreamBufferReset(aecRefBuffer_);
+     }
+   }
+ 
+@@ -506,34 +586,51 @@ static int16_t mulawToPcm16(uint8_t u) {
+ 
+ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& written) {
+   written = 0;
+-  if (!out || capacity < 161 || !initialized_ || !i2sMutex_) return false;
++  constexpr size_t voiceSamples = 160; // 20 ms @ 8 kHz
++  constexpr size_t micFrames = (Config::AUDIO_SAMPLE_RATE * 40U) / 1000U;
++  if (!out || capacity < 4 + voiceSamples || !initialized_ || !i2sMutex_) return false;
+   if (xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+ 
+-  constexpr size_t inFrames = (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
+-  uint8_t pcm[inFrames * Config::AUDIO_CHANNELS * sizeof(int16_t)];
++  uint8_t pcm[micFrames * Config::AUDIO_CHANNELS * sizeof(int16_t)];
+   size_t got = 0;
+   const esp_err_t err = i2s_read(AUDIO_I2S_PORT, pcm, sizeof(pcm), &got,
+                                   pdMS_TO_TICKS(30));
+   xSemaphoreGive(i2sMutex_);
+   if (err != ESP_OK || got != sizeof(pcm)) return false;
+ 
+-  out[0] = 0x56; // Voice frame magic.
+-  out[1] = 1;    // μ-law 8 kHz mono.
++  const int16_t* samples = reinterpret_cast<const int16_t*>(pcm);
++  const size_t aecFrames = aecFrameSize_ ? aecFrameSize_ : Config::AEC_FRAME_SAMPLES;
++  for (size_t i = 0; i < aecFrames; ++i) {
++    const size_t src = min(micFrames - 1,
++        static_cast<size_t>((static_cast<uint64_t>(i) * Config::AUDIO_SAMPLE_RATE) /
++                            Config::AEC_SAMPLE_RATE));
++    const int32_t mono =
++        (static_cast<int32_t>(samples[src * 2]) +
++         static_cast<int32_t>(samples[src * 2 + 1])) / 2;
++    aecMic_[i] = static_cast<int16_t>(constrain(mono, -32768, 32767));
++  }
++
++  const int16_t* clean = aecMic_;
++  if (aecEnabled_ && aec_ && aecRefBuffer_ &&
++      xStreamBufferReceive(aecRefBuffer_, aecRef_, aecFrames * sizeof(int16_t), 0) ==
++          aecFrames * sizeof(int16_t)) {
++    aec_process(aec_, aecMic_, aecRef_, aecOut_);
++    clean = aecOut_;
++  }
++
++  out[0] = 0x56;
++  out[1] = 1; // μ-law 8 kHz mono.
+   out[2] = static_cast<uint8_t>(Config::VOICE_FRAME_MS);
+   out[3] = 0;
+-  for (size_t i = 0; i < 160; ++i) {
+-    const size_t src = static_cast<size_t>(
+-        (static_cast<uint64_t>(i) * Config::AUDIO_SAMPLE_RATE) / 8000ULL);
+-    if (src >= inFrames) return false;
+-    const int16_t* samples = reinterpret_cast<const int16_t*>(pcm);
+-    const int32_t mono = (static_cast<int32_t>(samples[src * 2]) +
+-                          static_cast<int32_t>(samples[src * 2 + 1])) / 2;
+-    out[4 + i] = pcm16ToMulaw(static_cast<int16_t>(mono));
+-  }
+-  written = 164;
++  for (size_t i = 0; i < voiceSamples; ++i) {
++    // 16 kHz AEC output -> 8 kHz voice transport.
++    out[4 + i] = pcm16ToMulaw(clean[min(aecFrames - 1, i * 2)]);
++  }
++  written = 4 + voiceSamples;
+   return true;
+ }
+ 
++
+ bool AudioManager::playVoiceFrame(const uint8_t* data, size_t len) {
+   if (!data || len != 164 || data[0] != 0x56 || data[1] != 1 ||
+       data[2] != Config::VOICE_FRAME_MS || !initialized_ || !i2sMutex_) return false;
+@@ -837,6 +934,25 @@ bool AudioManager::splitRecording() {
+   return true;
+ }
+ 
++bool AudioManager::setAec(bool enabled) {
++  if (!initialized_) return false;
++  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
++  if (enabled && !aec_) {
++    if (!initAec()) {
++      if (mutex_) xSemaphoreGive(mutex_);
++      return false;
++    }
++  }
++  aecEnabled_ = enabled;
++  {
++    StateLock lock(gState);
++    if (lock.ok()) gState.aecEnabled = enabled;
++  }
++  if (aecRefBuffer_) (void)xStreamBufferReset(aecRefBuffer_);
++  if (mutex_) xSemaphoreGive(mutex_);
++  return true;
++}
++
+ bool AudioManager::setVox(bool enabled, float threshold, uint32_t hangMs) {
+   if (threshold < 0.005f || threshold > 1.0f || hangMs > 10000) return false;
+   if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+@@ -1254,6 +1370,7 @@ esp_err_t AudioManager::usbOutputCallback(uint8_t* data, size_t len, void* /*ctx
+   if (!instance_ || !data || !len || !instance_->i2sMutex_)
+     return ESP_ERR_INVALID_ARG;
+ 
++  instance_->updateUsbSampleRate(len);
+   size_t written = 0;
+   if (xSemaphoreTake(instance_->i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+     return ESP_ERR_TIMEOUT;
+@@ -1268,6 +1385,9 @@ esp_err_t AudioManager::usbOutputCallback(uint8_t* data, size_t len, void* /*ctx
+     captureDropped = queued != len;
+   }
+   xSemaphoreGive(instance_->i2sMutex_);
++  if (err == ESP_OK && written == len) {
++    instance_->queueUsbAecReference(data, len);
++  }
+   if (err != ESP_OK || written != len || captureDropped) {
+     StateLock lock(gState);
+     if (lock.ok()) gState.audioDrops++;
+diff --git a/src/WebUi.cpp b/src/WebUi.cpp
+index b496023..1b9a4b9 100644
+--- a/src/WebUi.cpp
++++ b/src/WebUi.cpp
+@@ -59,7 +59,7 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
+ <button onclick="play()">PLAY</button><button onclick="pausePlay(1)">PAUSE</button><button onclick="pausePlay(0)">RESUME</button><button onclick="stopPlay()">STOP</button><input id=seekms type=number value="0" min="0"><button onclick="seekPlay()">SEEK ms</button><button onclick="queue()">QUEUE</button><button onclick="clearQueue()">CLEAR QUEUE</button>
+ <button onclick="tone(880,120)">BEEP</button>
+ <label>USB monitor <input id=usbmon type=checkbox onchange="setUsbMonitor()"></label><label>SD→USB <input id=usbtransport type=checkbox onchange="setUsbTransport()"></label>
+-<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
++<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
+ </div>
+ <div class=card><input id=msg placeholder="LoRa message">
+ <button onclick="send()">Send</button></div>
+@@ -99,6 +99,12 @@ async function setLoopback(){
+   if(r!=='OK') alert(r);
+   refresh();
+ }
++async function setAec(){
++  const r=await j('/api/audio-aec',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
++    body:new URLSearchParams({on:aec.checked?'1':'0'})});
++  if(r!=='OK') alert(r);
++  refresh();
++}
+ async function setUsbTransport(){
+   const r=await j('/api/usb-transport',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+     body:new URLSearchParams({on:usbtransport.checked?'1':'0'})});
+@@ -219,6 +225,13 @@ void WebUi::begin() {
+     const bool ok = audio.setLoopback(raw == "1");
+     server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
+   });
++  server_.on("/api/audio-aec", HTTP_POST, [this]{
++    if (!auth()) return;
++    const String raw = server_.arg("on");
++    if (raw != "0" && raw != "1") { server_.send(400, "text/plain", "invalid aec"); return; }
++    const bool ok = audio.setAec(raw == "1");
++    server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
++  });
+   server_.on("/api/audio-tone", HTTP_POST, [this]{
+     if (!auth()) return;
+     const String rf = server_.arg("freq");
+@@ -274,6 +287,8 @@ void WebUi::handleStatus() {
+   j += "\"usbVolume\":" + String(gState.usbVolume) + ",";
+   j += "\"usbMonitor\":" + String(gState.usbMonitor ? "true":"false") + ",";
+   j += "\"usbPlaybackTransport\":" + String(gState.usbPlaybackTransport ? "true":"false") + ",";
++  j += "\"aecEnabled\":" + String(gState.aecEnabled ? "true":"false") + ",";
++  j += "\"usbSampleRate\":" + String(gState.usbSampleRate) + ",";
+   j += "\"audioLoopback\":" + String(gState.audioLoopback ? "true":"false") + ",";
+   j += "\"audioLevel\":{\"peak\":" + String(gState.audioPeak,3) +
+        ",\"rms\":" + String(gState.audioRms,3) +
+@@ -281,7 +296,6 @@ void WebUi::handleStatus() {
+   j += "\"ptt\":" + String(gState.ptt ? "true":"false") + ",";
+   j += "\"sos\":" + String(gState.sos ? "true":"false") + ",";
+   j += "\"recording\":" + String(gState.recording ? "true":"false") + ",";
+-  j += "\"recording\":" + String(gState.recording ? "true":"false") + ",";
+   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
+   j += "\"volume\":" + String(gState.volume) + ",";
+   j += "\"tx\":" + String(gState.txPackets) + ",";
+diff --git a/src/idf_component.yml b/src/idf_component.yml
+index f56a077..8976705 100644
+--- a/src/idf_component.yml
++++ b/src/idf_component.yml
+@@ -2,6 +2,5 @@
+ dependencies:
+   idf: ">=5.0"
+   espressif/usb_device_uac: "1.3.1"
+-
+-espressif/esp_audio_codec: "^2.5.0"
+-espressif/esp-sr: "^2.5.2"
++  espressif/esp_audio_codec: "^2.5.0"
++  espressif/esp-sr: "^2.5.2"
+diff --git a/tools/preflight-git-push.sh b/tools/preflight-git-push.sh
+index e7cae5b..1914bff 100644
+--- a/tools/preflight-git-push.sh
++++ b/tools/preflight-git-push.sh
+@@ -6,7 +6,7 @@ cd "$ROOT"
+ 
+ # Intentionally do not print matching lines: a preflight must never echo the
+ # secret it is trying to protect.
+-PATTERN='(^|[^A-Za-z0-9_])(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
++PATTERN='(^|[^A-Za-z0-9_])(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9_]{20,}|ghu_[A-Za-z0-9_]{20,}|ghs_[A-Za-z0-9_]{20,}|ghr_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+ CREDENTIAL_PATHS='(^|/)(\.env(\..*)?|credentials/|secrets/|LocalConfig\.h|.*\.(pem|key|p12|pfx|crt|der|jks|keystore))$'
+ 
+ fail=0
+@@ -119,6 +119,26 @@ else
+   echo "No commits in push range."
+ fi
+ 
++echo
++echo "== Git remote credential check =="
++remote_bad=0
++while IFS= read -r remote_url; do
++  [ -n "$remote_url" ] || continue
++  if printf '%s' "$remote_url" | grep -Eq "$PATTERN|https?://[^/@[:space:]]+:[^/@[:space:]]+@"; then
++    remote_bad=1
++    break
++  fi
++done <<EOF
++$(git config --get-regexp '^remote\\..*\\.url$' 2>/dev/null | sed 's/^[^ ]*[[:space:]]*//')
++EOF
++if [ "$remote_bad" -ne 0 ]; then
++  echo "ERROR: a Git remote appears to contain an embedded credential/token."
++  echo "       Use an SSH remote or GitHub CLI/credential manager instead."
++  fail=1
++else
++  echo "PASS"
++fi
++
+ echo
+ echo "== Staged diff summary =="
+ git diff --cached --stat

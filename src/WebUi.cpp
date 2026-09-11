@@ -59,7 +59,7 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <button onclick="play()">PLAY</button><button onclick="pausePlay(1)">PAUSE</button><button onclick="pausePlay(0)">RESUME</button><button onclick="stopPlay()">STOP</button><input id=seekms type=number value="0" min="0"><button onclick="seekPlay()">SEEK ms</button><button onclick="queue()">QUEUE</button><button onclick="clearQueue()">CLEAR QUEUE</button>
 <button onclick="tone(880,120)">BEEP</button>
 <label>USB monitor <input id=usbmon type=checkbox onchange="setUsbMonitor()"></label><label>SD→USB <input id=usbtransport type=checkbox onchange="setUsbTransport()"></label>
-<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
+<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
 </div>
 <div class=card><input id=msg placeholder="LoRa message">
 <button onclick="send()">Send</button></div>
@@ -96,6 +96,12 @@ async function setUsbMonitor(){
 async function setLoopback(){
   const r=await j('/api/audio-loopback',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body:new URLSearchParams({on:loop.checked?'1':'0'})});
+  if(r!=='OK') alert(r);
+  refresh();
+}
+async function setAec(){
+  const r=await j('/api/audio-aec',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body:new URLSearchParams({on:aec.checked?'1':'0'})});
   if(r!=='OK') alert(r);
   refresh();
 }
@@ -219,6 +225,13 @@ void WebUi::begin() {
     const bool ok = audio.setLoopback(raw == "1");
     server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
   });
+  server_.on("/api/audio-aec", HTTP_POST, [this]{
+    if (!auth()) return;
+    const String raw = server_.arg("on");
+    if (raw != "0" && raw != "1") { server_.send(400, "text/plain", "invalid aec"); return; }
+    const bool ok = audio.setAec(raw == "1");
+    server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
+  });
   server_.on("/api/audio-tone", HTTP_POST, [this]{
     if (!auth()) return;
     const String rf = server_.arg("freq");
@@ -274,13 +287,14 @@ void WebUi::handleStatus() {
   j += "\"usbVolume\":" + String(gState.usbVolume) + ",";
   j += "\"usbMonitor\":" + String(gState.usbMonitor ? "true":"false") + ",";
   j += "\"usbPlaybackTransport\":" + String(gState.usbPlaybackTransport ? "true":"false") + ",";
+  j += "\"aecEnabled\":" + String(gState.aecEnabled ? "true":"false") + ",";
+  j += "\"usbSampleRate\":" + String(gState.usbSampleRate) + ",";
   j += "\"audioLoopback\":" + String(gState.audioLoopback ? "true":"false") + ",";
   j += "\"audioLevel\":{\"peak\":" + String(gState.audioPeak,3) +
        ",\"rms\":" + String(gState.audioRms,3) +
        ",\"clipped\":" + String(gState.audioClipped ? "true":"false") + "},";
   j += "\"ptt\":" + String(gState.ptt ? "true":"false") + ",";
   j += "\"sos\":" + String(gState.sos ? "true":"false") + ",";
-  j += "\"recording\":" + String(gState.recording ? "true":"false") + ",";
   j += "\"recording\":" + String(gState.recording ? "true":"false") + ",";
   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
   j += "\"volume\":" + String(gState.volume) + ",";

@@ -50,3 +50,8 @@ dist/
 
 # ESP-IDF component-manager output
 managed_components/
+
+# Authentication material
+*.token
+*.tokens
+.github-token

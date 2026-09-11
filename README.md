@@ -108,8 +108,15 @@ uses the UAC input callback. Codec-side ALC and noise gate are enabled only for
 the microphone source; line inputs are kept at unity boost to avoid applying
 microphone dynamics processing to external line-level equipment.
 
-The patch intentionally does not add MP3/Opus/ADPCM, AEC/NS, seek/pause/queue,
-pre-buffer/VOX, or LoRa voice transport. Those features require additional
-buffering, codec/decoder components, or a transport protocol and should be
-implemented as separate changes rather than hidden behind the existing
-44.1-kHz PCM path.
+The firmware now enables ESP-SR AEC for the LoRa voice capture path when a
+USB speaker reference is available. AEC runs at 16 kHz and uses the USB speaker
+stream as the far-end reference; if no reference is available, voice capture
+falls back to the raw microphone path.
+
+USB packet-rate detection is also exposed as `usbSampleRate` in `/api/status`.
+This is diagnostic/adaptive transport support, not true host-side sample-rate
+negotiation: `espressif/usb_device_uac` 1.3.1 explicitly does not support
+dynamic MIC/SPK sampling-rate configuration. The WM8960 clock remains at the
+PCB's fixed 44.1 kHz configuration. A future true dynamic-rate implementation
+must replace or fork the UAC descriptor/driver rather than pretending that a
+runtime packet-size check changes the negotiated USB format.

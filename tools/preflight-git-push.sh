@@ -6,7 +6,7 @@ cd "$ROOT"
 
 # Intentionally do not print matching lines: a preflight must never echo the
 # secret it is trying to protect.
-PATTERN='(^|[^A-Za-z0-9_])(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+PATTERN='(^|[^A-Za-z0-9_])(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|gho_[A-Za-z0-9_]{20,}|ghu_[A-Za-z0-9_]{20,}|ghs_[A-Za-z0-9_]{20,}|ghr_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
 CREDENTIAL_PATHS='(^|/)(\.env(\..*)?|credentials/|secrets/|LocalConfig\.h|.*\.(pem|key|p12|pfx|crt|der|jks|keystore))$'
 
 fail=0
@@ -117,6 +117,26 @@ if [ -n "$commits" ]; then
   done
 else
   echo "No commits in push range."
+fi
+
+echo
+echo "== Git remote credential check =="
+remote_bad=0
+while IFS= read -r remote_url; do
+  [ -n "$remote_url" ] || continue
+  if printf '%s' "$remote_url" | grep -Eq "$PATTERN|https?://[^/@[:space:]]+:[^/@[:space:]]+@"; then
+    remote_bad=1
+    break
+  fi
+done <<EOF
+$(git config --get-regexp '^remote\\..*\\.url$' 2>/dev/null | sed 's/^[^ ]*[[:space:]]*//')
+EOF
+if [ "$remote_bad" -ne 0 ]; then
+  echo "ERROR: a Git remote appears to contain an embedded credential/token."
+  echo "       Use an SSH remote or GitHub CLI/credential manager instead."
+  fail=1
+else
+  echo "PASS"
 fi
 
 echo

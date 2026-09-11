@@ -15,7 +15,7 @@ PROJECT_PATH := $(abspath $(PROJECT_DIR))
 PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 
 .PHONY: all build ci-build clean upload monitor preflight check-secrets \
-        info help
+        auth-help info help
 
 all: build
 
@@ -45,6 +45,11 @@ preflight:
 	@sh "$(PROJECT_PATH)/tools/preflight-git-push.sh"
 
 check-secrets: preflight
+
+auth-help:
+	@echo "GitHub authentication: see docs/GITHUB_AUTH.md"
+	@echo "Preferred local login: gh auth login (browser/SSH or credential manager)"
+	@echo "Do not put PATs in source, build flags, or tracked files."
 
 info:
 	@set -eu; \

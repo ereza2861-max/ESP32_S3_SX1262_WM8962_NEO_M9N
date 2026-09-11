@@ -39,6 +39,8 @@ struct RuntimeState {
   uint8_t usbVolume = 100;
   bool usbMonitor = false;
   bool usbPlaybackTransport = false;
+  bool aecEnabled = false;
+  uint32_t usbSampleRate = 44100;
   bool audioLoopback = false;
   float audioPeak = 0.0f;
   float audioRms = 0.0f;
