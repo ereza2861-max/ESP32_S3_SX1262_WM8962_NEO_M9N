@@ -5,6 +5,9 @@
 #include "LoRaManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
+#include <Update.h>
+#include <esp_system.h>
+#include <WiFi.h>
 
 static String jsonEscape(const String& input) {
   String out;
@@ -69,10 +72,10 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=freq value="923" placeholder="Freq MHz"><input id=bw value="125" placeholder="BW kHz">
 <input id=sf value="7" placeholder="SF"><input id=cr value="5" placeholder="CR 5-8">
 <input id=pwr value="14" placeholder="Power dBm"><input id=sw value="18" placeholder="Sync word">
-<input id=cs value="FIELD" placeholder="Callsign"><input id=vol value="70" placeholder="Volume">
+<input id=cs value="FIELD" placeholder="Callsign"><input id=key placeholder="LoRa AES-128 key (32 hex chars)"><input id=vol value="70" placeholder="Volume">
 <input id=bat value="1.0" placeholder="Battery calibration">
 <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
-<button onclick="saveCfg()">Save config</button></div>
+<button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button></div>
 <div class=card><h3>Status</h3><pre id=s></pre></div>
 <div class=card><h3>Files</h3><pre id=f></pre></div>
 <script>
@@ -148,12 +151,19 @@ setInterval(refresh,2000);syncSource();refresh()
 
 bool WebUi::sameOrigin() {
   const String origin = server_.header("Origin");
-  const String host = server_.header("Host");
-  if (origin.isEmpty() || host.isEmpty()) return false;
-
-  String expected = "http://";
-  expected += host;
+  if (origin.isEmpty()) return false;
+  const String expected = String("http://") + WiFi.softAPIP().toString();
   return origin == expected;
+}
+
+bool WebUi::rateLimit(uint32_t& last, uint32_t interval) {
+  const uint32_t now = millis();
+  if (last != 0 && now - last < interval) {
+    server_.send(429, "text/plain", "rate limited");
+    return false;
+  }
+  last = now;
+  return true;
 }
 
 bool WebUi::auth() {
@@ -208,7 +218,9 @@ void WebUi::begin() {
   server_.on("/api/volume", HTTP_POST, [this]{ if (auth()) handleVolume(); });
   server_.on("/api/delete", HTTP_POST, [this]{ if (auth()) handleDelete(); });
   server_.on("/api/track", HTTP_GET, [this]{ if (auth()) handleTrack(); });
-  server_.on("/api/ota", HTTP_POST, [this]{ if (auth()) handleOta(); });
+  server_.on("/api/ota", HTTP_POST, [this]{ if (auth()) handleOta(); },
+              [this]{ if (auth()) handleOtaUpload(); });
+  server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
   server_.on("/api/audio-source", HTTP_POST, [this]{ if (auth()) handleAudioSource(); });
   server_.on("/api/audio-monitor", HTTP_POST, [this]{
@@ -273,6 +285,8 @@ void WebUi::handleStatus() {
   j += ",\"alt\":" + String(gState.gps.alt,1);
   j += ",\"sat\":" + String(gState.gps.satellites) + "},";
   j += "\"lora\":" + String(gState.loraReady ? "true":"false") + ",";
+  j += "\"rssi\":" + String(gState.loraRssi) + ",";
+  j += "\"snr\":" + String(gState.loraSnr,1) + ",";
   j += "\"codec\":" + String(gState.codecReady ? "true":"false") + ",";
   j += "\"sd\":" + String(gState.storageReady ? "true":"false") + ",";
   j += "\"battery\":{\"available\":" + String(gState.batteryAvailable ? "true":"false");
@@ -296,8 +310,10 @@ void WebUi::handleStatus() {
   j += "\"ptt\":" + String(gState.ptt ? "true":"false") + ",";
   j += "\"sos\":" + String(gState.sos ? "true":"false") + ",";
   j += "\"recording\":" + String(gState.recording ? "true":"false") + ",";
+  j += "\"rxActive\":" + String(gState.rxActive ? "true":"false") + ",";
   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
   j += "\"volume\":" + String(gState.volume) + ",";
+  j += "\"voiceRxLost\":" + String(gState.voiceRxLost) + ",";
   j += "\"tx\":" + String(gState.txPackets) + ",";
   j += "\"rx\":" + String(gState.rxPackets) + ",";
   j += "\"msg\":\"" + jsonEscape(gState.lastMessage) + "\",";
@@ -310,6 +326,7 @@ void WebUi::handleStatus() {
 void WebUi::handleFiles() { server_.send(200, "application/json", storage.listJson("/REC")); }
 
 void WebUi::handleMessage() {
+  if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
   if (server_.contentLength() > Config::MAX_WEB_BODY) {
     server_.send(413, "text/plain", "payload too large");
     return;
@@ -323,6 +340,7 @@ void WebUi::handleMessage() {
 }
 
 void WebUi::handleSos() {
+  if (!rateLimit(lastSosMs_, Config::SOS_RATE_LIMIT_MS)) return;
   const String raw = server_.arg("on");
   if (raw == "0") {
     StateLock lock(gState);
@@ -344,6 +362,7 @@ void WebUi::handleSos() {
 }
 
 void WebUi::handlePtt() {
+  if (!rateLimit(lastPttMs_, Config::WEB_RATE_LIMIT_MS)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid ptt");
@@ -482,6 +501,7 @@ void WebUi::handleTrack() {
 }
 
 void WebUi::handleConfig() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
   RuntimeConfig candidate = gConfig;
   bool radioChanged = false;
 
@@ -571,11 +591,13 @@ void WebUi::handleConfig() {
     candidate.batteryCalibration = value;
   }
   if (server_.hasArg("callsign")) candidate.callsign = server_.arg("callsign");
+  if (server_.hasArg("lora_key")) candidate.loraKeyHex = server_.arg("lora_key");
   if (server_.hasArg("ap_password")) candidate.apPassword = server_.arg("ap_password");
   if (server_.hasArg("web_password")) candidate.webPassword = server_.arg("web_password");
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
+      candidate.loraKeyHex.length() != 32 ||
       candidate.apPassword.length() > 63 || candidate.webPassword.length() > 63 ||
       candidate.apSsid.isEmpty() || candidate.webUser.isEmpty() ||
       candidate.webPassword.length() < 8 || candidate.apPassword.length() < 8 ||
@@ -640,6 +662,40 @@ void WebUi::handleAudioSource() {
 }
 
 void WebUi::handleOta() {
-  server_.send(Config::OTA_ENABLED ? 501 : 403, "text/plain",
-               Config::OTA_ENABLED ? "OTA transport not implemented" : "OTA disabled");
+  if (!Config::OTA_ENABLED) {
+    server_.send(403, "text/plain", "OTA disabled");
+    return;
+  }
+  if (Update.hasError()) {
+    server_.send(500, "text/plain", "OTA failed");
+    return;
+  }
+  server_.send(200, "text/plain", "OTA uploaded; rebooting");
+  delay(100);
+  ESP.restart();
+}
+
+void WebUi::handleOtaUpload() {
+  if (!Config::OTA_ENABLED) return;
+  HTTPUpload& upload = server_.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    if (gState.ptt || gState.recording || gState.playing) {
+      Update.abort();
+      return;
+    }
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) return;
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize)
+      Update.abort();
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (!Update.end(true)) Update.abort();
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+  }
+}
+
+void WebUi::handleReboot() {
+  server_.send(200, "text/plain", "rebooting");
+  delay(100);
+  ESP.restart();
 }

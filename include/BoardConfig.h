@@ -37,10 +37,14 @@ constexpr int GNSS_RX = 18; // ESP32-S3 RX <- NEO-M8N TX
 constexpr int GNSS_TX = 17; // ESP32-S3 TX -> NEO-M8N RX
 constexpr uint32_t GNSS_BAUD = 9600;
 
-// The supplied PCB mapping has no dedicated button or battery ADC.
-constexpr int BTN_PTT = -1;
-constexpr int BTN_SOS = -1;
-constexpr int BATTERY_ADC = -1;
+// Auxiliary controls are assigned to currently-unused ESP32-S3-WROOM GPIOs.
+// These nets MUST be routed on the PCB revision; they are not present in the
+// supplied PCB mapping. Active-low buttons use internal pull-ups.
+// GPIO47/48 are used only for auxiliary status I/O in this firmware.
+constexpr int BTN_PTT = 21;
+constexpr int BTN_SOS = 47;
+constexpr int BATTERY_ADC = 1;
+constexpr int STATUS_LED = 48;
 
 // ESP32-S3 native USB uses GPIO19=D- and GPIO20=D+.
 constexpr int USB_D_MINUS = 19;

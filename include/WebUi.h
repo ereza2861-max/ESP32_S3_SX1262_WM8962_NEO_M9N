@@ -14,6 +14,10 @@ private:
   uint32_t authWindowStartMs_ = 0;
   uint8_t authFailures_ = 0;
   uint32_t authBlockedUntilMs_ = 0;
+  uint32_t lastMessageMs_ = 0;
+  uint32_t lastSosMs_ = 0;
+  uint32_t lastPttMs_ = 0;
+  uint32_t lastConfigMs_ = 0;
   void handleRoot();
   void handleStatus();
   void handleFiles();
@@ -35,6 +39,9 @@ private:
   void handleDelete();
   void handleTrack();
   void handleOta();
+  void handleOtaUpload();
+  void handleReboot();
+  bool rateLimit(uint32_t& last, uint32_t interval);
   void handleConfig();
   void handleAudioSource();
 };

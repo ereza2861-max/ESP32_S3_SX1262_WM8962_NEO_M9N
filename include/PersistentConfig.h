@@ -12,6 +12,7 @@ struct RuntimeConfig {
   uint8_t audioRecordSource;
   float batteryCalibration;
   String callsign;
+  String loraKeyHex;
   String apSsid;
   String apPassword;
   String webUser;

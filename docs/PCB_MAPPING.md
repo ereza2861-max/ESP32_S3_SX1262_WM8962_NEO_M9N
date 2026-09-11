@@ -19,3 +19,16 @@ Mapping berikut adalah target mapping firmware ESP32-S3 dan harus tetap identik 
 Tidak ada pin dedicated button/PTT/SOS atau battery ADC pada mapping yang diberikan,
 sehingga kontrol PTT/SOS dipertahankan melalui web API dan dapat ditambahkan kemudian
 melalui GPIO yang benar-benar dirutekan pada revisi PCB.
+
+
+## Auxiliary field controls (required PCB reroute)
+
+The supplied PCB has no routed PTT/SOS/battery/LED nets. The firmware patch assigns:
+- GPIO21: PTT, active-low with INPUT_PULLUP
+- GPIO47: SOS, active-low with INPUT_PULLUP
+- GPIO1: battery ADC input
+- GPIO48: status LED output
+
+These assignments are firmware-safe only if the PCB revision actually routes those
+nets and does not reuse them elsewhere. Do not install this mapping onto the
+existing unrouted PCB and expect the controls to work.

@@ -26,6 +26,10 @@ constexpr char AP_SSID[] = FIELDRADIO_AP_SSID;
 constexpr char AP_PASSWORD[] = FIELDRADIO_AP_PASSWORD;
 constexpr char WEB_USER[] = FIELDRADIO_WEB_USER;
 constexpr char WEB_PASSWORD[] = FIELDRADIO_WEB_PASSWORD;
+#ifndef FIELDRADIO_LORA_KEY_HEX
+#define FIELDRADIO_LORA_KEY_HEX ""
+#endif
+constexpr char LORA_KEY_HEX[] = FIELDRADIO_LORA_KEY_HEX;
 // Credentials are supplied only by an ignored LocalConfig.h or build environment.
 // An empty/default credential set keeps the network service disabled.
 constexpr bool CREDENTIALS_CONFIGURED =
@@ -51,6 +55,14 @@ constexpr uint8_t LORA_DUTY_CYCLE_PERCENT = 1;
 constexpr char LORA_DEFAULT_CALLSIGN[] = "FIELD";
 constexpr uint16_t LORA_PREAMBLE = 8;
 constexpr size_t LORA_MAX_PACKET = 220;
+constexpr bool LORA_REQUIRE_ENCRYPTION = true;
+constexpr uint8_t LORA_PROTOCOL_VERSION = 1;
+constexpr uint8_t LORA_TAG_BYTES = 8;
+constexpr int16_t VOICE_RSSI_THRESHOLD_DBM = -115;
+constexpr int8_t VOICE_SNR_THRESHOLD_DB = -12;
+constexpr uint32_t RX_ACTIVITY_HOLD_MS = 250;
+constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
+constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 
 // WM8960/ESP32-S3 I2S audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
@@ -97,6 +109,12 @@ constexpr size_t PLAYBACK_PREBUFFER_BYTES = 16384;
 constexpr size_t USB_TRANSPORT_BUFFER_BYTES = 16384;
 constexpr uint8_t PLAYBACK_QUEUE_DEPTH = 16;
 constexpr uint32_t RECORD_SPLIT_SECONDS = 300;
+constexpr uint32_t RECORD_MAX_SECONDS = 300;
+constexpr uint32_t RECORD_MIN_FREE_BYTES = 2UL * 1024UL * 1024UL;
+constexpr uint32_t RECORD_MAX_TOTAL_BYTES = 512UL * 1024UL * 1024UL;
+constexpr uint32_t TRACK_LOG_PERIOD_MS = 10000;
+constexpr uint32_t WIFI_AP_IDLE_TIMEOUT_MS = 600000UL;
+constexpr uint32_t WIFI_AP_RETRY_MS = 30000UL;
 constexpr float VOX_THRESHOLD = 0.08f;
 constexpr uint32_t VOX_HANG_MS = 700;
 constexpr uint32_t VOICE_FRAME_MS = 20;

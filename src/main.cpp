@@ -5,6 +5,8 @@
 #include <SPI.h>
 #include <esp_task_wdt.h>
 #include <esp_sleep.h>
+#include <esp_system.h>
+#include <freertos/task.h>
 #include "BoardConfig.h"
 #include "Config.h"
 #include "AppState.h"
@@ -27,6 +29,12 @@ static uint32_t lastReport = 0;
 static uint32_t lastSos = 0;
 static uint32_t lastBatterySample = 0;
 static uint32_t criticalBatterySince = 0;
+static bool lastPttButton = false;
+static bool lastSosButton = false;
+static uint32_t wifiIdleSince = 0;
+static uint32_t wifiRetryMs = 0;
+static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0;
+static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr;
 
 static void watchdogInit() {
   esp_task_wdt_config_t cfg{};
@@ -141,6 +149,7 @@ static void taskGnss(void*) {
   for (;;) {
     esp_task_wdt_reset();
     gnss.task();
+    ++hbGnss;
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -150,6 +159,7 @@ static void taskLoRa(void*) {
   for (;;) {
     esp_task_wdt_reset();
     lora.task();
+    ++hbLoRa;
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -159,6 +169,7 @@ static void taskAudio(void*) {
   for (;;) {
     esp_task_wdt_reset();
     audio.task();
+    ++hbAudio;
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
@@ -168,7 +179,102 @@ static void taskWeb(void*) {
   for (;;) {
     esp_task_wdt_reset();
     web.task();
+    ++hbWeb;
     vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+
+static void handlePhysicalControls(uint32_t now) {
+  const bool pttPressed = Board::BTN_PTT >= 0 && digitalRead(Board::BTN_PTT) == LOW;
+  const bool sosPressed = Board::BTN_SOS >= 0 && digitalRead(Board::BTN_SOS) == LOW;
+
+  if (pttPressed != lastPttButton) {
+    lastPttButton = pttPressed;
+    if (pttPressed) {
+      (void)audio.playTone(1000, 60);
+      if (audio.startRecording()) {
+        StateLock lock(gState);
+        if (lock.ok()) gState.ptt = true;
+      }
+    } else {
+      (void)audio.stopRecording();
+      StateLock lock(gState);
+      if (lock.ok()) gState.ptt = false;
+      (void)audio.playTone(700, 60);
+    }
+  }
+
+  if (sosPressed && !lastSosButton) {
+    lastSosButton = true;
+    if (lora.sendSOS()) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.sos = true;
+    }
+    (void)audio.playTone(1400, 150);
+  } else if (!sosPressed) {
+    lastSosButton = false;
+  }
+
+  bool tx = false, rx = false, rec = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      tx = gState.ptt;
+      rx = gState.rxActive;
+      rec = gState.recording;
+      if (rx && now - gState.rxActivityMs > Config::RX_ACTIVITY_HOLD_MS) gState.rxActive = false;
+    }
+  }
+  if (Board::STATUS_LED >= 0)
+    digitalWrite(Board::STATUS_LED, (tx || rec || rx) ? HIGH : LOW);
+}
+
+static void manageWifi(uint32_t now) {
+  if (WiFi.getMode() != WIFI_AP) return;
+  if (WiFi.softAPgetStationNum() > 0) {
+    wifiIdleSince = now;
+    return;
+  }
+  if (!wifiIdleSince) wifiIdleSince = now;
+  if (now - wifiIdleSince >= Config::WIFI_AP_IDLE_TIMEOUT_MS) {
+    WiFi.softAPdisconnect(true);
+    StateLock lock(gState);
+    if (lock.ok()) gState.wifiReady = false;
+  }
+  if (WiFi.getMode() == WIFI_OFF && now - wifiRetryMs >= Config::WIFI_AP_RETRY_MS) {
+    wifiRetryMs = now;
+    setupWifi();
+  }
+}
+
+
+static void taskHealth(void*) {
+  watchdogSubscribe();
+  uint32_t last[4] = {0, 0, 0, 0};
+  uint32_t lastCheck = millis();
+  for (;;) {
+    esp_task_wdt_reset();
+    const uint32_t now = millis();
+    if (now - lastCheck >= 5000) {
+      const uint32_t hb[4] = {hbGnss, hbLoRa, hbAudio, hbWeb};
+      bool stalled = false;
+      for (size_t i = 0; i < 4; ++i) {
+        if (hb[i] == last[i]) stalled = true;
+        last[i] = hb[i];
+      }
+      StateLock lock(gState);
+      if (lock.ok()) {
+        gState.heapFree = ESP.getFreeHeap();
+        gState.gnssStackMin = hGnss ? uxTaskGetStackHighWaterMark(hGnss) : 0;
+        gState.loraStackMin = hLoRa ? uxTaskGetStackHighWaterMark(hLoRa) : 0;
+        gState.audioStackMin = hAudio ? uxTaskGetStackHighWaterMark(hAudio) : 0;
+        gState.webStackMin = hWeb ? uxTaskGetStackHighWaterMark(hWeb) : 0;
+        if (stalled) gState.healthAlerts++;
+      }
+      lastCheck = now;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
@@ -189,6 +295,9 @@ void setup() {
   SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
 
 #if defined(ARDUINO_ARCH_ESP32)
+  if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLUP);
+  if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLUP);
+  if (Board::STATUS_LED >= 0) pinMode(Board::STATUS_LED, OUTPUT);
   if (Board::BATTERY_ADC >= 0) {
     pinMode(Board::BATTERY_ADC, INPUT);
     analogSetPinAttenuation(Board::BATTERY_ADC, ADC_11db);
@@ -207,10 +316,11 @@ void setup() {
   const bool usbAudioOk = audio.usbStart();
 
   bool tasksOk = true;
-  tasksOk &= (xTaskCreatePinnedToCore(taskGnss, "GNSS", 4096, nullptr, 3, nullptr, 1) == pdPASS);
-  tasksOk &= (xTaskCreatePinnedToCore(taskLoRa, "LoRa", 12288, nullptr, 4, nullptr, 1) == pdPASS);
-  tasksOk &= (xTaskCreatePinnedToCore(taskAudio, "Audio", 8192, nullptr, 5, nullptr, 0) == pdPASS);
-  tasksOk &= (xTaskCreatePinnedToCore(taskWeb, "Web", 6144, nullptr, 2, nullptr, 0) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskGnss, "GNSS", 4096, nullptr, 3, &hGnss, 1) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskLoRa, "LoRa", 12288, nullptr, 4, &hLoRa, 1) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskAudio, "Audio", 8192, nullptr, 5, &hAudio, 0) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskWeb, "Web", 6144, nullptr, 2, &hWeb, 0) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskHealth, "Health", 4096, nullptr, 1, nullptr, 0) == pdPASS);
 
   if (!tasksOk) {
     StateLock lock(gState);
@@ -236,6 +346,8 @@ void loop() {
   esp_task_wdt_reset();
   const uint32_t now = millis();
   updateBattery(now);
+  handlePhysicalControls(now);
+  manageWifi(now);
 
   if (now - lastStatus >= Config::STATUS_PERIOD_MS) {
     lastStatus = now;

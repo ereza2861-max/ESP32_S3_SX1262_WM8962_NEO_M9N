@@ -13,6 +13,7 @@ RuntimeConfig gConfig{
     Config::AUDIO_SOURCE_WM8960_MIC,
     1.0f,
     Config::LORA_DEFAULT_CALLSIGN,
+    Config::LORA_KEY_HEX,
     Config::AP_SSID,
     Config::AP_PASSWORD,
     Config::WEB_USER,
@@ -27,6 +28,16 @@ constexpr float MAX_BW_KHZ = 250.0f;
 
 bool validCredential(const String& value, size_t maxLen) {
   return !value.isEmpty() && value.length() <= maxLen;
+}
+
+bool validHexKey(const String& value) {
+  if (value.length() != 32) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
 }
 
 bool validCallsign(const String& value) {
@@ -65,6 +76,7 @@ void RuntimeConfig::load() {
   const uint8_t savedAudioSource = prefs.getUChar("audsrc", audioRecordSource);
   const float battery = prefs.getFloat("batcal", batteryCalibration);
   const String callsignValue = prefs.getString("callsign", callsign);
+  const String loraKeyValue = prefs.getString("lorakey", loraKeyHex);
   const String apSsidValue = prefs.getString("apssid", apSsid);
   const String apPasswordValue = prefs.getString("appass", apPassword);
   const String webUserValue = prefs.getString("webuser", webUser);
@@ -82,6 +94,7 @@ void RuntimeConfig::load() {
   candidate.audioRecordSource = savedAudioSource;
   candidate.batteryCalibration = battery;
   candidate.callsign = callsignValue;
+  candidate.loraKeyHex = loraKeyValue;
   candidate.apSsid = apSsidValue;
   candidate.apPassword = apPasswordValue;
   candidate.webUser = webUserValue;
@@ -104,6 +117,7 @@ void RuntimeConfig::load() {
       candidate.batteryCalibration <= 1.5f)
     batteryCalibration = candidate.batteryCalibration;
   if (validCallsign(candidate.callsign)) callsign = candidate.callsign;
+  if (validHexKey(candidate.loraKeyHex)) loraKeyHex = candidate.loraKeyHex;
   if (validCredential(candidate.apSsid, 32)) apSsid = candidate.apSsid;
   if (candidate.apPassword.length() <= 63) apPassword = candidate.apPassword;
   if (validCredential(candidate.webUser, 32)) webUser = candidate.webUser;
@@ -114,7 +128,7 @@ bool RuntimeConfig::save() const {
   if (!validRadio() || volume > 100 || audioRecordSource > Config::AUDIO_SOURCE_USB ||
       !isfinite(batteryCalibration) ||
       batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
-      !validCallsign(callsign) || apSsid.isEmpty() || apSsid.length() > 32 ||
+!validCallsign(callsign) || !validHexKey(loraKeyHex) || apSsid.isEmpty() || apSsid.length() > 32 ||
       apPassword.length() > 63 || webUser.isEmpty() || webUser.length() > 32 ||
       webPassword.length() > 63)
     return false;
@@ -131,6 +145,7 @@ bool RuntimeConfig::save() const {
             prefs.putUChar("audsrc", audioRecordSource) &&
             prefs.putFloat("batcal", batteryCalibration) &&
             prefs.putString("callsign", callsign) > 0 &&
+            prefs.putString("lorakey", loraKeyHex) > 0 &&
             prefs.putString("apssid", apSsid) > 0 &&
             prefs.putString("appass", apPassword) > 0 &&
             prefs.putString("webuser", webUser) > 0 &&

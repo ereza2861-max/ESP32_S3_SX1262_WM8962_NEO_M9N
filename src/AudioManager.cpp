@@ -10,6 +10,8 @@
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_types.h>
 #include <esp_log.h>
+#include "StorageManager.h"
+extern StorageManager storage;
 
 static const i2s_port_t AUDIO_I2S_PORT = I2S_NUM_0;
 static WM8960 codec;
@@ -303,6 +305,12 @@ bool AudioManager::startRecording() {
   String path;
   String error;
   if (allowed) {
+    if (!storage.prepareRecordingSpace(Config::RECORD_MIN_FREE_BYTES)) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Insufficient SD recording space";
+      xSemaphoreGive(mutex_);
+      return false;
+    }
     {
       SpiLock spiLock(pdMS_TO_TICKS(100));
       if (!spiLock.ok()) {
@@ -632,13 +640,23 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
 
 
 bool AudioManager::playVoiceFrame(const uint8_t* data, size_t len) {
-  if (!data || len != 164 || data[0] != 0x56 || data[1] != 1 ||
+  if (!data || len != 166 || data[0] != 0x56 || data[1] != 1 ||
       data[2] != Config::VOICE_FRAME_MS || !initialized_ || !i2sMutex_) return false;
+  const uint16_t expectedCrc = static_cast<uint16_t>(data[164]) |
+                               (static_cast<uint16_t>(data[165]) << 8);
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < 164; ++i) {
+    crc ^= data[i];
+    for (uint8_t b = 0; b < 8; ++b)
+      crc = (crc & 1) ? static_cast<uint16_t>((crc >> 1) ^ 0xA001) :
+                        static_cast<uint16_t>(crc >> 1);
+  }
+  if (crc != expectedCrc) return false;
   constexpr size_t outFrames = (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
   int16_t pcm[outFrames * Config::AUDIO_CHANNELS];
   for (size_t i = 0; i < outFrames; ++i) {
     const size_t src = min<size_t>(159, (i * 8000U) / Config::AUDIO_SAMPLE_RATE);
-    const int16_t sample = mulawToPcm16(data[4 + src]);
+    const int16_t sample = mulawToPcm16(data[6 + src]);
     pcm[i * 2] = sample;
     pcm[i * 2 + 1] = sample;
   }
@@ -1574,7 +1592,7 @@ void AudioManager::task() {
   }
 
   if (!recordingPaused_ &&
-      millis() - recordStartedMs_ >= Config::RECORD_SPLIT_SECONDS * 1000UL) {
+      millis() - recordStartedMs_ >= min(Config::RECORD_SPLIT_SECONDS, Config::RECORD_MAX_SECONDS) * 1000UL) {
     xSemaphoreGive(mutex_);
     (void)splitRecording();
     return;

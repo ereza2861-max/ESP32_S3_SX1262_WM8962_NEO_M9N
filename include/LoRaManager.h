@@ -24,11 +24,20 @@ private:
   SemaphoreHandle_t mutex_ = nullptr;
   static LoRaManager* instance_;
   static void onDio0();
-  bool transmitLocked(const String& text);
+  bool transmit(const String& text, bool alreadyEncrypted = false);
   bool consumeDutyBudget(uint32_t airtimeUs);
   void refillDutyBudget();
   uint64_t dutyTokensUs_ = 0;
   uint32_t lastDutyRefillMs_ = 0;
   uint32_t lastVoiceTxMs_ = 0;
   uint16_t voiceSequence_ = 0;
+  uint16_t lastVoiceRxSequence_ = 0;
+  bool haveVoiceRxSequence_ = false;
+  uint16_t txSequence_ = 0;
+  bool encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
+                     uint16_t seq, String& packet);
+  bool decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,
+                     uint8_t* plain, size_t capacity, size_t& len);
+  bool loadKey(uint8_t key[16]) const;
+  static uint16_t crc16(const uint8_t* data, size_t len);
 };

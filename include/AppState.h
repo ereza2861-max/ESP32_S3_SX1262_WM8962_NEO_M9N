@@ -31,6 +31,10 @@ struct RuntimeState {
   bool usbAudioReady = false;
   bool usbAudioActive = false;
   bool loraReady = false;
+  bool rxActive = false;
+  uint32_t rxActivityMs = 0;
+  int16_t loraRssi = -127;
+  float loraSnr = -20.0f;
   bool wifiReady = false;
   bool storageReady = false;
   bool codecReady = false;
@@ -59,6 +63,13 @@ struct RuntimeState {
   uint32_t voiceTxPackets = 0;
   uint32_t voiceRxPackets = 0;
   uint32_t voiceDrops = 0;
+  uint32_t voiceRxLost = 0;
+  uint32_t healthAlerts = 0;
+  uint32_t heapFree = 0;
+  uint32_t audioStackMin = 0;
+  uint32_t loraStackMin = 0;
+  uint32_t gnssStackMin = 0;
+  uint32_t webStackMin = 0;
 };
 
 extern RuntimeState gState;

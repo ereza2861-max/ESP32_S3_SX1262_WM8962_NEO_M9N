@@ -97,3 +97,40 @@ bool StorageManager::removeFile(const String& path) {
   f.close();
   return SD.remove(path);
 }
+
+bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
+  if (!ready_) return false;
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) return false;
+  if (!SD.exists("/REC") && !SD.mkdir("/REC")) return false;
+  const uint64_t total = SD.totalBytes();
+  const uint64_t used = SD.usedBytes();
+  if (total == 0 || used > total) return false;
+
+  const uint64_t maxUsed = min<uint64_t>(total, Config::RECORD_MAX_TOTAL_BYTES);
+  uint64_t effectiveUsed = used;
+  while (effectiveUsed + requiredBytes > maxUsed ||
+         total - effectiveUsed < Config::RECORD_MIN_FREE_BYTES + requiredBytes) {
+    File dir = SD.open("/REC");
+    if (!dir || !dir.isDirectory()) return false;
+
+    String oldest;
+    uint32_t oldestSize = 0;
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+      if (!f.isDirectory()) {
+        const String name = f.name();
+        if (name.startsWith("/REC/") && name.endsWith(".WAV") &&
+            (oldest.isEmpty() || name.compareTo(oldest) < 0)) {
+          oldest = name;
+          oldestSize = static_cast<uint32_t>(f.size());
+        }
+      }
+      f.close();
+    }
+    dir.close();
+    if (oldest.isEmpty()) return false;
+    if (!SD.remove(oldest)) return false;
+    effectiveUsed = effectiveUsed > oldestSize ? effectiveUsed - oldestSize : 0;
+  }
+  return true;
+}

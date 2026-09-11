@@ -43,7 +43,10 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 - Basic-auth untuk endpoint web.
 - Safe path validation untuk file deletion/playback.
 - FreeRTOS task separation.
-- OTA endpoint tetap disabled sampai implementasi signed OTA ditambahkan.
+- Physical PTT/SOS, battery ADC, status LED, RX squelch and RX/TX audio feedback.
+- Authenticated AES-128-CTR + HMAC-SHA256 LoRa payloads with voice sequence/CRC.
+- SD track logging and recording-space rotation.
+- Rate-limited web control and reboot/OTA transport (OTA remains disabled by default).
 
 ## Catatan migrasi ESP32-S3 dan USB audio
 
