@@ -13,7 +13,8 @@ extern AudioManager audio;
 
 namespace {
 constexpr uint8_t PACKET_MAGIC = 0xF1;
-constexpr size_t PACKET_HEADER = 1 + 1 + 1 + 2 + 4;
+constexpr size_t PACKET_HEADER_V1 = 1 + 1 + 1 + 2 + 4;
+constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
 constexpr size_t PACKET_TAG = Config::LORA_TAG_BYTES;
 
 bool hexByte(const char* p, uint8_t& out) {
@@ -97,17 +98,23 @@ uint16_t LoRaManager::crc16(const uint8_t* data, size_t len) {
 bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
                                 uint16_t seq, String& packet) {
   uint8_t key[16];
-  if (!plain || !loadKey(key) || len + PACKET_HEADER + PACKET_TAG > Config::LORA_MAX_PACKET)
+  if (!plain || !loadKey(key) ||
+      len + PACKET_HEADER_V2 + PACKET_TAG > Config::LORA_MAX_PACKET)
     return false;
 
-  uint32_t nonce = esp_random();
-  packet.reserve(PACKET_HEADER + len + PACKET_TAG);
+  const uint32_t nonce = esp_random();
+  const uint8_t ttl = Config::LORA_INITIAL_TTL;
+  packet.reserve(PACKET_HEADER_V2 + len + PACKET_TAG);
   packet += static_cast<char>(PACKET_MAGIC);
   packet += static_cast<char>(Config::LORA_PROTOCOL_VERSION);
   packet += static_cast<char>(type);
   packet += static_cast<char>(seq & 0xFF);
   packet += static_cast<char>(seq >> 8);
-  for (uint8_t i = 0; i < 4; ++i) packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+  packet += static_cast<char>(ttl);
 
   uint8_t iv[16] = {};
   memcpy(iv, &nonce, sizeof(nonce));
@@ -121,26 +128,46 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
             mbedtls_aes_crypt_ctr(&aes, len, &ncOff, iv, streamBlock,
                                   plain, cipher) == 0;
   if (ok) {
-    for (size_t i = 0; i < len; ++i) packet += static_cast<char>(cipher[i]);
+    for (size_t i = 0; i < len; ++i)
+      packet += static_cast<char>(cipher[i]);
     unsigned char tag[32] = {};
     const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     ok = md && mbedtls_md_hmac(md, key, sizeof(key),
                                reinterpret_cast<const unsigned char*>(packet.c_str()),
-                               PACKET_HEADER + len, tag, sizeof(tag)) == 0;
-    if (ok) for (size_t i = 0; i < PACKET_TAG; ++i) packet += static_cast<char>(tag[i]);
+                               PACKET_HEADER_V2 + len, tag, sizeof(tag)) == 0;
+    if (ok)
+      for (size_t i = 0; i < PACKET_TAG; ++i)
+        packet += static_cast<char>(tag[i]);
   }
   mbedtls_aes_free(&aes);
   return ok;
 }
 
 bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,
+                                uint32_t& sourceId, uint8_t& ttl,
                                 uint8_t* plain, size_t capacity, size_t& len) {
   len = 0;
-  if (packet.length() < PACKET_HEADER + PACKET_TAG ||
-      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC ||
-      static_cast<uint8_t>(packet[1]) != Config::LORA_PROTOCOL_VERSION)
+  sourceId = 0;
+  ttl = 0;
+  size_t headerLen = 0;
+
+  if (packet.length() < PACKET_HEADER_V1 + PACKET_TAG ||
+      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC)
     return false;
-  const size_t cipherLen = packet.length() - PACKET_HEADER - PACKET_TAG;
+
+  const uint8_t version = static_cast<uint8_t>(packet[1]);
+  if (version == Config::LORA_PROTOCOL_VERSION) {
+    if (packet.length() < PACKET_HEADER_V2 + PACKET_TAG) return false;
+    headerLen = PACKET_HEADER_V2;
+    memcpy(&sourceId, packet.c_str() + PACKET_HEADER_V1, sizeof(sourceId));
+    ttl = static_cast<uint8_t>(packet[PACKET_HEADER_V1 + sizeof(sourceId)]);
+  } else if (version == Config::LORA_LEGACY_PROTOCOL_VERSION) {
+    headerLen = PACKET_HEADER_V1;
+  } else {
+    return false;
+  }
+
+  const size_t cipherLen = packet.length() - headerLen - PACKET_TAG;
   if (!plain || cipherLen > capacity) return false;
 
   uint8_t key[16];
@@ -155,9 +182,10 @@ bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& s
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, key, sizeof(key),
       reinterpret_cast<const unsigned char*>(packet.c_str()),
-      PACKET_HEADER + cipherLen, expected, sizeof(expected)) != 0) return false;
+      headerLen + cipherLen, expected, sizeof(expected)) != 0)
+    return false;
 
-  const uint8_t* got = reinterpret_cast<const uint8_t*>(packet.c_str()) + PACKET_HEADER + cipherLen;
+  const uint8_t* got = reinterpret_cast<const uint8_t*>(packet.c_str()) + headerLen + cipherLen;
   uint8_t diff = 0;
   for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ got[i];
   if (diff != 0) return false;
@@ -171,17 +199,194 @@ bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& s
   mbedtls_aes_init(&aes);
   const bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
       mbedtls_aes_crypt_ctr(&aes, cipherLen, &ncOff, iv, streamBlock,
-          reinterpret_cast<const unsigned char*>(packet.c_str()) + PACKET_HEADER, plain) == 0;
+          reinterpret_cast<const unsigned char*>(packet.c_str()) + headerLen, plain) == 0;
   mbedtls_aes_free(&aes);
   if (!ok) return false;
   len = cipherLen;
+
   return true;
 }
+
+uint32_t LoRaManager::hashPayload(const uint8_t* data, size_t len) {
+  uint32_t hash = 2166136261UL;
+  if (!data) return 0;
+  for (size_t i = 0; i < len; ++i) {
+    hash ^= data[i];
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
+uint32_t LoRaManager::sourceIdFromCallsign(const String& callsign) {
+  const uint32_t hash = hashPayload(
+      reinterpret_cast<const uint8_t*>(callsign.c_str()), callsign.length());
+  return hash ? hash : 1;
+}
+
+bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint32_t payloadHash) {
+  const uint32_t now = millis();
+  for (size_t i = 0; i < DEDUP_CACHE_SIZE; ++i) {
+    DedupEntry& entry = dedupCache_[i];
+    if (entry.seenMs == 0) continue;
+    if (now - entry.seenMs >= Config::LORA_DEDUP_TTL_MS) {
+      entry.seenMs = 0;
+      continue;
+    }
+    if (entry.sourceId == sourceId && entry.seq == seq &&
+        entry.payloadHash == payloadHash) {
+      entry.seenMs = now;
+      return true;
+    }
+  }
+
+  DedupEntry& slot = dedupCache_[dedupNext_];
+  slot.sourceId = sourceId;
+  slot.seq = seq;
+  slot.payloadHash = payloadHash;
+  slot.seenMs = now;
+  dedupNext_ = (dedupNext_ + 1) % DEDUP_CACHE_SIZE;
+  return false;
+}
+
+bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
+                                  uint8_t ttl, const uint8_t* payload, size_t len) {
+  if (!forwardQueue_ || !payload || !len ||
+      len > Config::LORA_MAX_PACKET || ttl <= 1) return false;
+
+  ForwardPacket packet{};
+  packet.type = type;
+  packet.ttl = static_cast<uint8_t>(ttl - 1);
+  packet.seq = seq;
+  packet.sourceId = sourceId;
+  packet.dedupId = hashPayload(payload, len) ^ sourceId ^
+                   (static_cast<uint32_t>(seq) << 16);
+  packet.receivedMs = millis();
+  packet.len = static_cast<uint16_t>(len);
+  memcpy(packet.payload, payload, len);
+  return xQueueSend(forwardQueue_, &packet, 0) == pdPASS;
+}
+
+bool LoRaManager::isPttOrRecording() const {
+  StateLock lock(gState);
+  return !lock.ok() || gState.ptt || gState.recording;
+}
+
+bool LoRaManager::transmitForward(const ForwardPacket& forward) {
+  if (!ready_ || !mutex_ || !forward.len || forward.ttl == 0 ||
+      forward.len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG ||
+      isPttOrRecording())
+    return false;
+
+  String packet;
+  uint8_t key[16];
+  if (!loadKey(key)) return false;
+
+  // Rebuild the authenticated v2 envelope while preserving the original
+  // source ID and sequence. The nonce changes, so the forwarded ciphertext
+  // cannot be replayed verbatim at the next hop.
+  const uint32_t nonce = esp_random();
+  packet.reserve(PACKET_HEADER_V2 + forward.len + PACKET_TAG);
+  packet += static_cast<char>(PACKET_MAGIC);
+  packet += static_cast<char>(Config::LORA_PROTOCOL_VERSION);
+  packet += static_cast<char>(forward.type);
+  packet += static_cast<char>(forward.seq & 0xFF);
+  packet += static_cast<char>(forward.seq >> 8);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((forward.sourceId >> (8 * i)) & 0xFF);
+  packet += static_cast<char>(forward.ttl);
+
+  uint8_t iv[16] = {};
+  memcpy(iv, &nonce, sizeof(nonce));
+  memcpy(iv + 4, &forward.seq, sizeof(forward.seq));
+  uint8_t streamBlock[16] = {};
+  uint8_t cipher[Config::LORA_MAX_PACKET] = {};
+  size_t ncOff = 0;
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
+            mbedtls_aes_crypt_ctr(&aes, forward.len, &ncOff, iv, streamBlock,
+                                  forward.payload, cipher) == 0;
+  if (ok) {
+    for (size_t i = 0; i < forward.len; ++i)
+      packet += static_cast<char>(cipher[i]);
+    unsigned char tag[32] = {};
+    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    ok = md && mbedtls_md_hmac(md, key, sizeof(key),
+        reinterpret_cast<const unsigned char*>(packet.c_str()),
+        PACKET_HEADER_V2 + forward.len, tag, sizeof(tag)) == 0;
+    if (ok)
+      for (size_t i = 0; i < PACKET_TAG; ++i)
+        packet += static_cast<char>(tag[i]);
+  }
+  mbedtls_aes_free(&aes);
+  if (!ok) return false;
+
+  // Keep forwarding serialized with normal TX. The pending TX state machine
+  // performs CAD/backoff and preserves this already-built forwarding envelope.
+  if (Config::LORA_LBT_ENABLED) {
+    if (pendingTx_.active || !queuePendingTx(packet)) return false;
+    (void)processPendingTx();
+    return true;
+  }
+
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+  int16_t st = RADIOLIB_ERR_NONE;
+  int16_t rxSt = RADIOLIB_ERR_NONE;
+  bool budgetConsumed = false;
+  RadioLibTime_t airtimeUs = 0;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(1000));
+    if (spiLock.ok()) {
+      airtimeUs = radio_.getTimeOnAir(packet.length());
+      if (airtimeUs != 0 && airtimeUs <= UINT32_MAX &&
+          consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
+        budgetConsumed = true;
+        const uint32_t txStartMs = millis();
+        st = radio_.transmit(packet);
+        if (millis() - txStartMs > Config::LORA_TX_TIMEOUT_MS)
+          st = RADIOLIB_ERR_TX_TIMEOUT;
+        rxSt = radio_.startReceive();
+        if (st != RADIOLIB_ERR_NONE)
+          dutyTokensUs_ = min(
+              (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
+               Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL,
+              dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
+      } else {
+        st = -1;
+      }
+    } else {
+      st = -1;
+    }
+  }
+
+  const bool txOk = budgetConsumed && st == RADIOLIB_ERR_NONE;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      if (!txOk && st == -1)
+        gState.lastError = "LoRa forward duty budget unavailable";
+      if (rxSt != RADIOLIB_ERR_NONE) {
+        ready_ = false;
+        gState.loraReady = false;
+        gState.lastError = "SX1276 RX restart failed after forward";
+      }
+      if (txOk) gState.txPackets++;
+    }
+  }
+  xSemaphoreGive(mutex_);
+  return txOk;
+}
+
 
 bool LoRaManager::begin() {
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
-  if (!mutex_) return false;
+  forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
+                                     forwardQueueStorage_, &forwardQueueStruct_);
+  sourceId_ = sourceIdFromCallsign(gConfig.callsign);
+  if (!mutex_ || !forwardQueue_) return false;
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
@@ -222,14 +427,15 @@ bool LoRaManager::begin() {
 void LoRaManager::task() {
   if (!mutex_) return;
 
+  (void)processPendingTx();
+
   bool ptt = false;
   {
     StateLock lock(gState);
     if (lock.ok()) ptt = gState.ptt;
   }
   if (ptt && millis() - lastVoiceTxMs_ >= Config::VOICE_FRAME_MS) {
-    lastVoiceTxMs_ = millis();
-    (void)sendVoiceFrame();
+    if (sendVoiceFrame()) lastVoiceTxMs_ = millis();
   }
 
   if (!ready_) {
@@ -279,6 +485,13 @@ void LoRaManager::task() {
 
   if (!pending) {
     xSemaphoreGive(mutex_);
+    if (!isPttOrRecording() &&
+        millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
+      ForwardPacket forward{};
+      if (forwardQueue_ && xQueueReceive(forwardQueue_, &forward, 0) == pdPASS) {
+        if (transmitForward(forward)) lastForwardTxMs_ = millis();
+      }
+    }
     return;
   }
 
@@ -305,8 +518,13 @@ void LoRaManager::task() {
     uint8_t plain[220] = {};
     uint8_t type = 0;
     uint16_t seq = 0;
+    uint32_t rxSourceId = 0;
+    uint8_t rxTtl = 0;
     size_t plainLen = 0;
-    const bool authenticated = decryptPacket(msg, type, seq, plain, sizeof(plain), plainLen);
+    const bool authenticated = decryptPacket(
+        msg, type, seq, rxSourceId, rxTtl, plain, sizeof(plain), plainLen);
+    const bool isV2 = authenticated &&
+                     static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION;
     bool pttOrRecording = false;
     {
       StateLock stateLock(gState);
@@ -346,6 +564,11 @@ void LoRaManager::task() {
         }
       }
     }
+    if (authenticated && isV2 && rxSourceId != sourceId_ && rxTtl > 1 &&
+        plainLen > 0 && !seenDedup(rxSourceId, seq, hashPayload(plain, plainLen))) {
+      (void)enqueueForward(type, seq, rxSourceId, rxTtl, plain, plainLen);
+    }
+
     StateLock rxState(gState);
     if (rxState.ok()) {
       gState.loraRssi = rssi;
@@ -371,22 +594,193 @@ void LoRaManager::task() {
     }
   }
   xSemaphoreGive(mutex_);
+
+  // Forwarding is deliberately serialized outside the receive critical
+  // section. Voice/PTT keeps priority; one queued packet is attempted per task
+  // iteration to bound airtime and CPU/RAM impact.
+  if (!isPttOrRecording() && !pendingTx_.active &&
+      millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
+    ForwardPacket forward{};
+    if (forwardQueue_ && xQueueReceive(forwardQueue_, &forward, 0) == pdPASS) {
+      if (transmitForward(forward)) lastForwardTxMs_ = millis();
+    }
+  }
+}
+
+bool LoRaManager::lbtChannelBusy(int16_t scanStatus) const {
+  return scanStatus == RADIOLIB_PREAMBLE_DETECTED ||
+         scanStatus == RADIOLIB_LORA_DETECTED;
+}
+
+bool LoRaManager::queuePendingTx(const String& packet) {
+  if (!Config::LORA_LBT_ENABLED || packet.isEmpty() || !mutex_) return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+  bool queued = false;
+  if (!pendingTx_.active) {
+    pendingTx_.packet = packet;
+    pendingTx_.retries = 0;
+    pendingTx_.nextAttemptMs = millis();
+    pendingTx_.active = true;
+    queued = true;
+  }
+  xSemaphoreGive(mutex_);
+  return queued;
+}
+
+bool LoRaManager::processPendingTx() {
+  if (!Config::LORA_LBT_ENABLED || !ready_ || !mutex_) return false;
+  if (xSemaphoreTake(mutex_, 0) != pdTRUE) return false;
+  if (!pendingTx_.active ||
+      static_cast<int32_t>(millis() - pendingTx_.nextAttemptMs) < 0) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+
+  bool done = false;
+  bool txOk = false;
+  int16_t st = RADIOLIB_ERR_NONE;
+  int16_t rxSt = RADIOLIB_ERR_NONE;
+  bool budgetConsumed = false;
+  RadioLibTime_t airtimeUs = 0;
+
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(20));
+    if (spiLock.ok()) {
+      st = radio_.scanChannel();
+      if (lbtChannelBusy(st)) {
+        if (pendingTx_.retries >= Config::LORA_LBT_MAX_RETRIES) {
+          pendingTx_.active = false;
+          pendingTx_.packet = String();
+          done = true;
+          rxSt = radio_.startReceive();
+          StateLock lock(gState);
+          if (lock.ok()) gState.lastError = "LBT_TIMEOUT";
+        } else {
+          ++pendingTx_.retries;
+          const uint32_t span = Config::LORA_LBT_BACKOFF_MAX_MS -
+                                Config::LORA_LBT_BACKOFF_MIN_MS;
+          const uint32_t backoff = Config::LORA_LBT_BACKOFF_MIN_MS +
+              (span ? (esp_random() % (span + 1U)) : 0U);
+          pendingTx_.nextAttemptMs = millis() + backoff;
+          // CAD leaves the SX127x in standby; restore RX while waiting.
+          rxSt = radio_.startReceive();
+          if (rxSt != RADIOLIB_ERR_NONE) {
+            pendingTx_.active = false;
+            pendingTx_.packet = String();
+            done = true;
+            ready_ = false;
+            StateLock lock(gState);
+            if (lock.ok()) {
+              gState.loraReady = false;
+              gState.lastError = "SX1276 RX restart failed after LBT";
+            }
+          }
+        }
+      } else if (st == RADIOLIB_CHANNEL_FREE) {
+        airtimeUs = radio_.getTimeOnAir(pendingTx_.packet.length());
+        if (airtimeUs == 0 || airtimeUs > UINT32_MAX ||
+            !consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
+          pendingTx_.active = false;
+          pendingTx_.packet = String();
+          done = true;
+          st = RADIOLIB_ERR_UNKNOWN;
+          rxSt = radio_.startReceive();
+          StateLock lock(gState);
+          if (lock.ok()) gState.lastError = "LoRa duty-cycle budget exhausted";
+        } else {
+          budgetConsumed = true;
+          const uint32_t txStartMs = millis();
+          st = radio_.transmit(pendingTx_.packet);
+          if (millis() - txStartMs > Config::LORA_TX_TIMEOUT_MS)
+            st = RADIOLIB_ERR_TX_TIMEOUT;
+          rxSt = radio_.startReceive();
+          pendingTx_.active = false;
+          pendingTx_.packet = String();
+          done = true;
+          txOk = st == RADIOLIB_ERR_NONE;
+          if (!txOk && budgetConsumed)
+            dutyTokensUs_ = min(
+                (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
+                 Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL,
+                dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
+        }
+      } else {
+        pendingTx_.active = false;
+        pendingTx_.packet = String();
+        done = true;
+        StateLock lock(gState);
+        if (lock.ok()) gState.lastError = "LBT scan failed: " + String(st);
+        rxSt = radio_.startReceive();
+      }
+    } else {
+      st = RADIOLIB_ERR_UNKNOWN;
+      pendingTx_.active = false;
+      pendingTx_.packet = String();
+      done = true;
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "LBT SPI lock failed";
+    }
+  }
+
+  if (rxSt != RADIOLIB_ERR_NONE) {
+    ready_ = false;
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.loraReady = false;
+      gState.lastError = "SX1276 RX restart failed after LBT";
+    }
+  } else if (txOk) {
+    StateLock lock(gState);
+    if (lock.ok()) ++gState.txPackets;
+  }
+  xSemaphoreGive(mutex_);
+  return done;
 }
 
 bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
   if (!ready_ || !mutex_ || text.isEmpty() ||
-      text.length() > Config::LORA_MAX_PACKET - PACKET_HEADER - PACKET_TAG)
+      text.length() > (alreadyEncrypted
+          ? Config::LORA_MAX_PACKET
+          : Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG))
     return false;
   if (Config::LORA_REQUIRE_ENCRYPTION && gConfig.loraKeyHex.length() != 32)
     return false;
+
+  String packet;
+  if (alreadyEncrypted) {
+    packet = text;
+  } else {
+    const uint8_t packetType = 0;
+    const uint16_t seq = ++txSequence_;
+    if (!encryptPacket(reinterpret_cast<const uint8_t*>(text.c_str()), text.length(),
+                       packetType, seq, packet)) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "LoRa encryption/key configuration failed";
+      return false;
+    }
+  }
+
+  if (Config::LORA_LBT_ENABLED) {
+    // Serialize the whole pending envelope assignment with the LoRa task;
+    // String mutation is not atomic and can otherwise race processPendingTx().
+    if (!queuePendingTx(packet)) return false;
+    // Try once immediately. If CAD reports a busy channel, task() will
+    // continue the retry state machine after a randomized backoff.
+    (void)processPendingTx();
+    return true;
+  }
+
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
   int16_t st = -1;
   int16_t rxSt = -1;
   {
     SpiLock spiLock(pdMS_TO_TICKS(1000));
-    if (!spiLock.ok()) { xSemaphoreGive(mutex_); return false; }
+    if (!spiLock.ok()) {
+      xSemaphoreGive(mutex_);
+      return false;
+    }
 
-    const RadioLibTime_t airtimeUs = radio_.getTimeOnAir(text.length());
+    const RadioLibTime_t airtimeUs = radio_.getTimeOnAir(packet.length());
     if (airtimeUs == 0 || airtimeUs > UINT32_MAX ||
         !consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
       xSemaphoreGive(mutex_);
@@ -395,20 +789,6 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       return false;
     }
 
-    String packet;
-    if (alreadyEncrypted) {
-      packet = text;
-    } else {
-      const uint8_t packetType = 0;
-      const uint16_t seq = ++txSequence_;
-      if (!encryptPacket(reinterpret_cast<const uint8_t*>(text.c_str()), text.length(),
-                         packetType, seq, packet)) {
-      xSemaphoreGive(mutex_);
-      StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "LoRa encryption/key configuration failed";
-        return false;
-      }
-    }
     const uint32_t txStartMs = millis();
     st = radio_.transmit(packet);
     const uint32_t txElapsedMs = millis() - txStartMs;
@@ -478,18 +858,25 @@ bool LoRaManager::sendText(const String& text) {
 }
 
 bool LoRaManager::sendVoiceFrame() {
-  uint8_t frame[192] = {};
+  uint8_t captured[164] = {};
+  uint8_t frame[166] = {};
   size_t len = 0;
-  if (!audio.captureVoiceFrame(frame, sizeof(frame), len) || len != 164) return false;
-  memmove(frame + 6, frame + 4, 160);
+  if (!audio.captureVoiceFrame(captured, sizeof(captured), len) || len != sizeof(captured))
+    return false;
+
+  // captureVoiceFrame owns the transport marker + duration + PCM payload.
+  // Build the sequence/CRC envelope separately instead of shifting the payload
+  // in-place; this prevents future header changes from corrupting audio bytes.
+  memcpy(frame, captured, 4);
   const uint16_t seq = voiceSequence_++;
   frame[4] = static_cast<uint8_t>(seq & 0xFF);
   frame[5] = static_cast<uint8_t>(seq >> 8);
-  uint16_t crc = crc16(frame, 166 - 2);
+  memcpy(frame + 6, captured + 4, 160);
+  const uint16_t crc = crc16(frame, 164);
   frame[164] = static_cast<uint8_t>(crc & 0xFF);
   frame[165] = static_cast<uint8_t>(crc >> 8);
   String packet;
-  if (!encryptPacket(frame, 166, 1, seq, packet)) return false;
+  if (!encryptPacket(frame, sizeof(frame), 1, seq, packet)) return false;
   if (packet.length() > Config::LORA_MAX_PACKET) return false;
   const bool ok = transmit(packet, true);
   if (ok) {

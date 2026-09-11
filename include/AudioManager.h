@@ -7,6 +7,7 @@
 #include <freertos/stream_buffer.h>
 #include <usb_device_uac.h>
 #include <esp_aec.h>
+#include <esp_heap_caps.h>
 
 class AudioManager {
 public:
@@ -69,9 +70,15 @@ private:
   uint16_t aecFrameSize_ = 0;
   uint32_t usbSampleRate_ = Config::AUDIO_SAMPLE_RATE;
   uint32_t usbRatePhase_ = 0;
-  int16_t aecMic_[Config::AEC_FRAME_SAMPLES] = {};
-  int16_t aecRef_[Config::AEC_FRAME_SAMPLES] = {};
-  int16_t aecOut_[Config::AEC_FRAME_SAMPLES] = {};
+  int16_t* aecMic_ = nullptr;
+  int16_t* aecRef_ = nullptr;
+  int16_t* aecOut_ = nullptr;
+  alignas(4) int16_t aecMicFallback_[Config::AEC_FRAME_SAMPLES] = {};
+  alignas(4) int16_t aecRefFallback_[Config::AEC_FRAME_SAMPLES] = {};
+  alignas(4) int16_t aecOutFallback_[Config::AEC_FRAME_SAMPLES] = {};
+  uint8_t* aecRefStorage_ = nullptr;
+  alignas(4) uint8_t aecRefStorageFallback_[Config::USB_AEC_REFERENCE_BYTES] = {};
+  StaticStreamBuffer_t aecRefBufferStatic_{};
   volatile bool usbPlaybackTransport_ = false;
   void* simpleDecoder_ = nullptr;
   uint8_t decoderType_ = 0;
@@ -99,9 +106,6 @@ private:
   bool initI2S();
   bool routeInput(uint8_t source);
   void updateAudioLevel(const uint8_t* data, size_t len);
-  bool readWavHeader(File& f, uint32_t& dataOffset, uint32_t& dataBytes,
-                     uint16_t& channels, uint32_t& sampleRate,
-                     uint16_t& bitsPerSample);
   bool writeWavHeader(File& f, uint32_t dataBytes);
   bool finalizeWav();
   bool writeRecordingData(const uint8_t* data, size_t len);
@@ -116,7 +120,7 @@ private:
   bool initAec();
   void deinitAec();
   void updateUsbSampleRate(size_t len);
-  void queueUsbAecReference(const uint8_t* data, size_t len);
+  void queueUsbAecReference(const uint8_t* data, size_t len, uint32_t inputRate = Config::AUDIO_SAMPLE_RATE);
   static esp_err_t usbOutputCallback(uint8_t* data, size_t len, void* ctx);
   static esp_err_t usbInputCallback(uint8_t* data, size_t len, size_t* bytesRead, void* ctx);
   static void usbMuteCallback(uint32_t mute, void* ctx);

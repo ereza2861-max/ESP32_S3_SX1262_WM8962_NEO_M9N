@@ -31,6 +31,11 @@ static uint32_t lastBatterySample = 0;
 static uint32_t criticalBatterySince = 0;
 static bool lastPttButton = false;
 static bool lastSosButton = false;
+static bool rawPttButton = false;
+static bool rawSosButton = false;
+static uint32_t pttDebounceMs = 0;
+static uint32_t sosDebounceMs = 0;
+constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0;
@@ -186,8 +191,14 @@ static void taskWeb(void*) {
 
 
 static void handlePhysicalControls(uint32_t now) {
-  const bool pttPressed = Board::BTN_PTT >= 0 && digitalRead(Board::BTN_PTT) == LOW;
-  const bool sosPressed = Board::BTN_SOS >= 0 && digitalRead(Board::BTN_SOS) == LOW;
+  const bool pttRaw = Board::BTN_PTT >= 0 && digitalRead(Board::BTN_PTT) == LOW;
+  const bool sosRaw = Board::BTN_SOS >= 0 && digitalRead(Board::BTN_SOS) == LOW;
+
+  if (pttRaw != rawPttButton) { rawPttButton = pttRaw; pttDebounceMs = now; }
+  if (sosRaw != rawSosButton) { rawSosButton = sosRaw; sosDebounceMs = now; }
+
+  const bool pttPressed = (now - pttDebounceMs >= BUTTON_DEBOUNCE_MS) ? rawPttButton : lastPttButton;
+  const bool sosPressed = (now - sosDebounceMs >= BUTTON_DEBOUNCE_MS) ? rawSosButton : lastSosButton;
 
   if (pttPressed != lastPttButton) {
     lastPttButton = pttPressed;
@@ -223,11 +234,11 @@ static void handlePhysicalControls(uint32_t now) {
       tx = gState.ptt;
       rx = gState.rxActive;
       rec = gState.recording;
-      if (rx && now - gState.rxActivityMs > Config::RX_ACTIVITY_HOLD_MS) gState.rxActive = false;
+      if (gState.rxActive && now - gState.rxActivityMs > Config::RX_ACTIVITY_HOLD_MS)
+        gState.rxActive = false;
     }
   }
-  if (Board::STATUS_LED >= 0)
-    digitalWrite(Board::STATUS_LED, (tx || rec || rx) ? HIGH : LOW);
+  if (Board::STATUS_LED >= 0) digitalWrite(Board::STATUS_LED, (tx || rx || rec) ? HIGH : LOW);
 }
 
 static void manageWifi(uint32_t now) {

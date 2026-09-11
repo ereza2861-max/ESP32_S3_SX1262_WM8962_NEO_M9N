@@ -5,7 +5,6 @@
 #include "LoRaManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
-#include <Update.h>
 #include <esp_system.h>
 #include <WiFi.h>
 
@@ -218,8 +217,6 @@ void WebUi::begin() {
   server_.on("/api/volume", HTTP_POST, [this]{ if (auth()) handleVolume(); });
   server_.on("/api/delete", HTTP_POST, [this]{ if (auth()) handleDelete(); });
   server_.on("/api/track", HTTP_GET, [this]{ if (auth()) handleTrack(); });
-  server_.on("/api/ota", HTTP_POST, [this]{ if (auth()) handleOta(); },
-              [this]{ if (auth()) handleOtaUpload(); });
   server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
   server_.on("/api/audio-source", HTTP_POST, [this]{ if (auth()) handleAudioSource(); });
@@ -659,39 +656,6 @@ void WebUi::handleAudioSource() {
   }
 
   server_.send(200, "text/plain", "OK");
-}
-
-void WebUi::handleOta() {
-  if (!Config::OTA_ENABLED) {
-    server_.send(403, "text/plain", "OTA disabled");
-    return;
-  }
-  if (Update.hasError()) {
-    server_.send(500, "text/plain", "OTA failed");
-    return;
-  }
-  server_.send(200, "text/plain", "OTA uploaded; rebooting");
-  delay(100);
-  ESP.restart();
-}
-
-void WebUi::handleOtaUpload() {
-  if (!Config::OTA_ENABLED) return;
-  HTTPUpload& upload = server_.upload();
-  if (upload.status == UPLOAD_FILE_START) {
-    if (gState.ptt || gState.recording || gState.playing) {
-      Update.abort();
-      return;
-    }
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) return;
-  } else if (upload.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize)
-      Update.abort();
-  } else if (upload.status == UPLOAD_FILE_END) {
-    if (!Update.end(true)) Update.abort();
-  } else if (upload.status == UPLOAD_FILE_ABORTED) {
-    Update.abort();
-  }
 }
 
 void WebUi::handleReboot() {

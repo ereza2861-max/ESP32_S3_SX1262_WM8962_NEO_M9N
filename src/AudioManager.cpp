@@ -10,6 +10,7 @@
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_types.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include "StorageManager.h"
 extern StorageManager storage;
 
@@ -126,10 +127,36 @@ bool AudioManager::initI2S() {
 
 
 bool AudioManager::initAec() {
-  if (!Config::AEC_ENABLED_BY_DEFAULT) return true;
+  if (!aecMic_ || !aecRef_ || !aecOut_) {
+    const bool usePsram = psramFound();
+    if (usePsram) {
+      aecMic_ = static_cast<int16_t*>(
+          heap_caps_malloc(sizeof(aecMicFallback_), MALLOC_CAP_SPIRAM));
+      aecRef_ = static_cast<int16_t*>(
+          heap_caps_malloc(sizeof(aecRefFallback_), MALLOC_CAP_SPIRAM));
+      aecOut_ = static_cast<int16_t*>(
+          heap_caps_malloc(sizeof(aecOutFallback_), MALLOC_CAP_SPIRAM));
+      if (!aecMic_ || !aecRef_ || !aecOut_) {
+        if (aecMic_) heap_caps_free(aecMic_);
+        if (aecRef_) heap_caps_free(aecRef_);
+        if (aecOut_) heap_caps_free(aecOut_);
+        aecMic_ = aecRef_ = aecOut_ = nullptr;
+      }
+    }
+    if (!aecMic_) aecMic_ = aecMicFallback_;
+    if (!aecRef_) aecRef_ = aecRefFallback_;
+    if (!aecOut_) aecOut_ = aecOutFallback_;
+  }
+
+  if (!Config::AEC_ENABLED_BY_DEFAULT) {
+    aecEnabled_ = false;
+    return true;
+  }
+
   aec_ = aec_create(Config::AEC_SAMPLE_RATE, Config::AEC_FILTER_LENGTH, 1,
                     AEC_MODE_FD_LOW_COST);
   if (!aec_) return false;
+
   const int frameSize = aec_get_chunksize(aec_);
   if (frameSize <= 0 || frameSize > static_cast<int>(Config::AEC_FRAME_SAMPLES)) {
     aec_destroy(aec_);
@@ -147,6 +174,13 @@ void AudioManager::deinitAec() {
     aec_ = nullptr;
   }
   aecFrameSize_ = 0;
+
+  if (aecMic_ && aecMic_ != aecMicFallback_) heap_caps_free(aecMic_);
+  if (aecRef_ && aecRef_ != aecRefFallback_) heap_caps_free(aecRef_);
+  if (aecOut_ && aecOut_ != aecOutFallback_) heap_caps_free(aecOut_);
+  aecMic_ = nullptr;
+  aecRef_ = nullptr;
+  aecOut_ = nullptr;
 }
 
 void AudioManager::updateUsbSampleRate(size_t len) {
@@ -167,26 +201,33 @@ void AudioManager::updateUsbSampleRate(size_t len) {
   }
 }
 
-void AudioManager::queueUsbAecReference(const uint8_t* data, size_t len) {
-  if (!aecEnabled_ || !aecRefBuffer_ || !data || len < 4) return;
-  const uint32_t inputRate = usbSampleRate_ ? usbSampleRate_ : Config::AUDIO_SAMPLE_RATE;
+void AudioManager::queueUsbAecReference(const uint8_t* data, size_t len,
+                                          uint32_t inputRate) {
+  if (!aecEnabled_ || !aec_ || !aecRefBuffer_ || !data ||
+      len < Config::AUDIO_CHANNELS * sizeof(int16_t) ||
+      inputRate == 0) return;
+
   const size_t frames = len / (Config::AUDIO_CHANNELS * sizeof(int16_t));
   const int16_t* pcm = reinterpret_cast<const int16_t*>(data);
+  uint32_t phase = usbRatePhase_;
 
-  // Cheap mono decimator with a persistent phase accumulator. AEC itself is
-  // fixed at 16 kHz; this stage only builds the far-end reference stream.
+  // Convert the exact far-end playback samples to mono 16 kHz. The playback
+  // buffer is never modified; only the AEC reference copy is resampled.
   for (size_t i = 0; i < frames; ++i) {
-    usbRatePhase_ += Config::AEC_SAMPLE_RATE;
-    if (usbRatePhase_ < inputRate) continue;
-    usbRatePhase_ -= inputRate;
-    const int32_t mono =
-        (static_cast<int32_t>(pcm[i * 2]) + static_cast<int32_t>(pcm[i * 2 + 1])) / 2;
+    phase += Config::AEC_SAMPLE_RATE;
+    if (phase < inputRate) continue;
+    phase -= inputRate;
+
+    int32_t mono = pcm[i * Config::AUDIO_CHANNELS];
+    if (Config::AUDIO_CHANNELS > 1)
+      mono = (mono + pcm[i * Config::AUDIO_CHANNELS + 1]) / 2;
     const int16_t sample = static_cast<int16_t>(constrain(mono, -32768, 32767));
     if (xStreamBufferSend(aecRefBuffer_, &sample, sizeof(sample), 0) != sizeof(sample)) {
       StateLock lock(gState);
       if (lock.ok()) gState.audioDrops++;
     }
   }
+  usbRatePhase_ = phase;
 }
 
 bool AudioManager::begin() {
@@ -197,13 +238,22 @@ bool AudioManager::begin() {
   usbMicBuffer_ = xStreamBufferCreate(Config::USB_MIC_BUFFER_BYTES, 1);
   playbackBuffer_ = xStreamBufferCreate(Config::PLAYBACK_PREBUFFER_BYTES, 1);
   usbTransportBuffer_ = xStreamBufferCreate(Config::USB_TRANSPORT_BUFFER_BYTES, 1);
-  aecRefBuffer_ = xStreamBufferCreate(Config::USB_AEC_REFERENCE_BYTES, sizeof(int16_t));
+  aecRefStorage_ = psramFound()
+      ? static_cast<uint8_t*>(heap_caps_malloc(Config::USB_AEC_REFERENCE_BYTES,
+                                               MALLOC_CAP_SPIRAM))
+      : aecRefStorageFallback_;
+  if (!aecRefStorage_) aecRefStorage_ = aecRefStorageFallback_;
+  aecRefBuffer_ = xStreamBufferCreateStatic(
+      Config::USB_AEC_REFERENCE_BYTES, sizeof(int16_t), aecRefStorage_,
+      &aecRefBufferStatic_);
   if (!mutex_ || !i2sMutex_ || !usbRecordBuffer_ || !usbMicBuffer_ || !playbackBuffer_ || !usbTransportBuffer_ || !aecRefBuffer_) {
     if (usbRecordBuffer_) { vStreamBufferDelete(usbRecordBuffer_); usbRecordBuffer_ = nullptr; }
     if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
     if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
     if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
-    if (aecRefBuffer_) { vStreamBufferDelete(aecRefBuffer_); aecRefBuffer_ = nullptr; }
+    aecRefBuffer_ = nullptr;
+    if (aecRefStorage_ && aecRefStorage_ != aecRefStorageFallback_) heap_caps_free(aecRefStorage_);
+    aecRefStorage_ = nullptr;
     if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
     if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
     StateLock lock(gState);
@@ -215,7 +265,9 @@ bool AudioManager::begin() {
     if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
     if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
     if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
-    if (aecRefBuffer_) { vStreamBufferDelete(aecRefBuffer_); aecRefBuffer_ = nullptr; }
+    aecRefBuffer_ = nullptr;
+    if (aecRefStorage_ && aecRefStorage_ != aecRefStorageFallback_) heap_caps_free(aecRefStorage_);
+    aecRefStorage_ = nullptr;
     if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
     if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
     StateLock lock(gState);
@@ -230,7 +282,9 @@ bool AudioManager::begin() {
     if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
     if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
     if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
-    if (aecRefBuffer_) { vStreamBufferDelete(aecRefBuffer_); aecRefBuffer_ = nullptr; }
+    aecRefBuffer_ = nullptr;
+    if (aecRefStorage_ && aecRefStorage_ != aecRefStorageFallback_) heap_caps_free(aecRefStorage_);
+    aecRefStorage_ = nullptr;
     if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
     if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
     StateLock lock(gState);
@@ -596,7 +650,8 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
   written = 0;
   constexpr size_t voiceSamples = 160; // 20 ms @ 8 kHz
   constexpr size_t micFrames = (Config::AUDIO_SAMPLE_RATE * 40U) / 1000U;
-  if (!out || capacity < 4 + voiceSamples || !initialized_ || !i2sMutex_) return false;
+  if (!out || capacity < 4 + voiceSamples || !initialized_ || !i2sMutex_ ||
+      !aecMic_ || !aecRef_ || !aecOut_) return false;
   if (xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
 
   uint8_t pcm[micFrames * Config::AUDIO_CHANNELS * sizeof(int16_t)];
@@ -607,7 +662,10 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
   if (err != ESP_OK || got != sizeof(pcm)) return false;
 
   const int16_t* samples = reinterpret_cast<const int16_t*>(pcm);
-  const size_t aecFrames = aecFrameSize_ ? aecFrameSize_ : Config::AEC_FRAME_SAMPLES;
+  const size_t aecFrames = min(
+      static_cast<size_t>(aecFrameSize_ ? aecFrameSize_ : Config::AEC_FRAME_SAMPLES),
+      static_cast<size_t>(Config::AEC_FRAME_SAMPLES));
+  if (aecFrames == 0 || !aecMic_ || !aecRef_ || !aecOut_) return false;
   for (size_t i = 0; i < aecFrames; ++i) {
     const size_t src = min(micFrames - 1,
         static_cast<size_t>((static_cast<uint64_t>(i) * Config::AUDIO_SAMPLE_RATE) /
@@ -619,9 +677,10 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
   }
 
   const int16_t* clean = aecMic_;
+  const size_t aecBytes = aecFrames * sizeof(int16_t);
   if (aecEnabled_ && aec_ && aecRefBuffer_ &&
-      xStreamBufferReceive(aecRefBuffer_, aecRef_, aecFrames * sizeof(int16_t), 0) ==
-          aecFrames * sizeof(int16_t)) {
+      xStreamBufferBytesAvailable(aecRefBuffer_) >= aecBytes &&
+      xStreamBufferReceive(aecRefBuffer_, aecRef_, aecBytes, 0) == aecBytes) {
     aec_process(aec_, aecMic_, aecRef_, aecOut_);
     clean = aecOut_;
   }
@@ -665,6 +724,9 @@ bool AudioManager::playVoiceFrame(const uint8_t* data, size_t len) {
   const esp_err_t err = i2s_write(AUDIO_I2S_PORT, pcm, sizeof(pcm),
                                   &writtenBytes, pdMS_TO_TICKS(30));
   xSemaphoreGive(i2sMutex_);
+  if (err == ESP_OK && writtenBytes == sizeof(pcm))
+    queueUsbAecReference(reinterpret_cast<const uint8_t*>(pcm), sizeof(pcm),
+                          Config::AUDIO_SAMPLE_RATE);
   return err == ESP_OK && writtenBytes == sizeof(pcm);
 }
 
@@ -967,6 +1029,7 @@ bool AudioManager::setAec(bool enabled) {
     if (lock.ok()) gState.aecEnabled = enabled;
   }
   if (aecRefBuffer_) (void)xStreamBufferReset(aecRefBuffer_);
+  usbRatePhase_ = 0;
   if (mutex_) xSemaphoreGive(mutex_);
   return true;
 }
@@ -1214,39 +1277,6 @@ bool AudioManager::playNextQueued() {
   return playFile(next);
 }
 
-bool AudioManager::readWavHeader(File& f, uint32_t& dataOffset,
-                                 uint32_t& dataBytes, uint16_t& channels,
-                                 uint32_t& sampleRate, uint16_t& bitsPerSample) {
-  uint8_t h[44];
-  if (!f || f.read(h, sizeof(h)) != sizeof(h)) return false;
-  if (memcmp(h, "RIFF", 4) != 0 || memcmp(h + 8, "WAVE", 4) != 0)
-    return false;
-  if (memcmp(h + 12, "fmt ", 4) != 0 || memcmp(h + 36, "data", 4) != 0)
-    return false;
-
-  channels = h[22] | (static_cast<uint16_t>(h[23]) << 8);
-  memcpy(&sampleRate, h + 24, 4);
-  const uint16_t audioFormat = h[20] | (static_cast<uint16_t>(h[21]) << 8);
-  const uint32_t byteRate = static_cast<uint32_t>(h[28]) |
-                            (static_cast<uint32_t>(h[29]) << 8) |
-                            (static_cast<uint32_t>(h[30]) << 16) |
-                            (static_cast<uint32_t>(h[31]) << 24);
-  const uint16_t blockAlign = h[32] | (static_cast<uint16_t>(h[33]) << 8);
-  bitsPerSample = h[34] | (static_cast<uint16_t>(h[35]) << 8);
-  memcpy(&dataBytes, h + 40, 4);
-  dataOffset = 44;
-
-  const uint32_t expectedByteRate = Config::AUDIO_SAMPLE_RATE * 4;
-  const uint16_t expectedBlockAlign = 4;
-  const uint32_t fileSize = static_cast<uint32_t>(f.size());
-
-  return audioFormat == 1 && channels == 2 &&
-         sampleRate == Config::AUDIO_SAMPLE_RATE &&
-         bitsPerSample == 16 && byteRate == expectedByteRate &&
-         blockAlign == expectedBlockAlign && dataBytes > 0 &&
-         dataOffset <= fileSize && dataBytes <= fileSize - dataOffset;
-}
-
 bool AudioManager::playFile(const String& path) {
   if (!initialized_ || !mutex_ || path.length() > Config::MAX_PATH ||
       path.indexOf("..") >= 0 || path.indexOf('\\') >= 0 || path.indexOf('\0') >= 0 ||
@@ -1404,7 +1434,7 @@ esp_err_t AudioManager::usbOutputCallback(uint8_t* data, size_t len, void* /*ctx
   }
   xSemaphoreGive(instance_->i2sMutex_);
   if (err == ESP_OK && written == len) {
-    instance_->queueUsbAecReference(data, len);
+    instance_->queueUsbAecReference(data, len, instance_->usbSampleRate_);
   }
   if (err != ESP_OK || written != len || captureDropped) {
     StateLock lock(gState);

@@ -18,9 +18,6 @@ void GnssManager::task() {
 
   static uint32_t lastTrackLogMs = 0;
   const uint32_t now = millis();
-  StateLock lock(gState);
-  if (!lock.ok()) return;
-
   bool logFix = false;
   double lat = 0.0, lon = 0.0, alt = 0.0;
   uint32_t sats = 0;

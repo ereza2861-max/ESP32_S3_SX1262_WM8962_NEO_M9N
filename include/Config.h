@@ -56,7 +56,21 @@ constexpr char LORA_DEFAULT_CALLSIGN[] = "FIELD";
 constexpr uint16_t LORA_PREAMBLE = 8;
 constexpr size_t LORA_MAX_PACKET = 220;
 constexpr bool LORA_REQUIRE_ENCRYPTION = true;
-constexpr uint8_t LORA_PROTOCOL_VERSION = 1;
+// Listen-Before-Talk: CAD before every TX, with cooperative random backoff.
+constexpr bool LORA_LBT_ENABLED = true;
+constexpr uint8_t LORA_LBT_MAX_RETRIES = 5;
+constexpr uint32_t LORA_LBT_BACKOFF_MIN_MS = 20;
+constexpr uint32_t LORA_LBT_BACKOFF_MAX_MS = 100;
+// Protocol v2 adds authenticated source ID and TTL/hop-limit metadata.
+// v1 packets remain receivable, but cannot be safely forwarded because they
+// do not carry forwarding metadata.
+constexpr uint8_t LORA_PROTOCOL_VERSION = 2;
+constexpr uint8_t LORA_LEGACY_PROTOCOL_VERSION = 1;
+constexpr uint8_t LORA_INITIAL_TTL = 3;
+constexpr size_t LORA_FORWARD_QUEUE_DEPTH = 6;
+constexpr size_t LORA_DEDUP_CACHE_SIZE = 32;
+constexpr uint32_t LORA_DEDUP_TTL_MS = 300000UL;
+constexpr uint32_t LORA_FORWARD_RATE_LIMIT_MS = 1000UL;
 constexpr uint8_t LORA_TAG_BYTES = 8;
 constexpr int16_t VOICE_RSSI_THRESHOLD_DBM = -115;
 constexpr int8_t VOICE_SNR_THRESHOLD_DB = -12;
@@ -120,10 +134,6 @@ constexpr uint32_t VOX_HANG_MS = 700;
 constexpr uint32_t VOICE_FRAME_MS = 20;
 constexpr uint32_t AUDIO_TONE_MAX_MS = 2000;
 constexpr uint32_t AUDIO_VU_HOLD_MS = 250;
-
-// Web/OTA
-constexpr bool OTA_ENABLED = false;
-constexpr uint32_t OTA_TIMEOUT_MS = 120000;
 
 // USB Audio Class device
 constexpr char USB_AUDIO_NAME[] = "FieldRadio USB Audio";

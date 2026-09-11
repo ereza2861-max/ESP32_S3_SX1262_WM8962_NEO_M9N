@@ -118,8 +118,14 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
     uint32_t oldestSize = 0;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
       if (!f.isDirectory()) {
-        const String name = f.name();
+        String name = f.name();
+        // Arduino-ESP32 FS implementations are not consistent here: some
+        // return the full path while others return only the entry name.
+        // Normalize before calling SD.remove(), otherwise cleanup can reject
+        // every candidate and recording fails exactly when storage is low.
+        if (!name.startsWith("/")) name = "/REC/" + name;
         if (name.startsWith("/REC/") && name.endsWith(".WAV") &&
+            name.length() > 5 &&
             (oldest.isEmpty() || name.compareTo(oldest) < 0)) {
           oldest = name;
           oldestSize = static_cast<uint32_t>(f.size());

@@ -38,8 +38,6 @@ private:
   void handleVolume();
   void handleDelete();
   void handleTrack();
-  void handleOta();
-  void handleOtaUpload();
   void handleReboot();
   bool rateLimit(uint32_t& last, uint32_t interval);
   void handleConfig();

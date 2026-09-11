@@ -46,7 +46,7 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 - Physical PTT/SOS, battery ADC, status LED, RX squelch and RX/TX audio feedback.
 - Authenticated AES-128-CTR + HMAC-SHA256 LoRa payloads with voice sequence/CRC.
 - SD track logging and recording-space rotation.
-- Rate-limited web control and reboot/OTA transport (OTA remains disabled by default).
+- Rate-limited web control and authenticated reboot transport.
 
 ## Catatan migrasi ESP32-S3 dan USB audio
 
