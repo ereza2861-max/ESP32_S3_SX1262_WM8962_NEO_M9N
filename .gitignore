@@ -1,0 +1,52 @@
+# PlatformIO
+.pio/
+.piolibdeps/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# IDE / editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Environment / credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.der
+*.jks
+*.keystore
+
+# Local secrets
+secrets/
+LocalConfig.h
+credentials/
+*.secret
+*.credentials
+
+# ESP-IDF generated configuration
+sdkconfig
+sdkconfig.old
+
+# Build / generated output
+build/
+dist/
+
+# ESP-IDF component-manager output
+managed_components/

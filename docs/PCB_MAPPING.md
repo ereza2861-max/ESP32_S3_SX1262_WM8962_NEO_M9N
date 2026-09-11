@@ -1,19 +1,19 @@
-# PCB mapping source of truth
+# PCB mapping source of truth — ESP32-S3-WROOM-1
 
-Mapping berikut berasal dari `ESP32_WROOM32E_SX1276_WM8960_NEO_M8N_KiCad` yang diberikan.
+Mapping berikut adalah target mapping firmware ESP32-S3 dan harus tetap identik dengan `include/BoardConfig.h`. Ini membutuhkan rerouting PCB dari mapping ESP32-WROOM-32E lama.
 
-- GPIO16/17: NEO-M8N UART
-- GPIO18/19/23: shared SPI
-- GPIO27: SX1276 NSS
-- GPIO26: SX1276 RESET
-- GPIO35: SX1276 DIO0
-- GPIO36: SX1276 DIO1
-- GPIO13: microSD CS
-- GPIO21/22: WM8960 I2C
-- GPIO32: WM8960 BCLK
-- GPIO33: WM8960 LRCLK
-- GPIO25: ESP32 -> WM8960 DACDAT
-- GPIO34: WM8960 ADCDAT -> ESP32
+- GPIO12/13/11: shared SPI (SCK/MISO/MOSI)
+- GPIO10: SX1276 NSS
+- GPIO14: SX1276 RESET
+- GPIO2: SX1276 DIO0
+- GPIO15: SX1276 DIO1
+- GPIO16: microSD CS
+- GPIO8/9: WM8960 I2C
+- GPIO4: WM8960 BCLK
+- GPIO5: WM8960 LRCLK
+- GPIO6: ESP32-S3 -> WM8960 DACDAT
+- GPIO7: WM8960 ADCDAT -> ESP32-S3
+- GPIO19/20: native USB D-/D+
 - external 24 MHz oscillator: WM8960 MCLK
 
 Tidak ada pin dedicated button/PTT/SOS atau battery ADC pada mapping yang diberikan,

@@ -10,6 +10,10 @@ public:
 private:
   WebServer& server_;
   bool auth();
+  bool sameOrigin();
+  uint32_t authWindowStartMs_ = 0;
+  uint8_t authFailures_ = 0;
+  uint32_t authBlockedUntilMs_ = 0;
   void handleRoot();
   void handleStatus();
   void handleFiles();
@@ -19,7 +23,18 @@ private:
   void handleRecord();
   void handlePlay();
   void handleStop();
+  void handlePause();
+  void handleSeek();
+  void handleQueue();
+  void handleQueueClear();
+  void handleRecordPause();
+  void handleRecordSplit();
+  void handleVox();
+  void handleUsbTransport();
+  void handleVolume();
   void handleDelete();
   void handleTrack();
   void handleOta();
+  void handleConfig();
+  void handleAudioSource();
 };

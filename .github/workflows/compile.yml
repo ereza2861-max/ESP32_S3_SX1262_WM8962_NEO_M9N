@@ -1,0 +1,140 @@
+name: ESP32-S3 PlatformIO Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platformio-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ESP32-S3
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.cache/pip
+          key: ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini', 'sdkconfig.defaults', 'src/idf_component.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-platformio-
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Show PlatformIO information
+        run: pio system info
+
+      - name: Validate PlatformIO configuration
+        run: pio project config
+
+      - name: Check repository for obvious secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Scan every tracked text file, not only a hand-maintained directory list.
+          if git grep -nI -E \
+            '(^|[^A-Za-z0-9_])(ghp_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' \
+            -- .; then
+            echo "ERROR: Potential secret detected in tracked files."
+            exit 1
+          fi
+
+          if git ls-files -z | grep -zE \
+            '(^|/)(\.env(\..*)?|credentials/|secrets/|LocalConfig\.h|.*\.(pem|key|p12|pfx|crt|der|jks|keystore))$' \
+            >/dev/null; then
+            echo "ERROR: Credential-like file is tracked by Git."
+            git ls-files | grep -E \
+              '(^|/)(\.env(\..*)?|credentials/|secrets/|LocalConfig\.h|.*\.(pem|key|p12|pfx|crt|der|jks|keystore))$'
+            exit 1
+          fi
+
+          # The real credential file must never be present in the repository checkout.
+          if test -e include/LocalConfig.h; then
+            echo "ERROR: include/LocalConfig.h must not be committed or built in CI."
+            exit 1
+          fi
+
+      - name: Verify generated files are ignored
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for path in .pio sdkconfig sdkconfig.old; do
+            if git check-ignore -q "$path"; then
+              echo "OK: $path is ignored"
+            else
+              echo "ERROR: $path is not ignored"
+              exit 1
+            fi
+          done
+
+      - name: Resolve PlatformIO dependencies
+        run: |
+          set -euo pipefail
+          pio pkg install -e esp32-s3-wroom-1
+          pio pkg list -e esp32-s3-wroom-1
+
+      - name: Build ESP32-S3 firmware
+        run: pio run -e esp32-s3-wroom-1
+
+      - name: Collect firmware artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+
+          BUILD_DIR=".pio/build/esp32-s3-wroom-1"
+
+          test -d "$BUILD_DIR"
+
+          find "$BUILD_DIR" \
+            -type f \
+            \( \
+              -name 'firmware.bin' \
+              -o -name 'bootloader.bin' \
+              -o -name 'partitions.bin' \
+              -o -name 'boot_app0.bin' \
+              -o -name 'firmware.elf' \
+              -o -name 'firmware.map' \
+            \) \
+            -print \
+            -exec cp {} artifacts/ \;
+
+          echo "=== Firmware artifacts ==="
+          find artifacts -type f -print
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-s3-firmware-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14

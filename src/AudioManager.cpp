@@ -3,9 +3,13 @@
 #include "Config.h"
 #include "AppState.h"
 #include <Wire.h>
+#include <math.h>
 #include <SD.h>
 #include <driver/i2s.h>
 #include <SparkFun_WM8960_Arduino_Library.h>
+#include <esp_audio_simple_dec.h>
+#include <esp_audio_types.h>
+#include <esp_log.h>
 
 static const i2s_port_t AUDIO_I2S_PORT = I2S_NUM_0;
 static WM8960 codec;
@@ -31,6 +35,18 @@ static void configureCodecForI2S() {
   codec.enableAINL();
   codec.enableAINR();
 
+  // Conservative codec-side processing for the microphone path. ALC/noise
+  // gate are disabled automatically for line-level sources by routeInput().
+  codec.enableAlc();
+  codec.setAlcTarget(WM8960_ALC_TARGET_LEVEL_NEG_12DB);
+  codec.setAlcAttack(WM8960_ALC_ATTACK_TIME_24MS);
+  codec.setAlcDecay(WM8960_ALC_DECAY_TIME_192MS);
+  codec.setAlcMaxGain(WM8960_ALC_MAX_GAIN_LEVEL_18DB);
+  codec.setAlcMinGain(WM8960_ALC_MIN_GAIN_LEVEL_NEG_5_25DB);
+  codec.setAlcHold(WM8960_ALC_HOLD_TIME_43MS);
+  codec.enableNoiseGate();
+  codec.setNoiseGateThreshold(3);
+
   // DAC -> output mixer / headphone path.
   codec.disableLB2LO();
   codec.disableRB2RO();
@@ -51,6 +67,7 @@ static void configureCodecForI2S() {
   codec.setDCLKDIV(WM8960_DCLKDIV_16);
   codec.setPLLN(7);
   codec.setPLLK(0x86, 0xC2, 0x26);
+  codec.setWL(WM8960_WL_16BIT);
 
   // Codec is I2S master; ESP32 is I2S slave.
   codec.enableMasterMode();
@@ -107,25 +124,62 @@ bool AudioManager::initI2S() {
 
 bool AudioManager::begin() {
   instance_ = this;
-  if (!initCodec()) {
+  mutex_ = xSemaphoreCreateMutex();
+  i2sMutex_ = xSemaphoreCreateMutex();
+  usbRecordBuffer_ = xStreamBufferCreate(Config::USB_RECORD_BUFFER_BYTES, 1);
+  usbMicBuffer_ = xStreamBufferCreate(Config::USB_MIC_BUFFER_BYTES, 1);
+  playbackBuffer_ = xStreamBufferCreate(Config::PLAYBACK_PREBUFFER_BYTES, 1);
+  usbTransportBuffer_ = xStreamBufferCreate(Config::USB_TRANSPORT_BUFFER_BYTES, 1);
+  if (!mutex_ || !i2sMutex_ || !usbRecordBuffer_ || !usbMicBuffer_ || !playbackBuffer_ || !usbTransportBuffer_) {
+    if (usbRecordBuffer_) { vStreamBufferDelete(usbRecordBuffer_); usbRecordBuffer_ = nullptr; }
+    if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
+    if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
+    if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
+    if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
+    if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
     StateLock lock(gState);
-    if (lock.ok()) gState.lastError = "WM8960 init failed";
+    if (lock.ok()) gState.lastError = "Audio mutex init failed";
+    return false;
+  }
+  if (!initCodec()) {
+    if (usbRecordBuffer_) { vStreamBufferDelete(usbRecordBuffer_); usbRecordBuffer_ = nullptr; }
+    if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
+    if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
+    if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
+    if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
+    if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.codecReady = false;
+      gState.lastError = "WM8960 init failed";
+    }
     return false;
   }
   if (!initI2S()) {
+    if (usbRecordBuffer_) { vStreamBufferDelete(usbRecordBuffer_); usbRecordBuffer_ = nullptr; }
+    if (usbMicBuffer_) { vStreamBufferDelete(usbMicBuffer_); usbMicBuffer_ = nullptr; }
+    if (playbackBuffer_) { vStreamBufferDelete(playbackBuffer_); playbackBuffer_ = nullptr; }
+    if (usbTransportBuffer_) { vStreamBufferDelete(usbTransportBuffer_); usbTransportBuffer_ = nullptr; }
+    if (mutex_) { vSemaphoreDelete(mutex_); mutex_ = nullptr; }
+    if (i2sMutex_) { vSemaphoreDelete(i2sMutex_); i2sMutex_ = nullptr; }
     StateLock lock(gState);
-    if (lock.ok()) gState.lastError = "I2S init failed";
+    if (lock.ok()) {
+      gState.codecReady = false;
+      gState.lastError = "I2S init failed";
+    }
     return false;
   }
 
   initialized_ = true;
+  (void)setRecordSource(gConfig.audioRecordSource);
+  setVolume(volume_);
   StateLock lock(gState);
   if (lock.ok()) gState.codecReady = true;
   return true;
 }
 
-void AudioManager::writeWavHeader(File& f, uint32_t dataBytes) {
-  if (!f) return;
+bool AudioManager::writeWavHeader(File& f, uint32_t dataBytes) {
+  if (!f) return false;
 
   const uint32_t byteRate = Config::AUDIO_SAMPLE_RATE * 4;
   const uint16_t blockAlign = 4;
@@ -146,51 +200,884 @@ void AudioManager::writeWavHeader(File& f, uint32_t dataBytes) {
   memcpy(h + 32, &blockAlign, 2);
   memcpy(h + 40, &dataBytes, 4);
 
-  f.seek(0);
-  f.write(h, sizeof(h));
+  if (!f.seek(0)) return false;
+  return f.write(h, sizeof(h)) == sizeof(h);
 }
 
 bool AudioManager::startRecording() {
-  if (!initialized_ || playing_) return false;
+  if (!initialized_ || !mutex_ ||
+      xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
 
+  bool allowed = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      allowed = gState.storageReady && !gState.recording &&
+                !playing_ && !recordFile_ &&
+                (recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC ||
+                 gState.usbAudioReady);
+    }
+  }
+
+  bool ok = false;
+  String path;
+  String error;
+  if (allowed) {
+    {
+      SpiLock spiLock(pdMS_TO_TICKS(100));
+      if (!spiLock.ok()) {
+        error = "SPI mutex unavailable";
+      } else if (!SD.exists("/REC") && !SD.mkdir("/REC")) {
+        error = "REC directory create failed";
+      } else {
+        const uint32_t stamp = millis();
+        for (uint16_t attempt = 0; attempt < 100; ++attempt) {
+          path = "/REC/REC_" + String(stamp);
+          if (attempt != 0) path += "_" + String(attempt);
+          path += ".WAV";
+          if (!SD.exists(path)) break;
+          path = "";
+        }
+        if (path.isEmpty()) {
+          error = "WAV filename allocation failed";
+        } else {
+          recordFile_ = SD.open(path, FILE_WRITE);
+          if (recordFile_) recordPath_ = path;
+        }
+        if (!recordFile_) {
+          error = "WAV create failed";
+        } else {
+          uint8_t zero[44] = {};
+          if (recordFile_.write(zero, sizeof(zero)) != sizeof(zero)) {
+            recordFile_.close();
+            (void)SD.remove(path);
+            recordPath_ = "";
+            error = "WAV header reserve failed";
+          } else {
+            recordedBytes_ = 0;
+            recordStartedMs_ = millis();
+            recordingPaused_ = false;
+            recordingPart_ = 0;
+            ok = true;
+          }
+        }
+      }
+    }
+
+    // SPI must be released before taking the global state mutex.
+    if (ok) {
+      bool stillAllowed = false;
+      {
+        StateLock lock(gState);
+        if (lock.ok()) {
+          stillAllowed = gState.storageReady && !gState.recording &&
+                         !playing_ &&
+                         (recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC ||
+                          gState.usbAudioReady);
+        } else {
+          error = "State mutex unavailable";
+        }
+      }
+
+      if (!stillAllowed) {
+        discardRecordingFile();
+        ok = false;
+        if (error.isEmpty()) error = "Recording state changed";
+      }
+    }
+  }
+
+  if (ok) {
+    bool committed = false;
+    {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        if (gState.storageReady && !gState.recording &&
+            !playing_ &&
+            (recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC ||
+             gState.usbAudioReady)) {
+          gState.recording = true;
+          gState.lastAudioFile = path;
+          committed = true;
+        } else {
+          error = "Recording state changed";
+        }
+      } else {
+        error = "State mutex unavailable";
+      }
+    }
+
+    if (!committed) {
+      discardRecordingFile();
+      ok = false;
+    } else {
+      captureUsbRecord_ = recordSource_ == Config::AUDIO_SOURCE_USB;
+      captureWm8960Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC;
+      if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
+      if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
+    }
+  }
+
+  if (!ok && !error.isEmpty()) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = error;
+  }
+
+  xSemaphoreGive(mutex_);
+  return ok;
+}
+
+
+bool AudioManager::routeInput(uint8_t source) {
+  // USB is not a WM8960 ADC source. Keep the codec on the selected local
+  // source so changing the USB record mode cannot silently alter the analog path.
+  if (source == Config::AUDIO_SOURCE_USB) return true;
+
+  codec.disableLoopBack();
+  codec.disconnectLMIC2B();
+  codec.disconnectRMIC2B();
+  codec.disableLMIC();
+  codec.disableRMIC();
+  codec.disableAlc();
+  codec.disableNoiseGate();
+
+  switch (source) {
+    case Config::AUDIO_SOURCE_WM8960_MIC:
+      codec.enableLMIC();
+      codec.enableRMIC();
+      codec.connectLMN1();
+      codec.connectRMN1();
+      codec.disableLINMUTE();
+      codec.disableRINMUTE();
+      codec.setLMICBOOST(WM8960_MIC_BOOST_GAIN_0DB);
+      codec.setRMICBOOST(WM8960_MIC_BOOST_GAIN_0DB);
+      codec.connectLMIC2B();
+      codec.connectRMIC2B();
+      codec.enableAlc();
+      codec.setAlcTarget(WM8960_ALC_TARGET_LEVEL_NEG_12DB);
+      codec.setAlcAttack(WM8960_ALC_ATTACK_TIME_24MS);
+      codec.setAlcDecay(WM8960_ALC_DECAY_TIME_192MS);
+      codec.setAlcMaxGain(WM8960_ALC_MAX_GAIN_LEVEL_18DB);
+      codec.setAlcMinGain(WM8960_ALC_MIN_GAIN_LEVEL_NEG_5_25DB);
+      codec.setAlcHold(WM8960_ALC_HOLD_TIME_43MS);
+      codec.enableNoiseGate();
+      codec.setNoiseGateThreshold(3);
+      return true;
+
+    case Config::AUDIO_SOURCE_LINEIN2:
+      codec.setLIN2BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
+      codec.setRIN2BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
+      codec.enableAINL();
+      codec.enableAINR();
+      return true;
+
+    case Config::AUDIO_SOURCE_LINEIN3:
+      codec.setLIN3BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
+      codec.setRIN3BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
+      codec.enableAINL();
+      codec.enableAINR();
+      return true;
+
+    default:
+      return false;
+  }
+}
+
+void AudioManager::updateAudioLevel(const uint8_t* data, size_t len) {
+  if (!data || len < 2) return;
+  const size_t samples = len / sizeof(int16_t);
+  double sum = 0.0;
+  int32_t peak = 0;
+  const int16_t* pcm = reinterpret_cast<const int16_t*>(data);
+  for (size_t i = 0; i < samples; ++i) {
+    const int32_t v = pcm[i];
+    const int32_t a = v < 0 ? -v : v;
+    if (a > peak) peak = a;
+    sum += static_cast<double>(v) * static_cast<double>(v);
+  }
+  const float peakNorm = static_cast<float>(peak) / 32768.0f;
+  const float rmsNorm = static_cast<float>(sqrt(sum / static_cast<double>(samples))) / 32768.0f;
   StateLock lock(gState);
-  if (!lock.ok() || gState.recording || gState.btConnected) return false;
+  if (lock.ok()) {
+    gState.audioPeak = peakNorm;
+    gState.audioRms = rmsNorm;
+    gState.audioClipped = peak >= 32700;
+  }
+}
 
-  if (!SD.exists("/REC")) SD.mkdir("/REC");
-  String path = "/REC/REC_" + String(millis()) + ".WAV";
+bool AudioManager::setRecordSource(uint8_t source) {
+  if (source > Config::AUDIO_SOURCE_USB) return false;
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
 
-  recordFile_ = SD.open(path, FILE_WRITE);
-  if (!recordFile_) {
-    gState.lastError = "WAV create failed";
+  bool busy = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) busy = gState.recording || gState.playing;
+  }
+  if (busy) {
+    if (mutex_) xSemaphoreGive(mutex_);
     return false;
   }
 
-  uint8_t zero[44] = {};
-  if (recordFile_.write(zero, sizeof(zero)) != sizeof(zero)) {
-    recordFile_.close();
-    gState.lastError = "WAV header reserve failed";
+  if (!routeInput(source)) {
+    if (mutex_) xSemaphoreGive(mutex_);
     return false;
   }
+  recordSource_ = source;
+  if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
+  if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
 
-  recordedBytes_ = 0;
-  recordStartedMs_ = millis();
-  gState.recording = true;
-  gState.lastAudioFile = path;
+  if (mutex_) xSemaphoreGive(mutex_);
   return true;
 }
 
-void AudioManager::finalizeWav() {
-  if (!recordFile_) return;
-  writeWavHeader(recordFile_, recordedBytes_);
-  recordFile_.flush();
-  recordFile_.close();
+bool AudioManager::setUsbMonitor(bool enabled) {
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  usbMonitor_ = enabled;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.usbMonitor = enabled;
+  }
+  if (mutex_) xSemaphoreGive(mutex_);
+  return true;
 }
 
-void AudioManager::stopRecording() {
+
+bool AudioManager::setUsbPlaybackTransport(bool enabled) {
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  usbPlaybackTransport_ = enabled;
+  if (usbTransportBuffer_) (void)xStreamBufferReset(usbTransportBuffer_);
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.usbPlaybackTransport = enabled;
+  }
+  if (mutex_) xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::setLoopback(bool enabled) {
+  if (!initialized_) return false;
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  bool busy = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) busy = gState.recording || gState.playing || gState.usbAudioActive;
+  }
+  if (busy) {
+    if (mutex_) xSemaphoreGive(mutex_);
+    return false;
+  }
+  if (enabled) {
+    codec.enableLoopBack();
+  } else {
+    codec.disableLoopBack();
+  }
+  loopback_ = enabled;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.audioLoopback = enabled;
+  }
+  if (mutex_) xSemaphoreGive(mutex_);
+  return true;
+}
+
+
+static uint8_t pcm16ToMulaw(int16_t pcm) {
+  constexpr int BIAS = 0x84;
+  constexpr int CLIP = 32635;
+  int32_t sample = pcm;
+  int sign = (sample < 0) ? 0x80 : 0;
+  if (sample < 0) sample = -sample;
+  if (sample > CLIP) sample = CLIP;
+  sample += BIAS;
+  int exponent = 7;
+  for (int mask = 0x4000; exponent > 0 && !(sample & mask); mask >>= 1) --exponent;
+  const int mantissa = (sample >> (exponent + 3)) & 0x0F;
+  return static_cast<uint8_t>(~(sign | (exponent << 4) | mantissa));
+}
+
+static int16_t mulawToPcm16(uint8_t u) {
+  u = static_cast<uint8_t>(~u);
+  int t = ((u & 0x0F) << 3) + 0x84;
+  t <<= ((u & 0x70) >> 4);
+  return static_cast<int16_t>((u & 0x80) ? (0x84 - t) : (t - 0x84));
+}
+
+bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& written) {
+  written = 0;
+  if (!out || capacity < 161 || !initialized_ || !i2sMutex_) return false;
+  if (xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+
+  constexpr size_t inFrames = (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
+  uint8_t pcm[inFrames * Config::AUDIO_CHANNELS * sizeof(int16_t)];
+  size_t got = 0;
+  const esp_err_t err = i2s_read(AUDIO_I2S_PORT, pcm, sizeof(pcm), &got,
+                                  pdMS_TO_TICKS(30));
+  xSemaphoreGive(i2sMutex_);
+  if (err != ESP_OK || got != sizeof(pcm)) return false;
+
+  out[0] = 0x56; // Voice frame magic.
+  out[1] = 1;    // μ-law 8 kHz mono.
+  out[2] = static_cast<uint8_t>(Config::VOICE_FRAME_MS);
+  out[3] = 0;
+  for (size_t i = 0; i < 160; ++i) {
+    const size_t src = static_cast<size_t>(
+        (static_cast<uint64_t>(i) * Config::AUDIO_SAMPLE_RATE) / 8000ULL);
+    if (src >= inFrames) return false;
+    const int16_t* samples = reinterpret_cast<const int16_t*>(pcm);
+    const int32_t mono = (static_cast<int32_t>(samples[src * 2]) +
+                          static_cast<int32_t>(samples[src * 2 + 1])) / 2;
+    out[4 + i] = pcm16ToMulaw(static_cast<int16_t>(mono));
+  }
+  written = 164;
+  return true;
+}
+
+bool AudioManager::playVoiceFrame(const uint8_t* data, size_t len) {
+  if (!data || len != 164 || data[0] != 0x56 || data[1] != 1 ||
+      data[2] != Config::VOICE_FRAME_MS || !initialized_ || !i2sMutex_) return false;
+  constexpr size_t outFrames = (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
+  int16_t pcm[outFrames * Config::AUDIO_CHANNELS];
+  for (size_t i = 0; i < outFrames; ++i) {
+    const size_t src = min<size_t>(159, (i * 8000U) / Config::AUDIO_SAMPLE_RATE);
+    const int16_t sample = mulawToPcm16(data[4 + src]);
+    pcm[i * 2] = sample;
+    pcm[i * 2 + 1] = sample;
+  }
+  size_t writtenBytes = 0;
+  if (xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+  const esp_err_t err = i2s_write(AUDIO_I2S_PORT, pcm, sizeof(pcm),
+                                  &writtenBytes, pdMS_TO_TICKS(30));
+  xSemaphoreGive(i2sMutex_);
+  return err == ESP_OK && writtenBytes == sizeof(pcm);
+}
+
+bool AudioManager::playTone(uint16_t frequencyHz, uint16_t durationMs, uint8_t percent) {
+  if (!initialized_ || frequencyHz == 0 || frequencyHz > 10000 ||
+      durationMs == 0 || durationMs > Config::AUDIO_TONE_MAX_MS) return false;
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  bool busy = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) busy = gState.recording || gState.playing || gState.usbAudioActive;
+  }
+  if (busy) {
+    if (mutex_) xSemaphoreGive(mutex_);
+    return false;
+  }
+
+  const uint32_t frames = (Config::AUDIO_SAMPLE_RATE * durationMs) / 1000U;
+  const float amplitude = 32767.0f * (constrain(percent, 0, 100) / 100.0f);
+  const float phaseStep = 2.0f * PI * static_cast<float>(frequencyHz) /
+                          static_cast<float>(Config::AUDIO_SAMPLE_RATE);
+  uint8_t buffer[Config::AUDIO_IO_BYTES];
+  uint32_t frame = 0;
+  float phase = 0.0f;
+  bool ok = true;
+  while (frame < frames) {
+    const uint32_t framesThis = min<uint32_t>(
+        frames - frame, Config::AUDIO_IO_BYTES / (Config::AUDIO_CHANNELS * sizeof(int16_t)));
+    int16_t* pcm = reinterpret_cast<int16_t*>(buffer);
+    for (uint32_t i = 0; i < framesThis; ++i) {
+      const int16_t sample = static_cast<int16_t>(sinf(phase) * amplitude);
+      pcm[2 * i] = sample;
+      pcm[2 * i + 1] = sample;
+      phase += phaseStep;
+      if (phase >= 2.0f * PI) phase -= 2.0f * PI;
+    }
+    const size_t bytes = framesThis * Config::AUDIO_CHANNELS * sizeof(int16_t);
+    size_t written = 0;
+    if (!i2sMutex_ || xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
+      ok = false;
+      break;
+    }
+    const esp_err_t err = i2s_write(AUDIO_I2S_PORT, buffer, bytes, &written, pdMS_TO_TICKS(50));
+    xSemaphoreGive(i2sMutex_);
+    if (err != ESP_OK || written != bytes) {
+      ok = false;
+      break;
+    }
+    frame += framesThis;
+  }
+  if (mutex_) xSemaphoreGive(mutex_);
+  return ok;
+}
+
+bool AudioManager::writeRecordingData(const uint8_t* data, size_t len) {
+  if (!data || !len || !recordFile_) return false;
+
+  SpiLock spiLock(pdMS_TO_TICKS(20));
+  if (!spiLock.ok()) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.audioDrops++;
+    return false;
+  }
+
+  const size_t written = recordFile_.write(data, len);
+  recordedBytes_ += static_cast<uint32_t>(written);
+  if (written != len) {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.audioDrops++;
+      gState.lastError = "WAV write failed";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool AudioManager::flushUsbRecordingBuffer() {
+  if (!usbRecordBuffer_ || !recordFile_) return true;
+
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  if (!spiLock.ok()) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "SPI mutex unavailable while flushing USB recording";
+    return false;
+  }
+
+  uint8_t buffer[Config::AUDIO_IO_BYTES];
+  while (xStreamBufferBytesAvailable(usbRecordBuffer_) > 0) {
+    const size_t got = xStreamBufferReceive(
+        usbRecordBuffer_, buffer, sizeof(buffer), 0);
+    if (!got) break;
+    const size_t written = recordFile_.write(buffer, got);
+    recordedBytes_ += static_cast<uint32_t>(written);
+    if (written != got) {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        gState.audioDrops++;
+        gState.lastError = "USB WAV flush failed";
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
+void AudioManager::discardRecordingFile() {
+  if (!recordPath_.isEmpty()) {
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (!spiLock.ok()) return;
+    if (recordFile_) recordFile_.close();
+    if (SD.remove(recordPath_)) {
+      recordPath_ = "";
+    }
+    return;
+  }
+  if (recordFile_) {
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (spiLock.ok()) recordFile_.close();
+  }
+}
+
+bool AudioManager::finalizeWav() {
+  if (!recordFile_) return true;
+
+  bool ok = false;
+  bool spiOk = false;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    spiOk = spiLock.ok();
+    if (spiOk) {
+      ok = writeWavHeader(recordFile_, recordedBytes_);
+      if (ok) {
+        if (!recordFile_.flush()) {
+          ok = false;
+        } else {
+          recordFile_.close();
+          recordPath_ = "";
+        }
+      }
+    }
+  }
+
+  if (!ok) {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.lastError = spiOk
+          ? "WAV header finalize failed"
+          : "SPI mutex unavailable while finalizing WAV";
+    }
+  }
+  return ok;
+}
+
+bool AudioManager::stopRecording() {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
+
+  bool recording = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) recording = gState.recording;
+  }
+  bool ok = true;
+  if (recording) {
+    captureUsbRecord_ = false;
+    captureWm8960Mic_ = false;
+    if (i2sMutex_ &&
+        xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
+      xSemaphoreGive(mutex_);
+      return false;
+    }
+    if (i2sMutex_) xSemaphoreGive(i2sMutex_);
+    {
+      StateLock lock(gState);
+      if (!lock.ok()) {
+        xSemaphoreGive(mutex_);
+        return false;
+      }
+      gState.recording = false;
+    }
+    if (recordSource_ == Config::AUDIO_SOURCE_USB) {
+      ok = flushUsbRecordingBuffer();
+    }
+    if (ok) ok = finalizeWav();
+  }
+
+  xSemaphoreGive(mutex_);
+  return ok;
+}
+
+
+bool AudioManager::pauseRecording(bool paused) {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  bool active = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) active = gState.recording;
+  }
+  if (!active) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  recordingPaused_ = paused;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.recordingPaused = paused;
+  }
+  xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::openRecordingPart() {
+  if (!gState.storageReady) return false;
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  if (!spiLock.ok()) return false;
+  if (!SD.exists("/REC") && !SD.mkdir("/REC")) return false;
+
+  const uint32_t stamp = millis();
+  String path;
+  for (uint16_t attempt = 0; attempt < 100; ++attempt) {
+    path = "/REC/REC_" + String(stamp);
+    if (recordingPart_) path += "_P" + String(recordingPart_);
+    if (attempt) path += "_" + String(attempt);
+    path += ".WAV";
+    if (!SD.exists(path)) break;
+    path = "";
+  }
+  if (path.isEmpty()) return false;
+
+  recordFile_ = SD.open(path, FILE_WRITE);
+  if (!recordFile_) return false;
+  uint8_t zero[44] = {};
+  if (recordFile_.write(zero, sizeof(zero)) != sizeof(zero)) {
+    recordFile_.close();
+    (void)SD.remove(path);
+    return false;
+  }
+  recordPath_ = path;
+  recordedBytes_ = 0;
+  recordStartedMs_ = millis();
+  if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
+  if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
+  return true;
+}
+
+bool AudioManager::splitRecording() {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  bool active = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) active = gState.recording;
+  }
+  if (!active) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+
+  captureUsbRecord_ = false;
+  captureWm8960Mic_ = false;
+  if (recordSource_ == Config::AUDIO_SOURCE_USB && !flushUsbRecordingBuffer()) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  if (!finalizeWav()) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  ++recordingPart_;
+  if (!openRecordingPart()) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  captureUsbRecord_ = recordSource_ == Config::AUDIO_SOURCE_USB;
+  captureWm8960Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.recording = true;
+      gState.recordingPaused = false;
+      gState.lastAudioFile = recordPath_;
+    }
+  }
+  xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::setVox(bool enabled, float threshold, uint32_t hangMs) {
+  if (threshold < 0.005f || threshold > 1.0f || hangMs > 10000) return false;
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  voxEnabled_ = enabled;
+  voxThreshold_ = threshold;
+  voxHangMs_ = hangMs;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.vox = enabled;
+  }
+  if (mutex_) xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::openPlaybackDecoder(const String& path) {
+  closePlaybackDecoder();
+  const String upper = path;
+  esp_audio_simple_dec_type_t type = ESP_AUDIO_SIMPLE_DEC_TYPE_NONE;
+  if (upper.endsWith(".MP3")) type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+  else if (upper.endsWith(".OPUS")) type = ESP_AUDIO_SIMPLE_DEC_TYPE_OGG;
+  else if (upper.endsWith(".WAV")) type = ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
+  else return false;
+
+  esp_audio_simple_dec_cfg_t cfg{};
+  cfg.dec_type = type;
+  cfg.dec_cfg = nullptr;
+  cfg.cfg_size = 0;
+  cfg.use_frame_dec = false;
+
+  esp_audio_simple_dec_handle_t hd = nullptr;
+  if (esp_audio_simple_dec_open(&cfg, &hd) != ESP_AUDIO_ERR_OK || !hd) return false;
+  simpleDecoder_ = hd;
+  decoderType_ = static_cast<uint8_t>(type);
+  compressedPlayback_ = type != ESP_AUDIO_SIMPLE_DEC_TYPE_WAV;
+  playbackEof_ = false;
+  playbackPositionMs_ = 0;
+  return true;
+}
+
+void AudioManager::closePlaybackDecoder() {
+  if (simpleDecoder_) {
+    esp_audio_simple_dec_close(reinterpret_cast<esp_audio_simple_dec_handle_t>(simpleDecoder_));
+    simpleDecoder_ = nullptr;
+  }
+  decoderType_ = 0;
+  compressedPlayback_ = false;
+}
+
+bool AudioManager::fillPlaybackBuffer() {
+  if (!playFile_ || playbackEof_ || !playbackBuffer_) return false;
+  if (xStreamBufferBytesAvailable(playbackBuffer_) >= Config::PLAYBACK_PREBUFFER_BYTES / 2) return true;
+
+  while (xStreamBufferSpacesAvailable(playbackBuffer_) >= sizeof(playbackInput_)) {
+    const size_t want = min(sizeof(playbackInput_), static_cast<size_t>(playbackRemaining_));
+    if (!want) {
+      playbackEof_ = true;
+      break;
+    }
+    size_t n = 0;
+    {
+      SpiLock spiLock(pdMS_TO_TICKS(20));
+      if (!spiLock.ok()) return false;
+      n = playFile_.read(playbackInput_, want);
+    }
+    if (!n) {
+      playbackEof_ = true;
+      break;
+    }
+    if (xStreamBufferSend(playbackBuffer_, playbackInput_, n, 0) != n) {
+      return false;
+    }
+    playbackRemaining_ -= static_cast<uint32_t>(n);
+    if (n < want) {
+      playbackEof_ = true;
+      break;
+    }
+  }
+  return xStreamBufferBytesAvailable(playbackBuffer_) != 0 || playbackEof_;
+}
+
+bool AudioManager::playDecodedBuffer() {
+  if (!simpleDecoder_ || !playbackBuffer_) return false;
+  const size_t available = xStreamBufferBytesAvailable(playbackBuffer_);
+  if (!available) return playbackEof_;
+
+  const size_t got = xStreamBufferReceive(playbackBuffer_, playbackInput_,
+                                          min(available, sizeof(playbackInput_)), 0);
+  if (!got) return false;
+
+  esp_audio_simple_dec_raw_t raw{};
+  raw.buffer = playbackInput_;
+  raw.len = got;
+  raw.eos = playbackEof_ && playbackRemaining_ == 0;
+
+  while (raw.len) {
+    esp_audio_simple_dec_out_t out{};
+    out.buffer = playbackPcm_;
+    out.len = sizeof(playbackPcm_);
+    const esp_audio_err_t err = esp_audio_simple_dec_process(
+        reinterpret_cast<esp_audio_simple_dec_handle_t>(simpleDecoder_), &raw, &out);
+    if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH || err != ESP_AUDIO_ERR_OK) return false;
+
+    if (out.decoded_size) {
+      esp_audio_simple_dec_info_t info{};
+      if (esp_audio_simple_dec_get_info(
+              reinterpret_cast<esp_audio_simple_dec_handle_t>(simpleDecoder_), &info) == ESP_AUDIO_ERR_OK) {
+        playbackSampleRate_ = info.sample_rate;
+        playbackChannels_ = info.channel;
+      }
+
+      const uint8_t* output = playbackPcm_;
+      size_t outputBytes = out.decoded_size;
+      uint8_t resampled[16384] = {};
+      if (playbackSampleRate_ != Config::AUDIO_SAMPLE_RATE ||
+          playbackChannels_ != Config::AUDIO_CHANNELS) {
+        const int16_t* in = reinterpret_cast<const int16_t*>(playbackPcm_);
+        const size_t inFrames = out.decoded_size /
+            (max<uint32_t>(1, playbackChannels_) * sizeof(int16_t));
+        const size_t outFrames = static_cast<size_t>(
+            (static_cast<uint64_t>(inFrames) * Config::AUDIO_SAMPLE_RATE) /
+            max<uint32_t>(1, playbackSampleRate_));
+        if (outFrames * Config::AUDIO_CHANNELS * sizeof(int16_t) > sizeof(resampled))
+          return false;
+        int16_t* dst = reinterpret_cast<int16_t*>(resampled);
+        for (size_t i = 0; i < outFrames; ++i) {
+          const size_t src = min(inFrames - 1,
+              static_cast<size_t>((static_cast<uint64_t>(i) * playbackSampleRate_) /
+                                  Config::AUDIO_SAMPLE_RATE));
+          const int16_t sampleL = in[src * playbackChannels_];
+          const int16_t sampleR = playbackChannels_ > 1 ? in[src * playbackChannels_ + 1] : sampleL;
+          dst[i * 2] = sampleL;
+          dst[i * 2 + 1] = sampleR;
+        }
+        output = resampled;
+        outputBytes = outFrames * Config::AUDIO_CHANNELS * sizeof(int16_t);
+      }
+
+      size_t written = 0;
+      if (!i2sMutex_ || xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+      const esp_err_t w = i2s_write(AUDIO_I2S_PORT, output, outputBytes,
+                                    &written, pdMS_TO_TICKS(20));
+      xSemaphoreGive(i2sMutex_);
+      if (w != ESP_OK || written != outputBytes) return false;
+      if (usbPlaybackTransport_ && usbTransportBuffer_) {
+        const size_t queued = xStreamBufferSend(usbTransportBuffer_, output,
+                                                outputBytes, 0);
+        if (queued != outputBytes) {
+          StateLock lock(gState);
+          if (lock.ok()) gState.audioDrops++;
+        }
+      }
+
+      const uint32_t bytesPerFrame =
+          max<uint32_t>(1, playbackChannels_) * sizeof(int16_t);
+      if (playbackSampleRate_) {
+        playbackPositionMs_ += static_cast<uint32_t>(
+            (static_cast<uint64_t>(out.decoded_size) * 1000ULL) /
+            (bytesPerFrame * playbackSampleRate_));
+      }
+    }
+    if (raw.consumed == 0) break;
+    raw.len -= raw.consumed;
+    raw.buffer += raw.consumed;
+    raw.consumed = 0;
+  }
+  return true;
+}
+
+bool AudioManager::pausePlayback(bool paused) {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  if (!playing_) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  playbackPaused_ = paused;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.playbackPaused = paused;
+  }
+  xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::seekPlaybackMs(uint32_t positionMs) {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  if (!playing_ || compressedPlayback_ || !playFile_ || playbackSampleRate_ == 0) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  const uint64_t bytesPerSec = static_cast<uint64_t>(playbackSampleRate_) *
+                               playbackChannels_ * sizeof(int16_t);
+  const uint64_t offset = 44ULL + (static_cast<uint64_t>(positionMs) * bytesPerSec / 1000ULL);
+  if (offset > playFile_.size() || !playFile_.seek(offset)) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  playbackRemaining_ = static_cast<uint32_t>(playFile_.size() - offset);
+  playbackPositionMs_ = positionMs;
+  if (playbackBuffer_) (void)xStreamBufferReset(playbackBuffer_);
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.playbackPositionMs = positionMs;
+  }
+  xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::enqueueFile(const String& path) {
+  if (path.length() > Config::MAX_PATH || path.indexOf("..") >= 0 ||
+      path.indexOf('\\') >= 0 || !path.startsWith("/REC/") ||
+      path.lastIndexOf('/') != 4) return false;
+  if (!path.endsWith(".WAV") && !path.endsWith(".MP3") && !path.endsWith(".OPUS")) return false;
+  if (queueCount_ >= Config::PLAYBACK_QUEUE_DEPTH) return false;
+  queue_[queueTail_] = path;
+  queueTail_ = static_cast<uint8_t>((queueTail_ + 1) % Config::PLAYBACK_QUEUE_DEPTH);
+  ++queueCount_;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.queueDepth = queueCount_;
+  }
+  return true;
+}
+
+void AudioManager::clearQueue() {
+  for (auto &item : queue_) item = "";
+  queueHead_ = queueTail_ = queueCount_ = 0;
   StateLock lock(gState);
-  if (!lock.ok() || !gState.recording) return;
-  gState.recording = false;
-  finalizeWav();
+  if (lock.ok()) gState.queueDepth = 0;
+}
+
+bool AudioManager::playNextQueued() {
+  if (!queueCount_) return false;
+  const String next = queue_[queueHead_];
+  queue_[queueHead_] = "";
+  queueHead_ = static_cast<uint8_t>((queueHead_ + 1) % Config::PLAYBACK_QUEUE_DEPTH);
+  --queueCount_;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.queueDepth = queueCount_;
+  }
+  return playFile(next);
 }
 
 bool AudioManager::readWavHeader(File& f, uint32_t& dataOffset,
@@ -205,50 +1092,154 @@ bool AudioManager::readWavHeader(File& f, uint32_t& dataOffset,
 
   channels = h[22] | (static_cast<uint16_t>(h[23]) << 8);
   memcpy(&sampleRate, h + 24, 4);
+  const uint16_t audioFormat = h[20] | (static_cast<uint16_t>(h[21]) << 8);
+  const uint32_t byteRate = static_cast<uint32_t>(h[28]) |
+                            (static_cast<uint32_t>(h[29]) << 8) |
+                            (static_cast<uint32_t>(h[30]) << 16) |
+                            (static_cast<uint32_t>(h[31]) << 24);
+  const uint16_t blockAlign = h[32] | (static_cast<uint16_t>(h[33]) << 8);
   bitsPerSample = h[34] | (static_cast<uint16_t>(h[35]) << 8);
   memcpy(&dataBytes, h + 40, 4);
   dataOffset = 44;
 
-  return channels == 2 && sampleRate == Config::AUDIO_SAMPLE_RATE &&
-         bitsPerSample == 16 && dataBytes > 0;
+  const uint32_t expectedByteRate = Config::AUDIO_SAMPLE_RATE * 4;
+  const uint16_t expectedBlockAlign = 4;
+  const uint32_t fileSize = static_cast<uint32_t>(f.size());
+
+  return audioFormat == 1 && channels == 2 &&
+         sampleRate == Config::AUDIO_SAMPLE_RATE &&
+         bitsPerSample == 16 && byteRate == expectedByteRate &&
+         blockAlign == expectedBlockAlign && dataBytes > 0 &&
+         dataOffset <= fileSize && dataBytes <= fileSize - dataOffset;
 }
 
 bool AudioManager::playFile(const String& path) {
-  if (!initialized_ || path.length() > Config::MAX_PATH ||
-      path.indexOf("..") >= 0 || !path.startsWith("/"))
-    return false;
+  if (!initialized_ || !mutex_ || path.length() > Config::MAX_PATH ||
+      path.indexOf("..") >= 0 || path.indexOf('\\') >= 0 || path.indexOf('\0') >= 0 ||
+      !path.startsWith("/REC/") || path.lastIndexOf('/') != 4 ||
+      (!path.endsWith(".WAV") && !path.endsWith(".MP3") && !path.endsWith(".OPUS")) ||
+      xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
 
+  bool allowed = false;
   {
     StateLock lock(gState);
-    if (!lock.ok() || gState.btConnected) return false;
+    if (lock.ok() && gState.storageReady && !gState.usbAudioActive && !gState.recording)
+      allowed = true;
   }
-
-  stopPlayback();
-  playFile_ = SD.open(path, FILE_READ);
-  if (!playFile_) return false;
-
-  uint32_t offset, bytes;
-  uint16_t channels, bits;
-  uint32_t rate;
-  if (!readWavHeader(playFile_, offset, bytes, channels, rate, bits)) {
-    playFile_.close();
+  if (!allowed) {
+    xSemaphoreGive(mutex_);
     return false;
   }
 
-  playing_ = true;
-  StateLock lock(gState);
-  if (lock.ok()) {
-    gState.playing = true;
-    gState.lastAudioFile = path;
+  playing_ = false;
+  playbackPaused_ = false;
+  playbackEof_ = false;
+  if (playFile_) {
+    SpiLock spiLock(pdMS_TO_TICKS(50));
+    if (spiLock.ok()) playFile_.close();
   }
+  closePlaybackDecoder();
+  if (playbackBuffer_) (void)xStreamBufferReset(playbackBuffer_);
+
+  bool opened = false;
+  uint32_t offset = 0;
+  uint32_t bytes = 0;
+  uint16_t channels = 0;
+  uint16_t bits = 0;
+  uint32_t rate = 0;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (spiLock.ok()) {
+      playFile_ = SD.open(path, FILE_READ);
+      opened = static_cast<bool>(playFile_);
+      if (opened && path.endsWith(".WAV")) {
+        /* WAV parser in the codec component accepts PCM and IMA-ADPCM. */
+        if (!openPlaybackDecoder(path)) {
+          playFile_.close();
+          opened = false;
+        } else {
+          /* The simple decoder owns container parsing; start from byte zero. */
+          if (!playFile_.seek(0)) {
+            closePlaybackDecoder();
+            playFile_.close();
+            opened = false;
+          } else {
+            bytes = static_cast<uint32_t>(playFile_.size());
+            offset = 0;
+          }
+        }
+      } else if (opened) {
+        if (!openPlaybackDecoder(path) || !playFile_.seek(0)) {
+          closePlaybackDecoder();
+          playFile_.close();
+          opened = false;
+        } else {
+          bytes = static_cast<uint32_t>(playFile_.size());
+          offset = 0;
+        }
+      }
+    }
+  }
+
+  if (!opened) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+
+  playbackRemaining_ = bytes - offset;
+  playbackTotalBytes_ = bytes;
+  playbackPositionMs_ = 0;
+  playbackSampleRate_ = Config::AUDIO_SAMPLE_RATE;
+  playbackChannels_ = Config::AUDIO_CHANNELS;
+  playbackEof_ = false;
+  if (playbackBuffer_) (void)xStreamBufferReset(playbackBuffer_);
+  (void)fillPlaybackBuffer();
+
+  bool committed = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok() && gState.storageReady && !gState.usbAudioActive && !gState.recording) {
+      playing_ = true;
+      gState.playing = true;
+      gState.playbackPaused = false;
+      gState.playbackPositionMs = 0;
+      gState.playbackDurationMs = 0;
+      gState.lastAudioFile = path;
+      committed = true;
+    }
+  }
+
+  if (!committed) {
+    playing_ = false;
+    playbackRemaining_ = 0;
+    closePlaybackDecoder();
+    SpiLock spiLock(pdMS_TO_TICKS(50));
+    if (spiLock.ok() && playFile_) playFile_.close();
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+
+  xSemaphoreGive(mutex_);
   return true;
 }
 
 void AudioManager::stopPlayback() {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return;
   playing_ = false;
-  if (playFile_) playFile_.close();
-  StateLock lock(gState);
-  if (lock.ok()) gState.playing = false;
+  playbackPaused_ = false;
+  playbackRemaining_ = 0;
+  closePlaybackDecoder();
+  if (playbackBuffer_) (void)xStreamBufferReset(playbackBuffer_);
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(20));
+    if (spiLock.ok() && playFile_) playFile_.close();
+  }
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.playing = false;
+  }
+  xSemaphoreGive(mutex_);
 }
 
 void AudioManager::setVolume(uint8_t percent) {
@@ -259,90 +1250,275 @@ void AudioManager::setVolume(uint8_t percent) {
   if (lock.ok()) gState.volume = volume_;
 }
 
-void AudioManager::btDataCallback(const uint8_t* data, uint32_t len) {
-  if (!instance_ || !data || !len) return;
+esp_err_t AudioManager::usbOutputCallback(uint8_t* data, size_t len, void* /*ctx*/) {
+  if (!instance_ || !data || !len || !instance_->i2sMutex_)
+    return ESP_ERR_INVALID_ARG;
 
-  // Callback is intentionally non-blocking: the A2DP library owns the
-  // Bluetooth task, and I2S TX is already DMA buffered.
   size_t written = 0;
-  if (i2s_write(AUDIO_I2S_PORT, data, len, &written, 0) != ESP_OK ||
-      written != len) {
+  if (xSemaphoreTake(instance_->i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return ESP_ERR_TIMEOUT;
+
+  const esp_err_t err = i2s_write(AUDIO_I2S_PORT, data, len, &written,
+                                   pdMS_TO_TICKS(20));
+  bool captureDropped = false;
+  if (err == ESP_OK && written == len &&
+      instance_->captureUsbRecord_ && instance_->usbRecordBuffer_) {
+    const size_t queued = xStreamBufferSend(
+        instance_->usbRecordBuffer_, data, len, 0);
+    captureDropped = queued != len;
+  }
+  xSemaphoreGive(instance_->i2sMutex_);
+  if (err != ESP_OK || written != len || captureDropped) {
     StateLock lock(gState);
     if (lock.ok()) gState.audioDrops++;
+    if (err != ESP_OK || written != len) {
+      return err == ESP_OK ? ESP_ERR_TIMEOUT : err;
+    }
   }
+
+  instance_->updateAudioLevel(data, len);
+  instance_->lastUsbAudioMs_ = millis();
+  StateLock lock(gState);
+  if (lock.ok()) gState.usbAudioActive = true;
+  return ESP_OK;
 }
 
-void AudioManager::btConnectionCallback(esp_a2d_connection_state_t state,
-                                         void* /*ptr*/) {
+esp_err_t AudioManager::usbInputCallback(uint8_t* data, size_t len,
+                                         size_t* bytesRead, void* /*ctx*/) {
+  if (!instance_ || !data || !bytesRead || !len || !instance_->i2sMutex_)
+    return ESP_ERR_INVALID_ARG;
+
+  *bytesRead = 0;
+
+  if (instance_->usbPlaybackTransport_ && instance_->usbTransportBuffer_) {
+    const size_t got = xStreamBufferReceive(
+        instance_->usbTransportBuffer_, data, len, 0);
+    if (got < len) memset(data + got, 0, len - got);
+    *bytesRead = len;
+  } else if (instance_->captureWm8960Mic_ && instance_->usbMicBuffer_) {
+    const size_t got = xStreamBufferReceive(
+        instance_->usbMicBuffer_, data, len, 0);
+    if (got < len) memset(data + got, 0, len - got);
+    *bytesRead = len;
+  } else if (!instance_->usbMonitor_) {
+    memset(data, 0, len);
+    *bytesRead = len;
+  } else {
+    if (xSemaphoreTake(instance_->i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+      return ESP_ERR_TIMEOUT;
+
+    size_t got = 0;
+    const esp_err_t err = i2s_read(AUDIO_I2S_PORT, data, len, &got,
+                                   pdMS_TO_TICKS(20));
+    xSemaphoreGive(instance_->i2sMutex_);
+    if (err != ESP_OK) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.audioDrops++;
+      return err;
+    }
+    *bytesRead = got;
+  }
+  instance_->lastUsbAudioMs_ = millis();
+  StateLock lock(gState);
+  if (lock.ok()) gState.usbAudioActive = true;
+  return ESP_OK;
+}
+
+void AudioManager::usbMuteCallback(uint32_t mute, void* /*ctx*/) {
+  if (!instance_) return;
+  if (mute) {
+    instance_->preMuteVolume_ = instance_->volume_ ? instance_->volume_ : 70;
+    instance_->usbMuted_ = true;
+    instance_->setVolume(0);
+  } else {
+    instance_->usbMuted_ = false;
+    instance_->setVolume(instance_->preMuteVolume_);
+  }
+  StateLock lock(gState);
+  if (lock.ok()) gState.usbMuted = instance_->usbMuted_;
+}
+
+void AudioManager::usbVolumeCallback(uint32_t volume, void* /*ctx*/) {
+  if (!instance_) return;
+  const uint8_t percent = static_cast<uint8_t>(constrain(volume, 0U, 100U));
+  instance_->usbVolume_ = percent;
+  instance_->setVolume(percent);
   StateLock lock(gState);
   if (lock.ok()) {
-    gState.btConnected = (state == ESP_A2D_CONNECTION_STATE_CONNECTED);
+    gState.usbVolume = percent;
+    gState.usbMuted = false;
   }
 }
 
-bool AudioManager::btStart() {
-  if (!initialized_ || btStarted_) return btStarted_;
+bool AudioManager::usbStart() {
+  if (!initialized_) return false;
 
-  a2dp_.set_stream_reader(btDataCallback, false);
-  a2dp_.set_on_connection_state_changed(btConnectionCallback);
-  a2dp_.set_task_core(0);
-  a2dp_.set_task_priority(4);
-  a2dp_.start(Config::BT_NAME);
+  uac_device_config_t cfg{};
+  cfg.skip_tinyusb_init = false;
+  cfg.output_cb = usbOutputCallback;
+  cfg.input_cb = usbInputCallback;
+  cfg.set_mute_cb = usbMuteCallback;
+  cfg.set_volume_cb = usbVolumeCallback;
+  cfg.cb_ctx = this;
 
-  btStarted_ = true;
+  const esp_err_t err = uac_device_init(&cfg);
+  const bool ok = err == ESP_OK;
   StateLock lock(gState);
-  if (lock.ok()) gState.btStarted = true;
-  return true;
+  if (lock.ok()) {
+    gState.usbAudioReady = ok;
+    if (!ok) gState.lastError = "USB Audio Class init failed";
+  }
+  return ok;
 }
 
 void AudioManager::task() {
-  if (!initialized_) return;
+  if (millis() - lastUsbAudioMs_ > 500) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.usbAudioActive = false;
+  }
+
+  if (!initialized_ || !mutex_ ||
+      xSemaphoreTake(mutex_, 0) != pdTRUE)
+    return;
+
+  if (!playing_ && playFile_) {
+    SpiLock spiLock(pdMS_TO_TICKS(20));
+    if (spiLock.ok()) playFile_.close();
+  }
 
   if (playing_) {
-    if (!playFile_) {
-      stopPlayback();
+    if (playbackPaused_) {
+      xSemaphoreGive(mutex_);
       return;
     }
 
-    uint8_t buffer[Config::AUDIO_IO_BYTES];
-    size_t n = playFile_.read(buffer, sizeof(buffer));
-    if (!n) {
-      stopPlayback();
-      return;
+    (void)fillPlaybackBuffer();
+    bool done = playbackEof_ && xStreamBufferBytesAvailable(playbackBuffer_) == 0;
+    if (!done) {
+      if (!playDecodedBuffer()) {
+        StateLock lock(gState);
+        if (lock.ok()) {
+          gState.audioDrops++;
+          gState.lastError = "Audio decoder/I2S playback failed";
+        }
+        done = true;
+      }
     }
 
-    size_t written = 0;
-    if (i2s_write(AUDIO_I2S_PORT, buffer, n, &written, pdMS_TO_TICKS(20)) != ESP_OK ||
-        written != n) {
+    {
       StateLock lock(gState);
-      if (lock.ok()) gState.audioDrops++;
-      stopPlayback();
-      return;
+      if (lock.ok()) gState.playbackPositionMs = playbackPositionMs_;
+    }
+
+    if (done) {
+      playing_ = false;
+      playbackRemaining_ = 0;
+      closePlaybackDecoder();
+      {
+        SpiLock spiLock(pdMS_TO_TICKS(50));
+        if (spiLock.ok() && playFile_) playFile_.close();
+      }
+      StateLock lock(gState);
+      if (lock.ok()) gState.playing = false;
+      if (queueCount_) {
+        xSemaphoreGive(mutex_);
+        (void)playNextQueued();
+        return;
+      }
     }
   }
 
   bool rec = false;
   {
     StateLock lock(gState);
-    if (!lock.ok()) return;
+    if (!lock.ok()) {
+      xSemaphoreGive(mutex_);
+      return;
+    }
     rec = gState.recording;
   }
-  if (!rec) return;
+  if (!rec) {
+    if (recordFile_) {
+      (void)finalizeWav();
+    } else if (!recordPath_.isEmpty()) {
+      discardRecordingFile();
+    }
+    const bool vox = voxEnabled_;
+    const float rms = [&]() {
+      StateLock lock(gState);
+      return lock.ok() ? gState.audioRms : 0.0f;
+    }();
+    xSemaphoreGive(mutex_);
+    if (vox && rms >= voxThreshold_) (void)startRecording();
+    return;
+  }
 
-  if (millis() - recordStartedMs_ >= Config::RECORD_MAX_SECONDS * 1000UL) {
-    stopRecording();
+  if (!recordingPaused_ &&
+      millis() - recordStartedMs_ >= Config::RECORD_SPLIT_SECONDS * 1000UL) {
+    xSemaphoreGive(mutex_);
+    (void)splitRecording();
+    return;
+  }
+
+  if (recordingPaused_) {
+    xSemaphoreGive(mutex_);
     return;
   }
 
   uint8_t buffer[Config::AUDIO_IO_BYTES];
-  size_t got = 0;
-  if (i2s_read(AUDIO_I2S_PORT, buffer, sizeof(buffer), &got, pdMS_TO_TICKS(5)) == ESP_OK &&
-      got > 0 && recordFile_) {
-    const size_t written = recordFile_.write(buffer, got);
-    recordedBytes_ += written;
-    if (written != got) {
+
+  if (recordSource_ == Config::AUDIO_SOURCE_USB) {
+    const size_t got = usbRecordBuffer_
+        ? xStreamBufferReceive(usbRecordBuffer_, buffer, sizeof(buffer), 0)
+        : 0;
+    if (got > 0 && recordFile_) updateAudioLevel(buffer, got);
+    if (got > 0 && recordFile_ && !writeRecordingData(buffer, got)) {
+      captureUsbRecord_ = false;
       StateLock lock(gState);
-      if (lock.ok()) gState.audioDrops++;
+      if (lock.ok()) gState.recording = false;
+      (void)finalizeWav();
+    }
+    xSemaphoreGive(mutex_);
+    return;
+  }
+
+  size_t got = 0;
+  bool i2sLocked = i2sMutex_ &&
+                   xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(5)) == pdTRUE;
+  const esp_err_t readErr = i2sLocked
+      ? i2s_read(AUDIO_I2S_PORT, buffer, sizeof(buffer), &got, pdMS_TO_TICKS(5))
+      : ESP_ERR_TIMEOUT;
+  if (i2sLocked) xSemaphoreGive(i2sMutex_);
+
+  if (readErr == ESP_OK && got > 0 && recordFile_) {
+    updateAudioLevel(buffer, got);
+    if (usbMicBuffer_) {
+      const size_t queued = xStreamBufferSend(usbMicBuffer_, buffer, got, 0);
+      if (queued != got) {
+        StateLock lock(gState);
+        if (lock.ok()) gState.audioDrops++;
+      }
+    }
+    if (!writeRecordingData(buffer, got)) {
+      captureWm8960Mic_ = false;
+      StateLock lock(gState);
+      if (lock.ok()) gState.recording = false;
+      (void)finalizeWav();
     }
   }
+
+  bool voxStop = false;
+  if (voxEnabled_ && !recordingPaused_) {
+    const uint32_t now = millis();
+    StateLock lock(gState);
+    if (lock.ok()) {
+      if (gState.audioRms >= voxThreshold_) {
+        voxLastVoiceMs_ = now;
+      } else if (voxLastVoiceMs_ != 0 && now - voxLastVoiceMs_ >= voxHangMs_) {
+        voxStop = true;
+      }
+    }
+  }
+  xSemaphoreGive(mutex_);
+  if (voxStop) (void)stopRecording();
 }
