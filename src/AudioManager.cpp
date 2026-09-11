@@ -699,12 +699,12 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
 
 
 bool AudioManager::playVoiceFrame(const uint8_t* data, size_t len) {
-  if (!data || len != 166 || data[0] != 0x56 || data[1] != 1 ||
+  if (!data || len != 168 || data[0] != 0x56 || data[1] != 1 ||
       data[2] != Config::VOICE_FRAME_MS || !initialized_ || !i2sMutex_) return false;
-  const uint16_t expectedCrc = static_cast<uint16_t>(data[164]) |
-                               (static_cast<uint16_t>(data[165]) << 8);
+  const uint16_t expectedCrc = static_cast<uint16_t>(data[166]) |
+                               (static_cast<uint16_t>(data[167]) << 8);
   uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < 164; ++i) {
+  for (size_t i = 0; i < 166; ++i) {
     crc ^= data[i];
     for (uint8_t b = 0; b < 8; ++b)
       crc = (crc & 1) ? static_cast<uint16_t>((crc >> 1) ^ 0xA001) :

@@ -249,7 +249,10 @@ static void manageWifi(uint32_t now) {
   }
   if (!wifiIdleSince) wifiIdleSince = now;
   if (now - wifiIdleSince >= Config::WIFI_AP_IDLE_TIMEOUT_MS) {
+    // softAPdisconnect() can leave the Wi-Fi mode set to WIFI_AP. Switch the
+    // radio fully off so the retry branch below can actually restart the AP.
     WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
     StateLock lock(gState);
     if (lock.ok()) gState.wifiReady = false;
     wifiRetryMs = now;

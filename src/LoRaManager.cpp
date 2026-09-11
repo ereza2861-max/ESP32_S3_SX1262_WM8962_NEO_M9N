@@ -543,7 +543,7 @@ void LoRaManager::task() {
       StateLock textLock(gState);
       if (textLock.ok()) gState.lastMessage = String(text);
     }
-    if (authenticated && type == 1 && !duplicateV2 && plainLen == 166 &&
+    if (authenticated && type == 1 && !duplicateV2 && plainLen == 168 &&
         plain[0] == 0x56 && plain[1] == 1 &&
         (static_cast<uint16_t>(plain[4]) | (static_cast<uint16_t>(plain[5]) << 8)) == seq &&
         plain[2] == Config::VOICE_FRAME_MS &&
@@ -866,7 +866,7 @@ bool LoRaManager::sendText(const String& text) {
 
 bool LoRaManager::sendVoiceFrame() {
   uint8_t captured[164] = {};
-  uint8_t frame[166] = {};
+  uint8_t frame[168] = {};
   size_t len = 0;
   if (!audio.captureVoiceFrame(captured, sizeof(captured), len) || len != sizeof(captured))
     return false;
@@ -879,9 +879,9 @@ bool LoRaManager::sendVoiceFrame() {
   frame[4] = static_cast<uint8_t>(seq & 0xFF);
   frame[5] = static_cast<uint8_t>(seq >> 8);
   memcpy(frame + 6, captured + 4, 160);
-  const uint16_t crc = crc16(frame, 164);
-  frame[164] = static_cast<uint8_t>(crc & 0xFF);
-  frame[165] = static_cast<uint8_t>(crc >> 8);
+  const uint16_t crc = crc16(frame, 166);
+  frame[166] = static_cast<uint8_t>(crc & 0xFF);
+  frame[167] = static_cast<uint8_t>(crc >> 8);
   String packet;
   if (!encryptPacket(frame, sizeof(frame), 1, seq, packet)) return false;
   if (packet.length() > Config::LORA_MAX_PACKET) return false;
