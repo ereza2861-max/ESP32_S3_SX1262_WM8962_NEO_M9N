@@ -123,7 +123,6 @@ constexpr size_t PLAYBACK_PREBUFFER_BYTES = 16384;
 constexpr size_t USB_TRANSPORT_BUFFER_BYTES = 16384;
 constexpr uint8_t PLAYBACK_QUEUE_DEPTH = 16;
 constexpr uint32_t RECORD_SPLIT_SECONDS = 300;
-constexpr uint32_t RECORD_MAX_SECONDS = 300;
 constexpr uint32_t RECORD_MIN_FREE_BYTES = 2UL * 1024UL * 1024UL;
 constexpr uint32_t RECORD_MAX_TOTAL_BYTES = 512UL * 1024UL * 1024UL;
 constexpr uint32_t TRACK_LOG_PERIOD_MS = 10000;

@@ -499,12 +499,18 @@ void LoRaManager::task() {
   int16_t readSt = RADIOLIB_ERR_NONE;
   int16_t rxSt = RADIOLIB_ERR_NONE;
   String msg;
+  int16_t rssi = -127;
+  float snr = -20.0f;
 
   {
     SpiLock spiLock(pdMS_TO_TICKS(20));
     if (spiLock.ok()) {
       spiOk = true;
       readSt = radio_.readData(msg);
+      if (readSt == RADIOLIB_ERR_NONE) {
+        rssi = static_cast<int16_t>(radio_.getRSSI());
+        snr = radio_.getSNR();
+      }
       rxSt = radio_.startReceive();
     }
   }
@@ -513,8 +519,6 @@ void LoRaManager::task() {
   // managers update state after releasing SPI, so this lock ordering avoids
   // a cross-task deadlock.
   if (spiOk && readSt == RADIOLIB_ERR_NONE) {
-    const int16_t rssi = static_cast<int16_t>(radio_.getRSSI());
-    const float snr = radio_.getSNR();
     uint8_t plain[220] = {};
     uint8_t type = 0;
     uint16_t seq = 0;
@@ -525,16 +529,21 @@ void LoRaManager::task() {
         msg, type, seq, rxSourceId, rxTtl, plain, sizeof(plain), plainLen);
     const bool isV2 = authenticated &&
                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION;
+    const bool duplicateV2 = isV2 &&
+        seenDedup(rxSourceId, seq, hashPayload(plain, plainLen));
     bool pttOrRecording = false;
     {
       StateLock stateLock(gState);
       if (stateLock.ok()) pttOrRecording = gState.ptt || gState.recording;
     }
-    if (authenticated && type == 0 && plainLen > 0) {
+    if (authenticated && type == 0 && plainLen > 0 && !duplicateV2) {
+      char text[Config::LORA_MAX_PACKET + 1] = {};
+      memcpy(text, plain, plainLen);
+      text[plainLen] = '\0';
       StateLock textLock(gState);
-      if (textLock.ok()) gState.lastMessage = String(reinterpret_cast<const char*>(plain)).substring(0, plainLen);
+      if (textLock.ok()) gState.lastMessage = String(text);
     }
-    if (authenticated && type == 1 && plainLen == 166 &&
+    if (authenticated && type == 1 && !duplicateV2 && plainLen == 166 &&
         plain[0] == 0x56 && plain[1] == 1 &&
         (static_cast<uint16_t>(plain[4]) | (static_cast<uint16_t>(plain[5]) << 8)) == seq &&
         plain[2] == Config::VOICE_FRAME_MS &&
@@ -564,8 +573,8 @@ void LoRaManager::task() {
         }
       }
     }
-    if (authenticated && isV2 && rxSourceId != sourceId_ && rxTtl > 1 &&
-        plainLen > 0 && !seenDedup(rxSourceId, seq, hashPayload(plain, plainLen))) {
+    if (authenticated && isV2 && !duplicateV2 && rxSourceId != sourceId_ &&
+        rxTtl > 1 && plainLen > 0) {
       (void)enqueueForward(type, seq, rxSourceId, rxTtl, plain, plainLen);
     }
 
@@ -642,6 +651,7 @@ bool LoRaManager::processPendingTx() {
   int16_t rxSt = RADIOLIB_ERR_NONE;
   bool budgetConsumed = false;
   RadioLibTime_t airtimeUs = 0;
+  String pendingError;
 
   {
     SpiLock spiLock(pdMS_TO_TICKS(20));
@@ -653,8 +663,7 @@ bool LoRaManager::processPendingTx() {
           pendingTx_.packet = String();
           done = true;
           rxSt = radio_.startReceive();
-          StateLock lock(gState);
-          if (lock.ok()) gState.lastError = "LBT_TIMEOUT";
+          pendingError = "LBT_TIMEOUT";
         } else {
           ++pendingTx_.retries;
           const uint32_t span = Config::LORA_LBT_BACKOFF_MAX_MS -
@@ -669,11 +678,7 @@ bool LoRaManager::processPendingTx() {
             pendingTx_.packet = String();
             done = true;
             ready_ = false;
-            StateLock lock(gState);
-            if (lock.ok()) {
-              gState.loraReady = false;
-              gState.lastError = "SX1276 RX restart failed after LBT";
-            }
+            pendingError = "SX1276 RX restart failed after LBT";
           }
         }
       } else if (st == RADIOLIB_CHANNEL_FREE) {
@@ -685,8 +690,7 @@ bool LoRaManager::processPendingTx() {
           done = true;
           st = RADIOLIB_ERR_UNKNOWN;
           rxSt = radio_.startReceive();
-          StateLock lock(gState);
-          if (lock.ok()) gState.lastError = "LoRa duty-cycle budget exhausted";
+          pendingError = "LoRa duty-cycle budget exhausted";
         } else {
           budgetConsumed = true;
           const uint32_t txStartMs = millis();
@@ -708,8 +712,7 @@ bool LoRaManager::processPendingTx() {
         pendingTx_.active = false;
         pendingTx_.packet = String();
         done = true;
-        StateLock lock(gState);
-        if (lock.ok()) gState.lastError = "LBT scan failed: " + String(st);
+        pendingError = "LBT scan failed: " + String(st);
         rxSt = radio_.startReceive();
       }
     } else {
@@ -717,9 +720,13 @@ bool LoRaManager::processPendingTx() {
       pendingTx_.active = false;
       pendingTx_.packet = String();
       done = true;
-      StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "LBT SPI lock failed";
+      pendingError = "LBT SPI lock failed";
     }
+  }
+
+  if (!pendingError.isEmpty()) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = pendingError;
   }
 
   if (rxSt != RADIOLIB_ERR_NONE) {

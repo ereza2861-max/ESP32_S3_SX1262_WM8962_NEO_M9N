@@ -252,6 +252,9 @@ static void manageWifi(uint32_t now) {
     WiFi.softAPdisconnect(true);
     StateLock lock(gState);
     if (lock.ok()) gState.wifiReady = false;
+    wifiRetryMs = now;
+    wifiIdleSince = now;
+    return;
   }
   if (WiFi.getMode() == WIFI_OFF && now - wifiRetryMs >= Config::WIFI_AP_RETRY_MS) {
     wifiRetryMs = now;

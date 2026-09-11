@@ -2,4 +2,4 @@
 # Single factory application; no otadata/app0/app1 partitions are allocated.
 nvs,data,nvs,0x9000,0x5000
 phy_init,data,phy,0xF000,0x1000
-factory,app,factory,0x10000,0x3F0000
+factory,app,factory,0x10000,0xFF0000

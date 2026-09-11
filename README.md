@@ -76,6 +76,10 @@ Package KiCad yang diberikan sendiri menyebut desain sebagai engineering seed/re
 ERC/DRC, simbol/footprint, power integrity, RF matching, antenna network, GNSS RF path,
 dan level/clock audio tetap harus divalidasi pada PCB final.
 
+## Flash / partition layout
+
+This variant targets a 16 MiB flash device. The no-OTA partition table allocates the full remaining flash after the bootloader/table region to a single factory application (`0x10000..0xFFFFFF`). PlatformIO is explicitly configured for a 16 MiB flash image and matching maximum application size.
+
 ## Build
 
 PlatformIO is the single build backend for both local development and GitHub Actions.
