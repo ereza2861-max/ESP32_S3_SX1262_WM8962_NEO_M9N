@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include "Config.h"
 
 struct GpsState {
   double lat = 0.0;
@@ -11,6 +12,35 @@ struct GpsState {
   uint32_t hdop_x10 = 0;
   bool valid = false;
   uint32_t lastFixMs = 0;
+  bool timeValid = false;
+  uint64_t utcEpoch = 0;
+};
+
+struct MessageHistoryEntry {
+  uint64_t timestamp = 0;
+  uint32_t sourceId = 0;
+  String text;
+};
+
+struct LoraPacketLogEntry {
+  uint64_t timestamp = 0;
+  bool tx = false;
+  uint8_t type = 0;
+  uint16_t seq = 0;
+  uint32_t sourceId = 0;
+  int16_t rssi = -127;
+  float snr = -20.0f;
+  uint8_t ttl = 0;
+};
+
+struct HealthLogEntry {
+  uint64_t timestamp = 0;
+  uint8_t stalledMask = 0;
+  uint32_t heapFree = 0;
+  uint32_t gnssStackMin = 0;
+  uint32_t loraStackMin = 0;
+  uint32_t audioStackMin = 0;
+  uint32_t webStackMin = 0;
 };
 
 extern SemaphoreHandle_t gSpiMutex;
@@ -54,6 +84,15 @@ struct RuntimeState {
   bool batteryLow = false;
   bool batteryCritical = false;
   String lastMessage;
+  MessageHistoryEntry messageHistory[Config::MESSAGE_HISTORY_SIZE] = {};
+  size_t messageHistoryNext = 0;
+  size_t messageHistoryCount = 0;
+  LoraPacketLogEntry loraPacketLog[Config::LORA_PACKET_LOG_SIZE] = {};
+  size_t loraPacketLogNext = 0;
+  size_t loraPacketLogCount = 0;
+  HealthLogEntry healthLog[Config::HEALTH_LOG_SIZE] = {};
+  size_t healthLogNext = 0;
+  size_t healthLogCount = 0;
   String lastAudioFile;
   String lastError;
   uint32_t txPackets = 0;

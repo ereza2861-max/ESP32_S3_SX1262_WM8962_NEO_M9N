@@ -276,8 +276,12 @@ static void taskHealth(void*) {
     if (now - lastCheck >= 5000) {
       const uint32_t hb[4] = {hbGnss, hbLoRa, hbAudio, hbWeb};
       bool stalled = false;
+      uint8_t stalledMask = 0;
       for (size_t i = 0; i < 4; ++i) {
-        if (hb[i] == last[i]) stalled = true;
+        if (hb[i] == last[i]) {
+          stalled = true;
+          stalledMask |= static_cast<uint8_t>(1U << i);
+        }
         last[i] = hb[i];
       }
       StateLock lock(gState);
@@ -287,7 +291,21 @@ static void taskHealth(void*) {
         gState.loraStackMin = hLoRa ? uxTaskGetStackHighWaterMark(hLoRa) : 0;
         gState.audioStackMin = hAudio ? uxTaskGetStackHighWaterMark(hAudio) : 0;
         gState.webStackMin = hWeb ? uxTaskGetStackHighWaterMark(hWeb) : 0;
-        if (stalled) gState.healthAlerts++;
+        if (stalled) {
+          ++gState.healthAlerts;
+          HealthLogEntry& e = gState.healthLog[gState.healthLogNext];
+          e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : now;
+          e.stalledMask = stalledMask;
+          e.heapFree = gState.heapFree;
+          e.gnssStackMin = gState.gnssStackMin;
+          e.loraStackMin = gState.loraStackMin;
+          e.audioStackMin = gState.audioStackMin;
+          e.webStackMin = gState.webStackMin;
+          gState.healthLogNext =
+              (gState.healthLogNext + 1) % Config::HEALTH_LOG_SIZE;
+          if (gState.healthLogCount < Config::HEALTH_LOG_SIZE)
+            ++gState.healthLogCount;
+        }
       }
       lastCheck = now;
     }

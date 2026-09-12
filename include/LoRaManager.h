@@ -84,4 +84,22 @@ private:
                      size_t capacity, size_t& len);
   bool loadKey(uint8_t key[16]) const;
   static uint16_t crc16(const uint8_t* data, size_t len);
+  void logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t sourceId,
+                 int16_t rssi, float snr, uint8_t ttl);
+  void addMessageHistory(uint32_t sourceId, const char* text);
+  bool forwardRateAllowed(uint32_t sourceId, uint8_t type);
+  void serviceVoiceReorder();
+  struct ForwardSourceRate {
+    uint32_t sourceId = 0;
+    uint32_t lastMs = 0;
+  };
+  ForwardSourceRate forwardSourceRates_[Config::LORA_FORWARD_SOURCE_CACHE_SIZE] = {};
+  size_t forwardSourceNext_ = 0;
+  struct VoiceRxSlot {
+    bool used = false;
+    uint16_t seq = 0;
+    uint32_t receivedMs = 0;
+    uint8_t data[168] = {};
+  };
+  VoiceRxSlot voiceRx_[Config::VOICE_REORDER_BUFFER_SIZE] = {};
 };

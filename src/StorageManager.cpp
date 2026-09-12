@@ -71,12 +71,32 @@ String StorageManager::listJson(const String& dir) {
   return out;
 }
 
+
+bool StorageManager::isManagedAudioPath(const String& path) const {
+  return isSafePath(path) && path.startsWith("/REC/") &&
+         path.lastIndexOf('/') == 4 && !path.endsWith("/") &&
+         path.length() > 9 && path.substring(path.lastIndexOf(".")).equalsIgnoreCase(".WAV");
+}
+
+bool StorageManager::renameFile(const String& from, const String& to) {
+  if (!isManagedAudioPath(from) || !isManagedAudioPath(to) || from == to)
+    return false;
+  {
+    StateLock lock(gState);
+    if (!lock.ok() || gState.recording ||
+        (gState.playing && (from == gState.lastAudioFile || to == gState.lastAudioFile)))
+      return false;
+  }
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  if (!spiLock.ok() || !SD.exists(from) || SD.exists(to)) return false;
+  return SD.rename(from, to);
+}
+
 bool StorageManager::removeFile(const String& path) {
   // The web API is intended to manage recorded WAV files only. Restrict
   // deletion to direct children of /REC so unrelated SD-card content and
   // directories cannot be removed through this endpoint.
-  if (!isSafePath(path) || !path.startsWith("/REC/") || path.endsWith("/") ||
-      path.lastIndexOf('/') != 4 || !path.endsWith(".WAV"))
+  if (!isManagedAudioPath(path))
     return false;
 
   {
@@ -124,7 +144,7 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
         // Normalize before calling SD.remove(), otherwise cleanup can reject
         // every candidate and recording fails exactly when storage is low.
         if (!name.startsWith("/")) name = "/REC/" + name;
-        if (name.startsWith("/REC/") && name.endsWith(".WAV") &&
+        if (name.startsWith("/REC/") && name.substring(name.lastIndexOf(".")).equalsIgnoreCase(".WAV") &&
             name.length() > 5 &&
             (oldest.isEmpty() || name.compareTo(oldest) < 0)) {
           oldest = name;

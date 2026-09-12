@@ -1511,6 +1511,8 @@ void AudioManager::usbVolumeCallback(uint32_t volume, void* /*ctx*/) {
   const uint8_t percent = static_cast<uint8_t>(constrain(volume, 0U, 100U));
   instance_->usbVolume_ = percent;
   instance_->setVolume(percent);
+  instance_->usbVolumeDirty_ = true;
+  instance_->usbVolumeDirtyMs_ = millis();
   StateLock lock(gState);
   if (lock.ok()) {
     gState.usbVolume = percent;
@@ -1540,6 +1542,20 @@ bool AudioManager::usbStart() {
 }
 
 void AudioManager::task() {
+  if (usbVolumeDirty_ && millis() - usbVolumeDirtyMs_ >= Config::USB_VOLUME_PERSIST_DELAY_MS) {
+    const uint8_t volume = usbVolume_;
+    RuntimeConfig candidate = gConfig;
+    candidate.volume = volume;
+    if (candidate.save()) {
+      gConfig.volume = volume;
+      usbVolumeDirty_ = false;
+    } else {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "USB volume NVS save failed";
+      usbVolumeDirty_ = false;
+    }
+  }
+
   if (millis() - lastUsbAudioMs_ > 500) {
     StateLock lock(gState);
     if (lock.ok()) gState.usbAudioActive = false;

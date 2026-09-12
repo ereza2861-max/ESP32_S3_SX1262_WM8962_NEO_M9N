@@ -248,10 +248,61 @@ bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint32_t payloadHas
   return false;
 }
 
+
+void LoRaManager::logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t sourceId,
+                            int16_t rssi, float snr, uint8_t ttl) {
+  StateLock lock(gState);
+  if (!lock.ok()) return;
+  LoraPacketLogEntry& e = gState.loraPacketLog[gState.loraPacketLogNext];
+  e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : millis();
+  e.tx = tx; e.type = type; e.seq = seq; e.sourceId = sourceId;
+  e.rssi = rssi; e.snr = snr; e.ttl = ttl;
+  gState.loraPacketLogNext =
+      (gState.loraPacketLogNext + 1) % Config::LORA_PACKET_LOG_SIZE;
+  if (gState.loraPacketLogCount < Config::LORA_PACKET_LOG_SIZE)
+    ++gState.loraPacketLogCount;
+}
+
+void LoRaManager::addMessageHistory(uint32_t sourceId, const char* text) {
+  if (!text) return;
+  StateLock lock(gState);
+  if (!lock.ok()) return;
+  MessageHistoryEntry& e = gState.messageHistory[gState.messageHistoryNext];
+  e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : millis();
+  e.sourceId = sourceId;
+  e.text = text;
+  gState.messageHistoryNext =
+      (gState.messageHistoryNext + 1) % Config::MESSAGE_HISTORY_SIZE;
+  if (gState.messageHistoryCount < Config::MESSAGE_HISTORY_SIZE)
+    ++gState.messageHistoryCount;
+  gState.lastMessage = text;
+}
+
+bool LoRaManager::forwardRateAllowed(uint32_t sourceId, uint8_t type) {
+  const uint32_t now = millis();
+  const uint32_t interval = type == 1
+      ? Config::LORA_FORWARD_VOICE_RATE_LIMIT_MS
+      : Config::LORA_FORWARD_RATE_LIMIT_MS;
+  for (size_t i = 0; i < Config::LORA_FORWARD_SOURCE_CACHE_SIZE; ++i) {
+    if (forwardSourceRates_[i].sourceId == sourceId) {
+      if (now - forwardSourceRates_[i].lastMs < interval) return false;
+      forwardSourceRates_[i].lastMs = now;
+      return true;
+    }
+  }
+  ForwardSourceRate& slot = forwardSourceRates_[forwardSourceNext_];
+  slot.sourceId = sourceId;
+  slot.lastMs = now;
+  forwardSourceNext_ =
+      (forwardSourceNext_ + 1) % Config::LORA_FORWARD_SOURCE_CACHE_SIZE;
+  return true;
+}
+
 bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                                   uint8_t ttl, const uint8_t* payload, size_t len) {
   if (!forwardQueue_ || !payload || !len ||
       len > Config::LORA_MAX_PACKET || ttl <= 1) return false;
+  if (!forwardRateAllowed(sourceId, type)) return false;
 
   ForwardPacket packet{};
   packet.type = type;
@@ -375,6 +426,7 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
       if (txOk) gState.txPackets++;
     }
   }
+  if (txOk) logPacket(true, forward.type, forward.seq, forward.sourceId, 0, 0.0f, forward.ttl);
   xSemaphoreGive(mutex_);
   return txOk;
 }
@@ -424,10 +476,58 @@ bool LoRaManager::begin() {
   return true;
 }
 
+
+void LoRaManager::serviceVoiceReorder() {
+  if (!haveVoiceRxSequence_ || isPttOrRecording()) return;
+  for (;;) {
+    const uint16_t want = static_cast<uint16_t>(lastVoiceRxSequence_ + 1);
+    VoiceRxSlot* selected = nullptr;
+    for (auto& slot : voiceRx_)
+      if (slot.used && slot.seq == want) { selected = &slot; break; }
+    if (!selected) break;
+    const bool played = audio.playVoiceFrame(selected->data, sizeof(selected->data));
+    selected->used = false;
+    if (!played) {
+      StateLock lock(gState);
+      if (lock.ok()) ++gState.voiceDrops;
+      break;
+    }
+    lastVoiceRxSequence_ = want;
+    StateLock lock(gState);
+    if (lock.ok()) {
+      ++gState.voiceRxPackets;
+      gState.rxActive = true;
+      gState.rxActivityMs = millis();
+    }
+  }
+
+  const uint32_t now = millis();
+  VoiceRxSlot* oldest = nullptr;
+  uint16_t oldestSeq = 0;
+  for (auto& slot : voiceRx_) {
+    if (!slot.used) continue;
+    if (!oldest || static_cast<int16_t>(slot.seq - oldestSeq) < 0) {
+      oldest = &slot;
+      oldestSeq = slot.seq;
+    }
+  }
+  if (oldest && now - oldest->receivedMs >= Config::VOICE_REORDER_HOLD_MS) {
+    const uint16_t want = static_cast<uint16_t>(lastVoiceRxSequence_ + 1);
+    const uint16_t skipped = static_cast<uint16_t>(oldestSeq - want);
+    if (skipped > 0 && skipped < 0x8000U) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.voiceRxLost += skipped;
+      lastVoiceRxSequence_ = static_cast<uint16_t>(oldestSeq - 1);
+      serviceVoiceReorder();
+    }
+  }
+}
+
 void LoRaManager::task() {
   if (!mutex_) return;
 
   (void)processPendingTx();
+  serviceVoiceReorder();
 
   bool ptt = false;
   {
@@ -540,8 +640,7 @@ void LoRaManager::task() {
       char text[Config::LORA_MAX_PACKET + 1] = {};
       memcpy(text, plain, plainLen);
       text[plainLen] = '\0';
-      StateLock textLock(gState);
-      if (textLock.ok()) gState.lastMessage = String(text);
+      addMessageHistory(rxSourceId, text);
     }
     if (authenticated && type == 1 && !duplicateV2 && plainLen == 168 &&
         plain[0] == 0x56 && plain[1] == 1 &&
@@ -549,35 +648,45 @@ void LoRaManager::task() {
         plain[2] == Config::VOICE_FRAME_MS &&
         rssi >= Config::VOICE_RSSI_THRESHOLD_DBM &&
         snr >= Config::VOICE_SNR_THRESHOLD_DB && !pttOrRecording) {
-      bool duplicate = haveVoiceRxSequence_ && seq == lastVoiceRxSequence_;
-      if (!duplicate) {
-        if (haveVoiceRxSequence_) {
-          const uint16_t expected = static_cast<uint16_t>(lastVoiceRxSequence_ + 1);
-          if (seq != expected) {
-            StateLock lossLock(gState);
-            if (lossLock.ok()) gState.voiceRxLost += static_cast<uint16_t>(seq - expected);
-          }
-        }
-        lastVoiceRxSequence_ = seq;
+      if (!haveVoiceRxSequence_) {
+        lastVoiceRxSequence_ = static_cast<uint16_t>(seq - 1);
         haveVoiceRxSequence_ = true;
-        if (audio.playVoiceFrame(plain, plainLen)) {
-          StateLock voiceLock(gState);
-          if (voiceLock.ok()) {
-            gState.voiceRxPackets++;
-            gState.rxActive = true;
-            gState.rxActivityMs = millis();
-          }
-        } else {
-          StateLock voiceLock(gState);
-          if (voiceLock.ok()) gState.voiceDrops++;
-        }
       }
+      const uint16_t expected = static_cast<uint16_t>(lastVoiceRxSequence_ + 1);
+      const int16_t distance = static_cast<int16_t>(seq - expected);
+      if (distance >= 0 &&
+          distance < static_cast<int16_t>(Config::VOICE_REORDER_BUFFER_SIZE)) {
+        bool alreadyQueued = false;
+        for (auto& slot : voiceRx_)
+          if (slot.used && slot.seq == seq) { alreadyQueued = true; break; }
+        if (!alreadyQueued) {
+          VoiceRxSlot* freeSlot = nullptr;
+          for (auto& slot : voiceRx_)
+            if (!slot.used) { freeSlot = &slot; break; }
+          if (freeSlot) {
+            freeSlot->used = true;
+            freeSlot->seq = seq;
+            freeSlot->receivedMs = millis();
+            memcpy(freeSlot->data, plain, sizeof(freeSlot->data));
+          } else {
+            StateLock lossLock(gState);
+            if (lossLock.ok()) ++gState.voiceRxLost;
+          }
+        }
+      } else if (distance >= 0) {
+        StateLock lossLock(gState);
+        if (lossLock.ok()) gState.voiceRxLost += static_cast<uint32_t>(distance);
+        lastVoiceRxSequence_ = static_cast<uint16_t>(seq - 1);
+      }
+      serviceVoiceReorder();
     }
+
     if (authenticated && isV2 && !duplicateV2 && rxSourceId != sourceId_ &&
         rxTtl > 1 && plainLen > 0) {
       (void)enqueueForward(type, seq, rxSourceId, rxTtl, plain, plainLen);
     }
 
+    if (authenticated) logPacket(false, type, seq, rxSourceId, rssi, snr, rxTtl);
     StateLock rxState(gState);
     if (rxState.ok()) {
       gState.loraRssi = rssi;
@@ -825,6 +934,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       if (ok) gState.txPackets++;
     }
   }
+  if (ok) logPacket(true, 0, static_cast<uint16_t>(txSequence_ - 1), sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
   xSemaphoreGive(mutex_);
   return ok;
 }
@@ -887,8 +997,11 @@ bool LoRaManager::sendVoiceFrame() {
   if (packet.length() > Config::LORA_MAX_PACKET) return false;
   const bool ok = transmit(packet, true);
   if (ok) {
-    StateLock lock(gState);
-    if (lock.ok()) gState.voiceTxPackets++;
+    {
+      StateLock lock(gState);
+      if (lock.ok()) gState.voiceTxPackets++;
+    }
+    logPacket(true, 1, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
   }
   return ok;
 }

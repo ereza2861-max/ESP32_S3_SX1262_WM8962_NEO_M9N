@@ -60,6 +60,8 @@ private:
   volatile bool loopback_ = false;
   volatile bool usbMuted_ = false;
   volatile uint8_t usbVolume_ = 100;
+  volatile bool usbVolumeDirty_ = false;
+  volatile uint32_t usbVolumeDirtyMs_ = 0;
   StreamBufferHandle_t usbRecordBuffer_ = nullptr;
   StreamBufferHandle_t usbMicBuffer_ = nullptr;
   StreamBufferHandle_t playbackBuffer_ = nullptr;

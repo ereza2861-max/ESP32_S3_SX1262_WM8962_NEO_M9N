@@ -7,6 +7,7 @@
 #include "PersistentConfig.h"
 #include <esp_system.h>
 #include <WiFi.h>
+#include <SD.h>
 
 static String jsonEscape(const String& input) {
   String out;
@@ -46,6 +47,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(
 body{font-family:sans-serif;max-width:900px;margin:auto;padding:16px;background:#111;color:#eee}
 button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:10px;overflow:auto}
 .card{border:1px solid #444;border-radius:8px;padding:12px;margin:8px 0}
+.battery-low{outline:3px solid orange}.battery-critical{outline:4px solid red}
 </style></head><body><h1>FieldRadio</h1>
 <div class=card>
 <button onclick="ptt(1)">PTT ON</button><button onclick="ptt(0)">PTT OFF</button>
@@ -73,13 +75,21 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=pwr value="14" placeholder="Power dBm"><input id=sw value="18" placeholder="Sync word">
 <input id=cs value="FIELD" placeholder="Callsign"><input id=key placeholder="LoRa AES-128 key (32 hex chars)"><input id=vol value="70" placeholder="Volume">
 <input id=bat value="1.0" placeholder="Battery calibration">
+<input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
 <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
 <button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button></div>
 <div class=card><h3>Status</h3><pre id=s></pre></div>
-<div class=card><h3>Files</h3><pre id=f></pre></div>
+<div class=card><h3>Files</h3><pre id=f></pre>
+<input id=upfile type=file accept=".wav,.WAV"><button onclick="uploadFile()">UPLOAD WAV</button>
+<input id=renameFrom placeholder="/REC/old.WAV"><input id=renameTo placeholder="/REC/new.WAV"><button onclick="renameFile()">RENAME</button>
+<a id=trackDownload href="/api/track/download">Download GPS track</a>
+</div>
 <script>
 async function j(u,o){let r=await fetch(u,o);return await r.text()}
-async function refresh(){s.textContent=await j('/api/status');f.textContent=await j('/api/files')}
+async function refresh(){
+  const raw=await j('/api/status');s.textContent=raw;f.textContent=await j('/api/files');
+  try{const x=JSON.parse(raw);document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical)}catch(e){}
+}
 async function ptt(v){await j('/api/ptt?on='+v,{method:'POST'});refresh()}
 async function sos(v){await j('/api/sos?on='+v,{method:'POST'});refresh()}
 async function rec(v){await j('/api/record?on='+v,{method:'POST'});refresh()}
@@ -119,6 +129,19 @@ async function tone(f,d){
   if(r!=='OK') alert(r);
 }
 async function send(){await j('/api/message',{method:'POST',headers:{'Content-Type':'text/plain'},body:msg.value});refresh()}
+async function uploadFile(){
+ const file=upfile.files[0]; if(!file){alert('Choose a WAV file');return}
+ const fd=new FormData(); fd.append('file',file,file.name);
+ const r=await fetch('/api/upload',{method:'POST',body:fd}); alert(await r.text()); refresh()
+}
+async function renameFile(){
+ const r=await j('/api/rename',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+ body:new URLSearchParams({from:renameFrom.value,to:renameTo.value})}); alert(r); refresh()
+}
+async function calBattery(){
+ const r=await j('/api/battery-calibrate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
+ body:new URLSearchParams({voltage:batActual.value})}); alert(r); refresh()
+}
 async function saveCfg(){
   const q=new URLSearchParams({freq:freq.value,bw:bw.value,sf:sf.value,cr:cr.value,
     power:pwr.value,sync:sw.value,callsign:cs.value,volume:vol.value,batcal:bat.value,
@@ -200,6 +223,16 @@ void WebUi::begin() {
   server_.on("/", HTTP_GET, [this]{ if (auth()) handleRoot(); });
   server_.on("/api/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
   server_.on("/api/files", HTTP_GET, [this]{ if (auth()) handleFiles(); });
+  server_.on("/api/download", HTTP_GET, [this]{ if (auth()) handleDownload(); });
+  server_.on("/api/upload", HTTP_POST, [this]{ if (auth()) {
+    if (uploadFailed_) { server_.send(400, "text/plain", "upload failed"); return; }
+    server_.send(200, "text/plain", "OK");
+  }}, [this]{ if (auth()) handleUpload(); });
+  server_.on("/api/rename", HTTP_POST, [this]{ if (auth()) handleRename(); });
+  server_.on("/api/messages", HTTP_GET, [this]{ if (auth()) handleMessages(); });
+  server_.on("/api/lora-log", HTTP_GET, [this]{ if (auth()) handleLoraLog(); });
+  server_.on("/api/health-log", HTTP_GET, [this]{ if (auth()) handleHealthLog(); });
+  server_.on("/api/battery-calibrate", HTTP_POST, [this]{ if (auth()) handleBatteryCalibrate(); });
   server_.on("/api/message", HTTP_POST, [this]{ if (auth()) handleMessage(); });
   server_.on("/api/sos", HTTP_POST, [this]{ if (auth()) handleSos(); });
   server_.on("/api/ptt", HTTP_POST, [this]{ if (auth()) handlePtt(); });
@@ -217,6 +250,7 @@ void WebUi::begin() {
   server_.on("/api/volume", HTTP_POST, [this]{ if (auth()) handleVolume(); });
   server_.on("/api/delete", HTTP_POST, [this]{ if (auth()) handleDelete(); });
   server_.on("/api/track", HTTP_GET, [this]{ if (auth()) handleTrack(); });
+  server_.on("/api/track/download", HTTP_GET, [this]{ if (auth()) handleTrackDownload(); });
   server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
   server_.on("/api/audio-source", HTTP_POST, [this]{ if (auth()) handleAudioSource(); });
@@ -280,7 +314,9 @@ void WebUi::handleStatus() {
   j += ",\"lat\":" + String(gState.gps.lat,6);
   j += ",\"lon\":" + String(gState.gps.lon,6);
   j += ",\"alt\":" + String(gState.gps.alt,1);
-  j += ",\"sat\":" + String(gState.gps.satellites) + "},";
+  j += ",\"sat\":" + String(gState.gps.satellites);
+  j += ",\"timeValid\":" + String(gState.gps.timeValid ? "true":"false");
+  j += ",\"utcEpoch\":" + String(static_cast<unsigned long long>(gState.gps.utcEpoch)) + "},";
   j += "\"lora\":" + String(gState.loraReady ? "true":"false") + ",";
   j += "\"rssi\":" + String(gState.loraRssi) + ",";
   j += "\"snr\":" + String(gState.loraSnr,1) + ",";
@@ -311,6 +347,9 @@ void WebUi::handleStatus() {
   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
   j += "\"volume\":" + String(gState.volume) + ",";
   j += "\"voiceRxLost\":" + String(gState.voiceRxLost) + ",";
+  j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",";
+  j += "\"loraLog\":" + String(gState.loraPacketLogCount) + ",";
+  j += "\"healthAlerts\":" + String(gState.healthAlerts) + ",";
   j += "\"tx\":" + String(gState.txPackets) + ",";
   j += "\"rx\":" + String(gState.rxPackets) + ",";
   j += "\"msg\":\"" + jsonEscape(gState.lastMessage) + "\",";
@@ -321,6 +360,164 @@ void WebUi::handleStatus() {
 }
 
 void WebUi::handleFiles() { server_.send(200, "application/json", storage.listJson("/REC")); }
+
+
+void WebUi::handleDownload() {
+  const String path = server_.arg("path");
+  if (!storage.isManagedAudioPath(path)) {
+    server_.send(400, "text/plain", "invalid path");
+    return;
+  }
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  File f = SD.open(path, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    server_.send(404, "text/plain", "not found");
+    return;
+  }
+  server_.sendHeader("Content-Disposition", "attachment; filename=\"" +
+                     path.substring(path.lastIndexOf('/') + 1) + "\"");
+  server_.streamFile(f, "audio/wav");
+  f.close();
+}
+
+void WebUi::handleUpload() {
+  HTTPUpload& up = server_.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    uploadFailed_ = false;
+    uploadBytes_ = 0;
+    String name = up.filename;
+    const int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.substring(slash + 1);
+    uploadPath_ = "/REC/" + name;
+    if (!storage.isManagedAudioPath(uploadPath_) ||
+        up.totalSize > Config::WEB_UPLOAD_MAX_BYTES ||
+        SD.exists(uploadPath_)) {
+      uploadFailed_ = true;
+      return;
+    }
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (!spiLock.ok()) { uploadFailed_ = true; return; }
+    uploadFile_ = SD.open(uploadPath_, FILE_WRITE);
+    if (!uploadFile_) uploadFailed_ = true;
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (uploadFailed_ || !uploadFile_ || up.currentSize > Config::WEB_UPLOAD_MAX_BYTES - uploadBytes_) {
+      uploadFailed_ = true;
+      return;
+    }
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (!spiLock.ok() || uploadFile_.write(up.buf, up.currentSize) != up.currentSize) {
+      uploadFailed_ = true;
+      return;
+    }
+    uploadBytes_ += up.currentSize;
+  } else if (up.status == UPLOAD_FILE_END || up.status == UPLOAD_FILE_ABORTED) {
+    if (uploadFile_) uploadFile_.close();
+    if (up.status == UPLOAD_FILE_ABORTED || uploadFailed_) {
+      uploadFailed_ = true;
+      if (!uploadPath_.isEmpty()) {
+        SpiLock spiLock(pdMS_TO_TICKS(100));
+        if (spiLock.ok()) SD.remove(uploadPath_);
+      }
+    }
+  }
+}
+
+void WebUi::handleRename() {
+  const String from = server_.arg("from");
+  const String to = server_.arg("to");
+  const bool ok = storage.renameFile(from, to);
+  server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "FAIL");
+}
+
+void WebUi::handleMessages() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "[";
+  const size_t count = gState.messageHistoryCount;
+  const size_t start = (gState.messageHistoryNext + Config::MESSAGE_HISTORY_SIZE - count) %
+                       Config::MESSAGE_HISTORY_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& e = gState.messageHistory[(start + i) % Config::MESSAGE_HISTORY_SIZE];
+    if (i) j += ",";
+    j += "{\"ts\":" + String(static_cast<unsigned long long>(e.timestamp)) +
+         ",\"source\":" + String(e.sourceId) +
+         ",\"text\":\"" + jsonEscape(e.text) + "\"}";
+  }
+  j += "]";
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleLoraLog() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "[";
+  const size_t count = gState.loraPacketLogCount;
+  const size_t start = (gState.loraPacketLogNext + Config::LORA_PACKET_LOG_SIZE - count) %
+                       Config::LORA_PACKET_LOG_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& e = gState.loraPacketLog[(start + i) % Config::LORA_PACKET_LOG_SIZE];
+    if (i) j += ",";
+    j += "{\"ts\":" + String(static_cast<unsigned long long>(e.timestamp)) +
+         ",\"dir\":\"" + String(e.tx ? "TX" : "RX") +
+         "\",\"type\":" + String(e.type) + ",\"seq\":" + String(e.seq) +
+         ",\"source\":" + String(e.sourceId) + ",\"rssi\":" + String(e.rssi) +
+         ",\"snr\":" + String(e.snr,1) + ",\"ttl\":" + String(e.ttl) + "}";
+  }
+  j += "]";
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleHealthLog() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "[";
+  const size_t count = gState.healthLogCount;
+  const size_t start = (gState.healthLogNext + Config::HEALTH_LOG_SIZE - count) %
+                       Config::HEALTH_LOG_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& e = gState.healthLog[(start + i) % Config::HEALTH_LOG_SIZE];
+    if (i) j += ",";
+    j += "{\"ts\":" + String(static_cast<unsigned long long>(e.timestamp)) +
+         ",\"stalledMask\":" + String(e.stalledMask) +
+         ",\"heap\":" + String(e.heapFree) +
+         ",\"gnssStack\":" + String(e.gnssStackMin) +
+         ",\"loraStack\":" + String(e.loraStackMin) +
+         ",\"audioStack\":" + String(e.audioStackMin) +
+         ",\"webStack\":" + String(e.webStackMin) + "}";
+  }
+  j += "]";
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleBatteryCalibrate() {
+  const String raw = server_.arg("voltage");
+  char* end = nullptr;
+  const float actual = strtof(raw.c_str(), &end);
+  if (!end || *end != '\0' || !isfinite(actual) || actual < 2.5f || actual > 6.0f) {
+    server_.send(400, "text/plain", "invalid voltage"); return;
+  }
+  float measured = NAN;
+  {
+    StateLock lock(gState);
+    if (!lock.ok() || !gState.batteryAvailable || !isfinite(gState.batteryV)) {
+      server_.send(409, "text/plain", "battery measurement unavailable"); return;
+    }
+    measured = gState.batteryV;
+  }
+  if (measured <= 0.1f) { server_.send(409, "text/plain", "invalid current measurement"); return; }
+  RuntimeConfig candidate = gConfig;
+  candidate.batteryCalibration *= actual / measured;
+  if (!isfinite(candidate.batteryCalibration) ||
+      candidate.batteryCalibration < 0.5f || candidate.batteryCalibration > 1.5f ||
+      !candidate.save()) {
+    server_.send(503, "text/plain", "calibration save failed"); return;
+  }
+  gConfig = candidate;
+  server_.send(200, "text/plain", "Battery calibration saved: " +
+               String(candidate.batteryCalibration, 5));
+}
 
 void WebUi::handleMessage() {
   if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
@@ -486,6 +683,20 @@ void WebUi::handleDelete() {
   String p = server_.arg("path");
   bool ok = storage.removeFile(p);
   server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "FAIL");
+}
+
+void WebUi::handleTrackDownload() {
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  File f = SD.open("/TRACK/TRACK.CSV", FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    server_.send(404, "text/plain", "track not found");
+    return;
+  }
+  server_.sendHeader("Content-Disposition", "attachment; filename=TRACK.CSV");
+  server_.streamFile(f, "text/csv");
+  f.close();
 }
 
 void WebUi::handleTrack() {
