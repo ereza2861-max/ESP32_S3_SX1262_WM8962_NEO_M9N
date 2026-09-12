@@ -65,6 +65,10 @@ constexpr uint32_t LORA_LBT_BACKOFF_MAX_MS = 100;
 // v1 packets remain receivable, but cannot be safely forwarded because they
 // do not carry forwarding metadata.
 constexpr uint8_t LORA_PROTOCOL_VERSION = 2;
+constexpr uint8_t LORA_TYPE_TEXT = 0;
+constexpr uint8_t LORA_TYPE_VOICE = 1;
+constexpr uint8_t LORA_TYPE_SOS = 2;
+constexpr uint8_t LORA_TYPE_SOS_ACK = 3;
 constexpr uint8_t LORA_LEGACY_PROTOCOL_VERSION = 1;
 constexpr uint8_t LORA_INITIAL_TTL = 3;
 constexpr size_t LORA_FORWARD_QUEUE_DEPTH = 6;
@@ -83,11 +87,23 @@ constexpr uint8_t TRACK_ROTATIONS = 3;
 constexpr size_t WEB_UPLOAD_MAX_BYTES = 8UL * 1024UL * 1024UL;
 constexpr uint32_t USB_VOLUME_PERSIST_DELAY_MS = 1500UL;
 constexpr uint8_t LORA_TAG_BYTES = 8;
+// Optional frequency-hopping profile. Channel indexes map linearly across the
+// configured legal band; deployments can change the spacing without changing
+// the packet format.
+constexpr uint8_t HOP_CHANNEL_MAX = 8;
+constexpr float HOP_CHANNEL_STEP_MHZ = 0.4f;
+constexpr uint32_t HOP_DWELL_MS = 1000UL;
+constexpr uint8_t HOP_LEGACY_RX_EVERY = 3;
+constexpr uint32_t SCANNER_DEFAULT_DWELL_MS = 100;
+constexpr uint32_t SCANNER_MIN_DWELL_MS = 25;
+constexpr uint32_t SCANNER_MAX_DWELL_MS = 1000;
+constexpr size_t SCANNER_MAX_CHANNELS = HOP_CHANNEL_MAX;
 constexpr int16_t VOICE_RSSI_THRESHOLD_DBM = -115;
 constexpr int8_t VOICE_SNR_THRESHOLD_DB = -12;
 constexpr uint32_t RX_ACTIVITY_HOLD_MS = 250;
 constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
+constexpr uint8_t SOS_MAX_RETRIES = 3;
 
 // WM8960/ESP32-S3 I2S audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;

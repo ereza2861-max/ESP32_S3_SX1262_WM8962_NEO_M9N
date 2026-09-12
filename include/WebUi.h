@@ -35,6 +35,14 @@ private:
   void handleBatteryCalibrate();
   void handleMessage();
   void handleSos();
+  void handleSosStatus();
+  void handleScanStatus();
+  void handleScanStart();
+  void handleScanStop();
+  void handleScanResults();
+  void handleHopSuggest();
+  void handleHopStatus();
+  void handleHopEnable();
   void handlePtt();
   void handleRecord();
   void handlePlay();

@@ -1,0 +1,1017 @@
+diff --git a/include/AppState.h b/include/AppState.h
+index 03b938c..0f57726 100644
+--- a/include/AppState.h
++++ b/include/AppState.h
+@@ -104,6 +104,20 @@ struct RuntimeState {
+   uint32_t voiceDrops = 0;
+   uint32_t voiceRxLost = 0;
+   uint32_t healthAlerts = 0;
++  uint16_t sosSeq = 0;
++  bool sosAcked = false;
++  uint8_t sosRetries = 0;
++  uint32_t sosLastAckMs = 0;
++  uint32_t sosLastAckSourceId = 0;
++  bool scannerActive = false;
++  uint8_t scannerMode = 0;
++  uint16_t scannerSweepCount = 0;
++  uint8_t scannerChannelCount = 0;
++  uint16_t scannerDwellMs = 0;
++  uint32_t scannerLastSweepMs = 0;
++  bool hopEnabled = false;
++  uint8_t hopChannelCount = 0;
++  uint8_t hopChannelList[Config::HOP_CHANNEL_MAX] = {};
+   uint32_t heapFree = 0;
+   uint32_t audioStackMin = 0;
+   uint32_t loraStackMin = 0;
+diff --git a/include/Config.h b/include/Config.h
+index 9641e72..2890efa 100644
+--- a/include/Config.h
++++ b/include/Config.h
+@@ -65,6 +65,10 @@ constexpr uint32_t LORA_LBT_BACKOFF_MAX_MS = 100;
+ // v1 packets remain receivable, but cannot be safely forwarded because they
+ // do not carry forwarding metadata.
+ constexpr uint8_t LORA_PROTOCOL_VERSION = 2;
++constexpr uint8_t LORA_TYPE_TEXT = 0;
++constexpr uint8_t LORA_TYPE_VOICE = 1;
++constexpr uint8_t LORA_TYPE_SOS = 2;
++constexpr uint8_t LORA_TYPE_SOS_ACK = 3;
+ constexpr uint8_t LORA_LEGACY_PROTOCOL_VERSION = 1;
+ constexpr uint8_t LORA_INITIAL_TTL = 3;
+ constexpr size_t LORA_FORWARD_QUEUE_DEPTH = 6;
+@@ -83,11 +87,23 @@ constexpr uint8_t TRACK_ROTATIONS = 3;
+ constexpr size_t WEB_UPLOAD_MAX_BYTES = 8UL * 1024UL * 1024UL;
+ constexpr uint32_t USB_VOLUME_PERSIST_DELAY_MS = 1500UL;
+ constexpr uint8_t LORA_TAG_BYTES = 8;
++// Optional frequency-hopping profile. Channel indexes map linearly across the
++// configured legal band; deployments can change the spacing without changing
++// the packet format.
++constexpr uint8_t HOP_CHANNEL_MAX = 8;
++constexpr float HOP_CHANNEL_STEP_MHZ = 0.4f;
++constexpr uint32_t HOP_DWELL_MS = 1000UL;
++constexpr uint8_t HOP_LEGACY_RX_EVERY = 3;
++constexpr uint32_t SCANNER_DEFAULT_DWELL_MS = 100;
++constexpr uint32_t SCANNER_MIN_DWELL_MS = 25;
++constexpr uint32_t SCANNER_MAX_DWELL_MS = 1000;
++constexpr size_t SCANNER_MAX_CHANNELS = HOP_CHANNEL_MAX;
+ constexpr int16_t VOICE_RSSI_THRESHOLD_DBM = -115;
+ constexpr int8_t VOICE_SNR_THRESHOLD_DB = -12;
+ constexpr uint32_t RX_ACTIVITY_HOLD_MS = 250;
+ constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
+ constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
++constexpr uint8_t SOS_MAX_RETRIES = 3;
+ 
+ // WM8960/ESP32-S3 I2S audio
+ constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
+diff --git a/include/LoRaManager.h b/include/LoRaManager.h
+index ca3390f..c47cf4a 100644
+--- a/include/LoRaManager.h
++++ b/include/LoRaManager.h
+@@ -4,6 +4,17 @@
+ #include <freertos/FreeRTOS.h>
+ #include <freertos/semphr.h>
+ #include <freertos/queue.h>
++#include "Config.h"
++
++struct ChannelScanResult {
++  float freqMHz = 0.0f;
++  int16_t rssiAvgDbm = -127;
++  int16_t rssiPeakDbm = -127;
++  float snrDb = -20.0f;
++  uint8_t occupancyPercent = 0;
++  uint16_t preambleCount = 0;
++  uint32_t timestamp = 0;
++};
+ 
+ class LoRaManager {
+ public:
+@@ -15,6 +26,11 @@ public:
+   bool sendPosition();
+   bool sendVoiceFrame();
+   bool applyConfig();
++  bool scannerStart(uint8_t mode, uint16_t dwellMs);
++  bool scannerStop();
++  bool scannerIsActive() const;
++  void scannerGetResults(struct ChannelScanResult* results, size_t& count);
++  size_t scannerSuggestBestChannels(uint8_t* channels, size_t capacity);
+ private:
+   Module module_;
+   SX1276 radio_;
+@@ -77,6 +93,46 @@ private:
+   };
+   DedupEntry dedupCache_[DEDUP_CACHE_SIZE] = {};
+   size_t dedupNext_ = 0;
++  struct ScannerState {
++    bool active = false;
++    uint8_t mode = 0;
++    uint16_t dwellMs = Config::SCANNER_DEFAULT_DWELL_MS;
++    uint8_t index = 0;
++    uint16_t sweepCount = 0;
++    uint32_t lastSampleMs = 0;
++    struct Result {
++      float freqMHz = 0.0f;
++      int16_t rssiAvgDbm = -127;
++      int16_t rssiPeakDbm = -127;
++      float snrDb = -20.0f;
++      uint8_t occupancyPercent = 0;
++      uint16_t preambleCount = 0;
++      uint32_t timestamp = 0;
++    } results[Config::SCANNER_MAX_CHANNELS] = {};
++  } scanner_;
++  uint32_t hopFrame_ = 0;
++  uint32_t hopLastSyncMs_ = 0;
++  uint8_t currentHopIndex_ = 0;
++  uint8_t legacyRxCounter_ = 0;
++  uint16_t sosSeq_ = 0;
++  uint32_t sosSentMs_ = 0;
++  uint8_t sosRetryCount_ = 0;
++  bool sosAwaitingAck_ = false;
++  String sosPacket_;
++  uint8_t computeHopIndex(uint32_t frame) const;
++  bool retuneToHopChannel(uint8_t index);
++  bool retuneToChannel0();
++  bool encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
++                       uint16_t seq, uint8_t hopIndex, uint32_t epochMs,
++                       String& packet);
++  bool decryptPacketV3(const String& packet, uint8_t& type, uint16_t& seq,
++                       uint32_t& sourceId, uint8_t& ttl, uint8_t& hopIndex,
++                       uint32_t& epochMs, uint8_t* plain, size_t capacity,
++                       size_t& len);
++  bool transmitHopped(const String& text, uint8_t type);
++  bool sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId);
++  void handleSosAckPayload(const uint8_t* payload, size_t len);
++  void serviceSosRetry();
+   bool encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
+                      uint16_t seq, String& packet);
+   bool decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,
+diff --git a/include/WebUi.h b/include/WebUi.h
+index 09b5397..20648d6 100644
+--- a/include/WebUi.h
++++ b/include/WebUi.h
+@@ -35,6 +35,14 @@ private:
+   void handleBatteryCalibrate();
+   void handleMessage();
+   void handleSos();
++  void handleSosStatus();
++  void handleScanStatus();
++  void handleScanStart();
++  void handleScanStop();
++  void handleScanResults();
++  void handleHopSuggest();
++  void handleHopStatus();
++  void handleHopEnable();
+   void handlePtt();
+   void handleRecord();
+   void handlePlay();
+diff --git a/src/LoRaManager.cpp b/src/LoRaManager.cpp
+index 4864aec..3e28d9b 100644
+--- a/src/LoRaManager.cpp
++++ b/src/LoRaManager.cpp
+@@ -15,6 +15,8 @@ namespace {
+ constexpr uint8_t PACKET_MAGIC = 0xF1;
+ constexpr size_t PACKET_HEADER_V1 = 1 + 1 + 1 + 2 + 4;
+ constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
++constexpr size_t PACKET_HEADER_V3 = PACKET_HEADER_V2 + 1 + sizeof(uint32_t);
++constexpr uint8_t LORA_PROTOCOL_VERSION_HOP = 3;
+ constexpr size_t PACKET_TAG = Config::LORA_TAG_BYTES;
+ 
+ bool hexByte(const char* p, uint8_t& out) {
+@@ -143,6 +145,214 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
+   return ok;
+ }
+ 
++bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
++                                   uint16_t seq, uint8_t hopIndex, uint32_t epochMs,
++                                   String& packet) {
++  uint8_t key[16];
++  if (!plain || !loadKey(key) ||
++      len + PACKET_HEADER_V3 + PACKET_TAG > Config::LORA_MAX_PACKET)
++    return false;
++
++  const uint32_t nonce = esp_random();
++  packet.reserve(PACKET_HEADER_V3 + len + PACKET_TAG);
++  packet += static_cast<char>(PACKET_MAGIC);
++  packet += static_cast<char>(LORA_PROTOCOL_VERSION_HOP);
++  packet += static_cast<char>(type);
++  packet += static_cast<char>(seq & 0xFF);
++  packet += static_cast<char>(seq >> 8);
++  for (uint8_t i = 0; i < 4; ++i)
++    packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
++  for (uint8_t i = 0; i < 4; ++i)
++    packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
++  packet += static_cast<char>(Config::LORA_INITIAL_TTL);
++  packet += static_cast<char>(hopIndex);
++  for (uint8_t i = 0; i < 4; ++i)
++    packet += static_cast<char>((epochMs >> (8 * i)) & 0xFF);
++
++  uint8_t iv[16] = {};
++  memcpy(iv, &nonce, sizeof(nonce));
++  memcpy(iv + 4, &seq, sizeof(seq));
++  iv[6] = hopIndex;
++  memcpy(iv + 8, &epochMs, sizeof(epochMs));
++  uint8_t streamBlock[16] = {};
++  uint8_t cipher[Config::LORA_MAX_PACKET] = {};
++  size_t ncOff = 0;
++  mbedtls_aes_context aes;
++  mbedtls_aes_init(&aes);
++  bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
++            mbedtls_aes_crypt_ctr(&aes, len, &ncOff, iv, streamBlock,
++                                  plain, cipher) == 0;
++  if (ok) {
++    for (size_t i = 0; i < len; ++i)
++      packet += static_cast<char>(cipher[i]);
++    unsigned char tag[32] = {};
++    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
++    ok = md && mbedtls_md_hmac(md, key, sizeof(key),
++        reinterpret_cast<const unsigned char*>(packet.c_str()),
++        PACKET_HEADER_V3 + len, tag, sizeof(tag)) == 0;
++    if (ok) for (size_t i = 0; i < PACKET_TAG; ++i)
++      packet += static_cast<char>(tag[i]);
++  }
++  mbedtls_aes_free(&aes);
++  return ok;
++}
++
++bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
++                                  uint16_t& seq, uint32_t& sourceId,
++                                  uint8_t& ttl, uint8_t& hopIndex,
++                                  uint32_t& epochMs, uint8_t* plain,
++                                  size_t capacity, size_t& len) {
++  len = 0; sourceId = 0; ttl = 0; hopIndex = 0; epochMs = 0;
++  if (packet.length() < PACKET_HEADER_V3 + PACKET_TAG ||
++      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC ||
++      static_cast<uint8_t>(packet[1]) != LORA_PROTOCOL_VERSION_HOP)
++    return false;
++
++  type = static_cast<uint8_t>(packet[2]);
++  seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
++        (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
++  uint32_t nonce = 0;
++  memcpy(&nonce, packet.c_str() + 5, sizeof(nonce));
++  memcpy(&sourceId, packet.c_str() + 9, sizeof(sourceId));
++  ttl = static_cast<uint8_t>(packet[13]);
++  hopIndex = static_cast<uint8_t>(packet[14]);
++  memcpy(&epochMs, packet.c_str() + 15, sizeof(epochMs));
++
++  const size_t cipherLen = packet.length() - PACKET_HEADER_V3 - PACKET_TAG;
++  if (!plain || cipherLen > capacity) return false;
++
++  uint8_t key[16];
++  if (!loadKey(key)) return false;
++  unsigned char expected[32] = {};
++  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
++  if (!md || mbedtls_md_hmac(md, key, sizeof(key),
++      reinterpret_cast<const unsigned char*>(packet.c_str()),
++      PACKET_HEADER_V3 + cipherLen, expected, sizeof(expected)) != 0)
++    return false;
++
++  const uint8_t* got = reinterpret_cast<const uint8_t*>(packet.c_str()) +
++                       PACKET_HEADER_V3 + cipherLen;
++  uint8_t diff = 0;
++  for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ got[i];
++  if (diff != 0) return false;
++
++  uint8_t iv[16] = {};
++  memcpy(iv, &nonce, sizeof(nonce));
++  memcpy(iv + 4, &seq, sizeof(seq));
++  iv[6] = hopIndex;
++  memcpy(iv + 8, &epochMs, sizeof(epochMs));
++  uint8_t streamBlock[16] = {};
++  size_t ncOff = 0;
++  mbedtls_aes_context aes;
++  mbedtls_aes_init(&aes);
++  const bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
++      mbedtls_aes_crypt_ctr(&aes, cipherLen, &ncOff, iv, streamBlock,
++          reinterpret_cast<const unsigned char*>(packet.c_str()) +
++              PACKET_HEADER_V3, plain) == 0;
++  mbedtls_aes_free(&aes);
++  if (!ok) return false;
++  len = cipherLen;
++  return true;
++}
++
++uint8_t LoRaManager::computeHopIndex(uint32_t frame) const {
++  StateLock lock(gState);
++  if (!lock.ok() || gState.hopChannelCount == 0) return 0;
++  return static_cast<uint8_t>(frame % gState.hopChannelCount);
++}
++
++bool LoRaManager::retuneToHopChannel(uint8_t index) {
++  if (index >= Config::HOP_CHANNEL_MAX) return false;
++  uint8_t count = 0;
++  {
++    StateLock lock(gState);
++    if (!lock.ok()) return false;
++    count = gState.hopChannelCount;
++    if (count == 0 || index >= count) return false;
++  }
++  const float freq = Config::LORA_MIN_FREQ_MHZ +
++                     static_cast<float>(index) * Config::HOP_CHANNEL_STEP_MHZ;
++  if (freq > Config::LORA_MAX_FREQ_MHZ) return false;
++  SpiLock spiLock(pdMS_TO_TICKS(1000));
++  if (!spiLock.ok()) return false;
++  return radio_.setFrequency(freq) == RADIOLIB_ERR_NONE &&
++         radio_.startReceive() == RADIOLIB_ERR_NONE;
++}
++
++bool LoRaManager::retuneToChannel0() {
++  SpiLock spiLock(pdMS_TO_TICKS(1000));
++  if (!spiLock.ok()) return false;
++  return radio_.setFrequency(gConfig.loraFreqMHz) == RADIOLIB_ERR_NONE &&
++         radio_.startReceive() == RADIOLIB_ERR_NONE;
++}
++
++bool LoRaManager::transmitHopped(const String& text, uint8_t type) {
++  if (!ready_ || !mutex_ || text.isEmpty()) return false;
++  bool hopOn = false;
++  {
++    StateLock lock(gState);
++    if (!lock.ok()) return false;
++    hopOn = gState.hopEnabled && gState.hopChannelCount > 0;
++  }
++  if (!hopOn) return false;
++  if (text.length() > Config::LORA_MAX_PACKET -
++                          PACKET_HEADER_V3 - PACKET_TAG)
++    return false;
++  const uint8_t hopIndex = computeHopIndex(hopFrame_);
++  const uint32_t epochMs = millis();
++  const uint16_t seq = ++txSequence_;
++  String packet;
++  if (!encryptPacketV3(reinterpret_cast<const uint8_t*>(text.c_str()),
++                       text.length(), type, seq, hopIndex, epochMs, packet))
++    return false;
++  if (!retuneToHopChannel(hopIndex)) {
++    (void)retuneToChannel0();
++    return transmit(text, false);
++  }
++  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
++    (void)retuneToChannel0();
++    return false;
++  }
++  int16_t st = RADIOLIB_ERR_UNKNOWN;
++  bool txOk = false;
++  for (uint8_t attempt = 0; attempt <= Config::LORA_LBT_MAX_RETRIES; ++attempt) {
++    {
++      SpiLock spiLock(pdMS_TO_TICKS(1000));
++      if (!spiLock.ok()) break;
++      const int16_t scanSt = Config::LORA_LBT_ENABLED ? radio_.scanChannel()
++                                                       : RADIOLIB_CHANNEL_FREE;
++      if (Config::LORA_LBT_ENABLED && lbtChannelBusy(scanSt)) {
++        st = scanSt;
++      } else if (scanSt == RADIOLIB_CHANNEL_FREE) {
++        const RadioLibTime_t airtimeUs = radio_.getTimeOnAir(packet.length());
++        if (airtimeUs != 0 && airtimeUs <= UINT32_MAX &&
++            consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
++          st = radio_.transmit(packet);
++          txOk = st == RADIOLIB_ERR_NONE;
++          (void)radio_.startReceive();
++        } else {
++          st = RADIOLIB_ERR_UNKNOWN;
++        }
++      } else {
++        st = scanSt;
++      }
++    }
++    if (txOk) break;
++    if (!Config::LORA_LBT_ENABLED || attempt >= Config::LORA_LBT_MAX_RETRIES) break;
++    const uint32_t span = Config::LORA_LBT_BACKOFF_MAX_MS -
++                          Config::LORA_LBT_BACKOFF_MIN_MS;
++    const uint32_t backoff = Config::LORA_LBT_BACKOFF_MIN_MS +
++        (span ? (esp_random() % (span + 1U)) : 0U);
++    vTaskDelay(pdMS_TO_TICKS(backoff));
++  }
++  xSemaphoreGive(mutex_);
++  if (!txOk) { (void)retuneToChannel0(); return false; }
++  ++hopFrame_;
++  (void)retuneToChannel0();
++  logPacket(true, type, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
++  return true;
++}
++
+ bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,
+                                 uint32_t& sourceId, uint8_t& ttl,
+                                 uint8_t* plain, size_t capacity, size_t& len) {
+@@ -432,6 +642,140 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
+ }
+ 
+ 
++bool LoRaManager::scannerStart(uint8_t mode, uint16_t dwellMs) {
++  if (!ready_ || !mutex_ || (mode != 1 && mode != 2) ||
++      dwellMs < Config::SCANNER_MIN_DWELL_MS ||
++      dwellMs > Config::SCANNER_MAX_DWELL_MS)
++    return false;
++  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
++  scanner_.active = true;
++  scanner_.mode = mode;
++  scanner_.dwellMs = dwellMs;
++  scanner_.index = 0;
++  scanner_.sweepCount = 0;
++  scanner_.lastSampleMs = 0;
++  for (auto& result : scanner_.results) result = ScannerState::Result{};
++  {
++    StateLock lock(gState);
++    if (lock.ok()) {
++      gState.scannerActive = true;
++      gState.scannerMode = mode;
++      gState.scannerSweepCount = 0;
++      gState.scannerChannelCount = Config::SCANNER_MAX_CHANNELS;
++      gState.scannerDwellMs = dwellMs;
++    }
++  }
++  xSemaphoreGive(mutex_);
++  return true;
++}
++
++bool LoRaManager::scannerStop() {
++  if (!mutex_) return false;
++  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
++  scanner_.active = false;
++  (void)retuneToChannel0();
++  {
++    StateLock lock(gState);
++    if (lock.ok()) gState.scannerActive = false;
++  }
++  xSemaphoreGive(mutex_);
++  return true;
++}
++
++bool LoRaManager::scannerIsActive() const {
++  return scanner_.active;
++}
++
++void LoRaManager::scannerGetResults(ChannelScanResult* results, size_t& count) {
++  count = 0;
++  if (!results) return;
++  const size_t n = min(static_cast<size_t>(Config::SCANNER_MAX_CHANNELS),
++                       static_cast<size_t>(Config::HOP_CHANNEL_MAX));
++  for (size_t i = 0; i < n; ++i) {
++    results[i].freqMHz = scanner_.results[i].freqMHz;
++    results[i].rssiAvgDbm = scanner_.results[i].rssiAvgDbm;
++    results[i].rssiPeakDbm = scanner_.results[i].rssiPeakDbm;
++    results[i].snrDb = scanner_.results[i].snrDb;
++    results[i].occupancyPercent = scanner_.results[i].occupancyPercent;
++    results[i].preambleCount = scanner_.results[i].preambleCount;
++    results[i].timestamp = scanner_.results[i].timestamp;
++  }
++  count = n;
++}
++
++size_t LoRaManager::scannerSuggestBestChannels(uint8_t* channels, size_t capacity) {
++  if (!channels || capacity == 0) return 0;
++  const size_t n = min(capacity, static_cast<size_t>(Config::HOP_CHANNEL_MAX));
++  bool used[Config::HOP_CHANNEL_MAX] = {};
++  size_t out = 0;
++  while (out < n) {
++    size_t best = Config::HOP_CHANNEL_MAX;
++    uint8_t bestLoad = 255;
++    int16_t bestRssi = 127;
++    for (size_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i) {
++      if (used[i]) continue;
++      const auto& r = scanner_.results[i];
++      if (r.timestamp == 0) continue;
++      if (r.occupancyPercent < bestLoad ||
++          (r.occupancyPercent == bestLoad && r.rssiAvgDbm < bestRssi)) {
++        best = i;
++        bestLoad = r.occupancyPercent;
++        bestRssi = r.rssiAvgDbm;
++      }
++    }
++    if (best == Config::HOP_CHANNEL_MAX) break;
++    used[best] = true;
++    channels[out++] = static_cast<uint8_t>(best);
++  }
++  return out;
++}
++
++void LoRaManager::serviceSosRetry() {
++  if (!sosAwaitingAck_ || sosPacket_.isEmpty()) return;
++  const uint32_t now = millis();
++  if (now - sosSentMs_ < Config::SOS_REPEAT_MS) return;
++  if (sosRetryCount_ >= Config::SOS_MAX_RETRIES) {
++    sosAwaitingAck_ = false;
++    StateLock lock(gState);
++    if (lock.ok()) gState.lastError = "SOS ACK timeout";
++    return;
++  }
++  if (transmit(sosPacket_, true)) {
++    ++sosRetryCount_;
++    sosSentMs_ = now;
++    StateLock lock(gState);
++    if (lock.ok()) gState.sosRetries = sosRetryCount_;
++  }
++}
++
++void LoRaManager::handleSosAckPayload(const uint8_t* payload, size_t len) {
++  if (!payload || len != 6) return;
++  uint16_t ackedSeq = static_cast<uint16_t>(payload[0]) |
++                      (static_cast<uint16_t>(payload[1]) << 8);
++  uint32_t ackedSource = 0;
++  memcpy(&ackedSource, payload + 2, sizeof(ackedSource));
++  if (!sosAwaitingAck_ || ackedSeq != sosSeq_ || ackedSource != sourceId_) return;
++  sosAwaitingAck_ = false;
++  StateLock lock(gState);
++  if (lock.ok()) {
++    gState.sosAcked = true;
++    gState.sosLastAckMs = millis();
++  }
++}
++
++bool LoRaManager::sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId) {
++  if (!ready_) return false;
++  uint8_t payload[6];
++  payload[0] = static_cast<uint8_t>(ackedSeq & 0xFF);
++  payload[1] = static_cast<uint8_t>(ackedSeq >> 8);
++  memcpy(payload + 2, &ackedSourceId, sizeof(ackedSourceId));
++  String packet;
++  const uint16_t seq = ++txSequence_;
++  if (!encryptPacket(payload, sizeof(payload), 2, seq, packet))
++    return false;
++  return transmit(packet, true);
++}
++
+ bool LoRaManager::begin() {
+   instance_ = this;
+   mutex_ = xSemaphoreCreateMutex();
+@@ -526,6 +870,98 @@ void LoRaManager::serviceVoiceReorder() {
+ void LoRaManager::task() {
+   if (!mutex_) return;
+ 
++  if (scanner_.active) {
++    const uint32_t now = millis();
++    if (now - scanner_.lastSampleMs < scanner_.dwellMs) return;
++    if (xSemaphoreTake(mutex_, 0) != pdTRUE) return;
++    const uint8_t index = scanner_.index;
++    const float freq = Config::LORA_MIN_FREQ_MHZ +
++                       static_cast<float>(index) * Config::HOP_CHANNEL_STEP_MHZ;
++    int16_t scanSt = RADIOLIB_ERR_UNKNOWN;
++    int16_t rxSt = RADIOLIB_ERR_NONE;
++    int16_t rssi = -127;
++    float snr = -20.0f;
++    {
++      SpiLock spiLock(pdMS_TO_TICKS(20));
++      if (spiLock.ok() && freq <= Config::LORA_MAX_FREQ_MHZ &&
++          radio_.setFrequency(freq) == RADIOLIB_ERR_NONE) {
++        scanSt = radio_.scanChannel();
++        rssi = static_cast<int16_t>(radio_.getRSSI());
++        snr = radio_.getSNR();
++        rxSt = radio_.startReceive();
++      }
++    }
++    if (index < Config::SCANNER_MAX_CHANNELS) {
++      auto& r = scanner_.results[index];
++      r.freqMHz = freq;
++      r.rssiAvgDbm = rssi;
++      r.rssiPeakDbm = max(r.rssiPeakDbm, rssi);
++      r.snrDb = snr;
++      r.occupancyPercent = lbtChannelBusy(scanSt) ? 100 : 0;
++      r.preambleCount = lbtChannelBusy(scanSt) ? 1 : 0;
++      r.timestamp = now;
++    }
++    ++scanner_.index;
++    if (scanner_.index >= Config::SCANNER_MAX_CHANNELS) {
++      scanner_.index = 0;
++      ++scanner_.sweepCount;
++      if (scanner_.mode == 1) scanner_.active = false;
++      if (scanner_.active) scanner_.lastSampleMs = now;
++    } else {
++      scanner_.lastSampleMs = now;
++    }
++    if (!scanner_.active) {
++      (void)retuneToChannel0();
++      StateLock lock(gState);
++      if (lock.ok()) {
++        gState.scannerActive = false;
++        gState.scannerSweepCount = scanner_.sweepCount;
++        gState.scannerLastSweepMs = now;
++      }
++    } else {
++      StateLock lock(gState);
++      if (lock.ok()) {
++        gState.scannerSweepCount = scanner_.sweepCount;
++        gState.scannerLastSweepMs = now;
++      }
++    }
++    (void)rxSt;
++    xSemaphoreGive(mutex_);
++    return;
++  }
++
++  {
++    bool hopEnabled = false;
++    bool busy = false;
++    {
++      StateLock lock(gState);
++      if (lock.ok()) {
++        hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
++        busy = gState.ptt || gState.recording;
++      }
++    }
++    if (hopEnabled && !busy) {
++      const uint32_t now = millis();
++      if (now - hopLastSyncMs_ >= Config::HOP_DWELL_MS) {
++        if (legacyRxCounter_ >= Config::HOP_LEGACY_RX_EVERY) {
++          legacyRxCounter_ = 0;
++          const uint8_t idx = computeHopIndex(hopFrame_);
++          if (!retuneToHopChannel(idx)) {
++            StateLock lock(gState);
++            if (lock.ok()) gState.lastError = "hop retune failed";
++            return;
++          }
++          currentHopIndex_ = idx;
++          ++hopFrame_;
++        } else {
++          (void)retuneToChannel0();
++          ++legacyRxCounter_;
++        }
++        hopLastSyncMs_ = now;
++      }
++    }
++  }
++
+   (void)processPendingTx();
+   serviceVoiceReorder();
+ 
+@@ -627,22 +1063,48 @@ void LoRaManager::task() {
+     size_t plainLen = 0;
+     const bool authenticated = decryptPacket(
+         msg, type, seq, rxSourceId, rxTtl, plain, sizeof(plain), plainLen);
++    uint8_t hopIndex = 0;
++    uint32_t epochMs = 0;
++    bool authenticatedV3 = false;
++    if (!authenticated) {
++      authenticatedV3 = decryptPacketV3(msg, type, seq, rxSourceId, rxTtl,
++                                        hopIndex, epochMs, plain,
++                                        sizeof(plain), plainLen);
++      if (authenticatedV3) {
++        currentHopIndex_ = hopIndex;
++        hopLastSyncMs_ = millis();
++      }
++    }
++    const bool rxAuthenticated = authenticated || authenticatedV3;
+     const bool isV2 = authenticated &&
+                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION;
+-    const bool duplicateV2 = isV2 &&
++    const bool isV3 = authenticatedV3;
++    const bool isForwardable = rxAuthenticated && (isV2 || isV3);
++    const bool duplicateV2 = (isV2 || isV3) &&
+         seenDedup(rxSourceId, seq, hashPayload(plain, plainLen));
+     bool pttOrRecording = false;
+     {
+       StateLock stateLock(gState);
+       if (stateLock.ok()) pttOrRecording = gState.ptt || gState.recording;
+     }
+-    if (authenticated && type == 0 && plainLen > 0 && !duplicateV2) {
++    if (rxAuthenticated && type == Config::LORA_TYPE_TEXT && plainLen > 0 && !duplicateV2) {
++      char text[Config::LORA_MAX_PACKET + 1] = {};
++      memcpy(text, plain, plainLen);
++      text[plainLen] = '\0';
++      addMessageHistory(rxSourceId, text);
++    }
++    if (rxAuthenticated && type == Config::LORA_TYPE_SOS && plainLen > 0 &&
++        !duplicateV2) {
+       char text[Config::LORA_MAX_PACKET + 1] = {};
+       memcpy(text, plain, plainLen);
+       text[plainLen] = '\0';
+       addMessageHistory(rxSourceId, text);
++      (void)sendSosAck(seq, rxSourceId);
+     }
+-    if (authenticated && type == 1 && !duplicateV2 && plainLen == 168 &&
++    if (rxAuthenticated && type == Config::LORA_TYPE_SOS_ACK && !duplicateV2) {
++      handleSosAckPayload(plain, plainLen);
++    }
++    if (rxAuthenticated && type == Config::LORA_TYPE_VOICE && !duplicateV2 && plainLen == 168 &&
+         plain[0] == 0x56 && plain[1] == 1 &&
+         (static_cast<uint16_t>(plain[4]) | (static_cast<uint16_t>(plain[5]) << 8)) == seq &&
+         plain[2] == Config::VOICE_FRAME_MS &&
+@@ -681,12 +1143,12 @@ void LoRaManager::task() {
+       serviceVoiceReorder();
+     }
+ 
+-    if (authenticated && isV2 && !duplicateV2 && rxSourceId != sourceId_ &&
++    if (isForwardable && !duplicateV2 && rxSourceId != sourceId_ &&
+         rxTtl > 1 && plainLen > 0) {
+       (void)enqueueForward(type, seq, rxSourceId, rxTtl, plain, plainLen);
+     }
+ 
+-    if (authenticated) logPacket(false, type, seq, rxSourceId, rssi, snr, rxTtl);
++    if (rxAuthenticated) logPacket(false, type, seq, rxSourceId, rssi, snr, rxTtl);
+     StateLock rxState(gState);
+     if (rxState.ok()) {
+       gState.loraRssi = rssi;
+@@ -699,7 +1161,7 @@ void LoRaManager::task() {
+       gState.rxDrops++;
+     } else if (readSt == RADIOLIB_ERR_NONE) {
+       gState.rxPackets++;
+-      if (!authenticated) gState.lastMessage = "RX: authentication failed";
++      if (!rxAuthenticated) gState.lastMessage = "RX: authentication failed";
+     } else {
+       gState.rxDrops++;
+     }
+@@ -866,7 +1328,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
+   if (alreadyEncrypted) {
+     packet = text;
+   } else {
+-    const uint8_t packetType = 0;
++    const uint8_t packetType = Config::LORA_TYPE_TEXT;
+     const uint16_t seq = ++txSequence_;
+     if (!encryptPacket(reinterpret_cast<const uint8_t*>(text.c_str()), text.length(),
+                        packetType, seq, packet)) {
+@@ -971,7 +1433,12 @@ bool LoRaManager::applyConfig() {
+ }
+ 
+ bool LoRaManager::sendText(const String& text) {
+-  return transmit(text);
++  bool hopOn = false;
++  {
++    StateLock lock(gState);
++    if (lock.ok()) hopOn = gState.hopEnabled && gState.hopChannelCount > 0;
++  }
++  return hopOn ? transmitHopped(text, Config::LORA_TYPE_TEXT) : transmit(text);
+ }
+ 
+ bool LoRaManager::sendVoiceFrame() {
+@@ -993,7 +1460,7 @@ bool LoRaManager::sendVoiceFrame() {
+   frame[166] = static_cast<uint8_t>(crc & 0xFF);
+   frame[167] = static_cast<uint8_t>(crc >> 8);
+   String packet;
+-  if (!encryptPacket(frame, sizeof(frame), 1, seq, packet)) return false;
++  if (!encryptPacket(frame, sizeof(frame), Config::LORA_TYPE_VOICE, seq, packet)) return false;
+   if (packet.length() > Config::LORA_MAX_PACKET) return false;
+   const bool ok = transmit(packet, true);
+   if (ok) {
+@@ -1001,7 +1468,7 @@ bool LoRaManager::sendVoiceFrame() {
+       StateLock lock(gState);
+       if (lock.ok()) gState.voiceTxPackets++;
+     }
+-    logPacket(true, 1, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
++    logPacket(true, Config::LORA_TYPE_VOICE, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
+   }
+   return ok;
+ }
+@@ -1036,5 +1503,23 @@ bool LoRaManager::sendSOS() {
+   String p = "SOS,";
+   p += valid ? String(lat, 6) + "," + String(lon, 6) : "NOFIX";
+   p += ",TS=" + String(millis());
+-  return transmit(p);
++  String packet;
++  const uint16_t seq = ++sosSeq_;
++  if (!encryptPacket(reinterpret_cast<const uint8_t*>(p.c_str()), p.length(),
++                     Config::LORA_TYPE_SOS, seq, packet))
++    return false;
++  sosPacket_ = packet;
++  sosSentMs_ = millis();
++  sosRetryCount_ = 0;
++  sosAwaitingAck_ = true;
++  {
++    StateLock lock(gState);
++    if (lock.ok()) {
++      gState.sosSeq = seq;
++      gState.sosAcked = false;
++      gState.sosRetries = 0;
++      gState.sos = true;
++    }
++  }
++  return transmit(packet, true);
+ }
+diff --git a/src/WebUi.cpp b/src/WebUi.cpp
+index 2cdf986..e5313b2 100644
+--- a/src/WebUi.cpp
++++ b/src/WebUi.cpp
+@@ -78,6 +78,20 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
+ <input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
+ <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
+ <button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button></div>
++<div class=card><h3>Channel Scanner</h3>
++<button onclick="scanStart(1)">Scan Once</button>
++<button onclick="scanStart(2)">Scan Continuous</button>
++<button onclick="scanStop()">Stop Scan</button>
++<button onclick="hopSuggest()">Suggest Hop Channels</button>
++<button onclick="hopEnable(1)">Enable Hop</button>
++<button onclick="hopEnable(0)">Disable Hop</button>
++<pre id=scanmsg></pre>
++<div id=scanresults><table><thead><tr>
++<th>Freq MHz</th><th>RSSI avg</th><th>RSSI peak</th><th>SNR</th>
++<th>Occupancy</th><th>Preamble</th><th>Load</th>
++</tr></thead><tbody id=scantbody></tbody></table></div>
++<div id=hopsummary></div>
++</div>
+ <div class=card><h3>Status</h3><pre id=s></pre></div>
+ <div class=card><h3>Files</h3><pre id=f></pre>
+ <input id=upfile type=file accept=".wav,.WAV"><button onclick="uploadFile()">UPLOAD WAV</button>
+@@ -168,7 +182,47 @@ async function syncSource(){
+     if(x.usbPlaybackTransport!==undefined)usbtransport.checked=!!x.usbPlaybackTransport;
+   } catch(e){}
+ }
++async function scanStart(mode){
++  const r=await j('/api/scan/start?mode='+mode+'&dwell=100',{method:'POST'});
++  document.getElementById('scanmsg').textContent=r; refreshScan();
++}
++async function scanStop(){
++  const r=await j('/api/scan/stop',{method:'POST'});
++  document.getElementById('scanmsg').textContent=r; refreshScan();
++}
++async function hopSuggest(){
++  const r=await j('/api/hop/suggest',{method:'POST'});
++  document.getElementById('scanmsg').textContent='Suggest: '+r; refreshHop();
++}
++async function hopEnable(on){
++  const r=await j('/api/hop/enable?on='+on,{method:'POST'});
++  document.getElementById('scanmsg').textContent=r; refreshHop();
++}
++async function refreshScan(){
++  try{
++    const arr=await (await fetch('/api/scan/results')).json();
++    let html='';
++    for(const r of arr){
++      const w=Math.min(100,r.occupancy|0);
++      html+='<tr><td>'+r.freq.toFixed(3)+'</td><td>'+r.rssiAvg+
++            '</td><td>'+r.rssiPeak+'</td><td>'+r.snr+
++            '</td><td>'+r.occupancy+'%</td><td>'+r.preamble+
++            '</td><td><div style="width:'+w+
++            '%;height:10px"></div></td></tr>';
++    }
++    document.getElementById('scantbody').innerHTML=html;
++  }catch(e){}
++}
++async function refreshHop(){
++  try{
++    const h=await (await fetch('/api/hop/status')).json();
++    document.getElementById('hopsummary').textContent=
++      'Hop enabled='+h.enabled+' count='+h.count+
++      ' dwell='+h.dwellMs+'ms channels=['+h.channels.join(',')+']';
++  }catch(e){}
++}
+ setInterval(refresh,2000);syncSource();refresh()
++setInterval(refreshScan,3000);setInterval(refreshHop,3000);refreshScan();refreshHop()
+ </script></body></html>)HTML";
+ 
+ bool WebUi::sameOrigin() {
+@@ -235,6 +289,14 @@ void WebUi::begin() {
+   server_.on("/api/battery-calibrate", HTTP_POST, [this]{ if (auth()) handleBatteryCalibrate(); });
+   server_.on("/api/message", HTTP_POST, [this]{ if (auth()) handleMessage(); });
+   server_.on("/api/sos", HTTP_POST, [this]{ if (auth()) handleSos(); });
++  server_.on("/api/sos-status", HTTP_GET, [this]{ if (auth()) handleSosStatus(); });
++  server_.on("/api/scan/status", HTTP_GET, [this]{ if (auth()) handleScanStatus(); });
++  server_.on("/api/scan/start", HTTP_POST, [this]{ if (auth()) handleScanStart(); });
++  server_.on("/api/scan/stop", HTTP_POST, [this]{ if (auth()) handleScanStop(); });
++  server_.on("/api/scan/results", HTTP_GET, [this]{ if (auth()) handleScanResults(); });
++  server_.on("/api/hop/suggest", HTTP_POST, [this]{ if (auth()) handleHopSuggest(); });
++  server_.on("/api/hop/status", HTTP_GET, [this]{ if (auth()) handleHopStatus(); });
++  server_.on("/api/hop/enable", HTTP_POST, [this]{ if (auth()) handleHopEnable(); });
+   server_.on("/api/ptt", HTTP_POST, [this]{ if (auth()) handlePtt(); });
+   server_.on("/api/record", HTTP_POST, [this]{ if (auth()) handleRecord(); });
+   server_.on("/api/play", HTTP_POST, [this]{ if (auth()) handlePlay(); });
+@@ -555,6 +617,154 @@ void WebUi::handleSos() {
+   server_.send(ok ? 200 : 503, "text/plain", ok ? "SOS" : "FAIL");
+ }
+ 
++void WebUi::handleSosStatus() {
++  StateLock lock(gState);
++  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
++  String j = "{";
++  j += "\"seq\":" + String(gState.sosSeq);
++  j += ",\"acked\":" + String(gState.sosAcked ? "true" : "false");
++  j += ",\"retries\":" + String(gState.sosRetries);
++  j += ",\"lastAckMs\":" + String(gState.sosLastAckMs);
++  j += ",\"source\":" + String(gState.sosLastAckSourceId);
++  j += ",\"active\":" + String(gState.sos ? "true" : "false");
++  j += ",\"error\":\"" + jsonEscape(gState.lastError) + "\"";
++  j += "}";
++  server_.sendHeader("Cache-Control", "no-store");
++  server_.send(200, "application/json", j);
++}
++
++void WebUi::handleScanStatus() {
++  StateLock lock(gState);
++  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
++  String j = "{";
++  j += "\"active\":" + String(gState.scannerActive ? "true" : "false");
++  j += ",\"mode\":" + String(gState.scannerMode);
++  j += ",\"sweep\":" + String(gState.scannerSweepCount);
++  j += ",\"channels\":" + String(gState.scannerChannelCount);
++  j += ",\"dwellMs\":" + String(gState.scannerDwellMs);
++  j += ",\"lastSweepMs\":" + String(gState.scannerLastSweepMs);
++  j += ",\"error\":\"" + jsonEscape(gState.lastError) + "\"";
++  j += "}";
++  server_.sendHeader("Cache-Control", "no-store");
++  server_.send(200, "application/json", j);
++}
++
++void WebUi::handleScanStart() {
++  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
++  const String modeRaw = server_.arg("mode");
++  const String dwellRaw = server_.arg("dwell");
++  if (modeRaw != "1" && modeRaw != "2") {
++    server_.send(400, "text/plain", "invalid mode"); return;
++  }
++  uint16_t dwell = Config::SCANNER_DEFAULT_DWELL_MS;
++  if (!dwellRaw.isEmpty()) {
++    for (size_t i = 0; i < dwellRaw.length(); ++i) {
++      if (dwellRaw[i] < '0' || dwellRaw[i] > '9') {
++        server_.send(400, "text/plain", "invalid dwell"); return;
++      }
++    }
++    const long v = dwellRaw.toInt();
++    if (v < static_cast<long>(Config::SCANNER_MIN_DWELL_MS) ||
++        v > static_cast<long>(Config::SCANNER_MAX_DWELL_MS)) {
++      server_.send(400, "text/plain", "dwell out of range"); return;
++    }
++    dwell = static_cast<uint16_t>(v);
++  }
++  const bool ok = lora.scannerStart(
++      static_cast<uint8_t>(modeRaw == "2" ? 2 : 1), dwell);
++  server_.send(ok ? 200 : 409, "text/plain", ok ? "SCAN" : "FAIL");
++}
++
++void WebUi::handleScanStop() {
++  const bool ok = lora.scannerStop();
++  server_.send(ok ? 200 : 409, "text/plain", ok ? "STOP" : "FAIL");
++}
++
++void WebUi::handleScanResults() {
++  ChannelScanResult results[Config::SCANNER_MAX_CHANNELS] = {};
++  size_t count = 0;
++  lora.scannerGetResults(results, count);
++  String j = "[";
++  for (size_t i = 0; i < count; ++i) {
++    if (i) j += ",";
++    const ChannelScanResult& r = results[i];
++    j += "{\"freq\":" + String(r.freqMHz, 3) +
++         ",\"rssiAvg\":" + String(r.rssiAvgDbm) +
++         ",\"rssiPeak\":" + String(r.rssiPeakDbm) +
++         ",\"snr\":" + String(r.snrDb, 1) +
++         ",\"occupancy\":" + String(r.occupancyPercent) +
++         ",\"preamble\":" + String(r.preambleCount) +
++         ",\"ts\":" + String(r.timestamp) + "}";
++  }
++  j += "]";
++  server_.sendHeader("Cache-Control", "no-store");
++  server_.send(200, "application/json", j);
++}
++
++void WebUi::handleHopSuggest() {
++  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
++  uint8_t suggested[Config::HOP_CHANNEL_MAX] = {};
++  const size_t n = lora.scannerSuggestBestChannels(
++      suggested, Config::HOP_CHANNEL_MAX);
++  if (n == 0) {
++    server_.send(409, "text/plain", "no scan results");
++    return;
++  }
++  {
++    StateLock lock(gState);
++    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
++    for (size_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
++      gState.hopChannelList[i] = (i < n) ? suggested[i] : 0;
++    gState.hopChannelCount = static_cast<uint8_t>(n);
++  }
++  String j = "{\"count\":" + String(static_cast<unsigned>(n)) +
++             ",\"channels\":[";
++  for (size_t i = 0; i < n; ++i) {
++    if (i) j += ",";
++    j += String(suggested[i]);
++  }
++  j += "]}";
++  server_.sendHeader("Cache-Control", "no-store");
++  server_.send(200, "application/json", j);
++}
++
++void WebUi::handleHopStatus() {
++  StateLock lock(gState);
++  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
++  String j = "{";
++  j += "\"enabled\":" + String(gState.hopEnabled ? "true" : "false");
++  j += ",\"count\":" + String(gState.hopChannelCount);
++  j += ",\"dwellMs\":" + String(Config::HOP_DWELL_MS);
++  j += ",\"channels\":[";
++  for (size_t i = 0; i < gState.hopChannelCount &&
++                     i < Config::HOP_CHANNEL_MAX; ++i) {
++    if (i) j += ",";
++    j += String(gState.hopChannelList[i]);
++  }
++  j += "],\"error\":\"" + jsonEscape(gState.lastError) + "\"";
++  j += "}";
++  server_.sendHeader("Cache-Control", "no-store");
++  server_.send(200, "application/json", j);
++}
++
++void WebUi::handleHopEnable() {
++  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
++  const String raw = server_.arg("on");
++  if (raw != "0" && raw != "1") {
++    server_.send(400, "text/plain", "invalid enable"); return;
++  }
++  const bool on = (raw == "1");
++  {
++    StateLock lock(gState);
++    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
++    if (on && gState.hopChannelCount == 0) {
++      server_.send(409, "text/plain", "no channels suggested"); return;
++    }
++    gState.hopEnabled = on;
++  }
++  server_.send(200, "text/plain", on ? "HOP ENABLED" : "HOP DISABLED");
++}
++
+ void WebUi::handlePtt() {
+   if (!rateLimit(lastPttMs_, Config::WEB_RATE_LIMIT_MS)) return;
+   const String raw = server_.arg("on");

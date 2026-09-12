@@ -78,6 +78,20 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
 <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
 <button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button></div>
+<div class=card><h3>Channel Scanner</h3>
+<button onclick="scanStart(1)">Scan Once</button>
+<button onclick="scanStart(2)">Scan Continuous</button>
+<button onclick="scanStop()">Stop Scan</button>
+<button onclick="hopSuggest()">Suggest Hop Channels</button>
+<button onclick="hopEnable(1)">Enable Hop</button>
+<button onclick="hopEnable(0)">Disable Hop</button>
+<pre id=scanmsg></pre>
+<div id=scanresults><table><thead><tr>
+<th>Freq MHz</th><th>RSSI avg</th><th>RSSI peak</th><th>SNR</th>
+<th>Occupancy</th><th>Preamble</th><th>Load</th>
+</tr></thead><tbody id=scantbody></tbody></table></div>
+<div id=hopsummary></div>
+</div>
 <div class=card><h3>Status</h3><pre id=s></pre></div>
 <div class=card><h3>Files</h3><pre id=f></pre>
 <input id=upfile type=file accept=".wav,.WAV"><button onclick="uploadFile()">UPLOAD WAV</button>
@@ -168,7 +182,47 @@ async function syncSource(){
     if(x.usbPlaybackTransport!==undefined)usbtransport.checked=!!x.usbPlaybackTransport;
   } catch(e){}
 }
+async function scanStart(mode){
+  const r=await j('/api/scan/start?mode='+mode+'&dwell=100',{method:'POST'});
+  document.getElementById('scanmsg').textContent=r; refreshScan();
+}
+async function scanStop(){
+  const r=await j('/api/scan/stop',{method:'POST'});
+  document.getElementById('scanmsg').textContent=r; refreshScan();
+}
+async function hopSuggest(){
+  const r=await j('/api/hop/suggest',{method:'POST'});
+  document.getElementById('scanmsg').textContent='Suggest: '+r; refreshHop();
+}
+async function hopEnable(on){
+  const r=await j('/api/hop/enable?on='+on,{method:'POST'});
+  document.getElementById('scanmsg').textContent=r; refreshHop();
+}
+async function refreshScan(){
+  try{
+    const arr=await (await fetch('/api/scan/results')).json();
+    let html='';
+    for(const r of arr){
+      const w=Math.min(100,r.occupancy|0);
+      html+='<tr><td>'+r.freq.toFixed(3)+'</td><td>'+r.rssiAvg+
+            '</td><td>'+r.rssiPeak+'</td><td>'+r.snr+
+            '</td><td>'+r.occupancy+'%</td><td>'+r.preamble+
+            '</td><td><div style="width:'+w+
+            '%;height:10px"></div></td></tr>';
+    }
+    document.getElementById('scantbody').innerHTML=html;
+  }catch(e){}
+}
+async function refreshHop(){
+  try{
+    const h=await (await fetch('/api/hop/status')).json();
+    document.getElementById('hopsummary').textContent=
+      'Hop enabled='+h.enabled+' count='+h.count+
+      ' dwell='+h.dwellMs+'ms channels=['+h.channels.join(',')+']';
+  }catch(e){}
+}
 setInterval(refresh,2000);syncSource();refresh()
+setInterval(refreshScan,3000);setInterval(refreshHop,3000);refreshScan();refreshHop()
 </script></body></html>)HTML";
 
 bool WebUi::sameOrigin() {
@@ -235,6 +289,14 @@ void WebUi::begin() {
   server_.on("/api/battery-calibrate", HTTP_POST, [this]{ if (auth()) handleBatteryCalibrate(); });
   server_.on("/api/message", HTTP_POST, [this]{ if (auth()) handleMessage(); });
   server_.on("/api/sos", HTTP_POST, [this]{ if (auth()) handleSos(); });
+  server_.on("/api/sos-status", HTTP_GET, [this]{ if (auth()) handleSosStatus(); });
+  server_.on("/api/scan/status", HTTP_GET, [this]{ if (auth()) handleScanStatus(); });
+  server_.on("/api/scan/start", HTTP_POST, [this]{ if (auth()) handleScanStart(); });
+  server_.on("/api/scan/stop", HTTP_POST, [this]{ if (auth()) handleScanStop(); });
+  server_.on("/api/scan/results", HTTP_GET, [this]{ if (auth()) handleScanResults(); });
+  server_.on("/api/hop/suggest", HTTP_POST, [this]{ if (auth()) handleHopSuggest(); });
+  server_.on("/api/hop/status", HTTP_GET, [this]{ if (auth()) handleHopStatus(); });
+  server_.on("/api/hop/enable", HTTP_POST, [this]{ if (auth()) handleHopEnable(); });
   server_.on("/api/ptt", HTTP_POST, [this]{ if (auth()) handlePtt(); });
   server_.on("/api/record", HTTP_POST, [this]{ if (auth()) handleRecord(); });
   server_.on("/api/play", HTTP_POST, [this]{ if (auth()) handlePlay(); });
@@ -553,6 +615,154 @@ void WebUi::handleSos() {
     if (lock.ok()) gState.sos = true;
   }
   server_.send(ok ? 200 : 503, "text/plain", ok ? "SOS" : "FAIL");
+}
+
+void WebUi::handleSosStatus() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "{";
+  j += "\"seq\":" + String(gState.sosSeq);
+  j += ",\"acked\":" + String(gState.sosAcked ? "true" : "false");
+  j += ",\"retries\":" + String(gState.sosRetries);
+  j += ",\"lastAckMs\":" + String(gState.sosLastAckMs);
+  j += ",\"source\":" + String(gState.sosLastAckSourceId);
+  j += ",\"active\":" + String(gState.sos ? "true" : "false");
+  j += ",\"error\":\"" + jsonEscape(gState.lastError) + "\"";
+  j += "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleScanStatus() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "{";
+  j += "\"active\":" + String(gState.scannerActive ? "true" : "false");
+  j += ",\"mode\":" + String(gState.scannerMode);
+  j += ",\"sweep\":" + String(gState.scannerSweepCount);
+  j += ",\"channels\":" + String(gState.scannerChannelCount);
+  j += ",\"dwellMs\":" + String(gState.scannerDwellMs);
+  j += ",\"lastSweepMs\":" + String(gState.scannerLastSweepMs);
+  j += ",\"error\":\"" + jsonEscape(gState.lastError) + "\"";
+  j += "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleScanStart() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String modeRaw = server_.arg("mode");
+  const String dwellRaw = server_.arg("dwell");
+  if (modeRaw != "1" && modeRaw != "2") {
+    server_.send(400, "text/plain", "invalid mode"); return;
+  }
+  uint16_t dwell = Config::SCANNER_DEFAULT_DWELL_MS;
+  if (!dwellRaw.isEmpty()) {
+    for (size_t i = 0; i < dwellRaw.length(); ++i) {
+      if (dwellRaw[i] < '0' || dwellRaw[i] > '9') {
+        server_.send(400, "text/plain", "invalid dwell"); return;
+      }
+    }
+    const long v = dwellRaw.toInt();
+    if (v < static_cast<long>(Config::SCANNER_MIN_DWELL_MS) ||
+        v > static_cast<long>(Config::SCANNER_MAX_DWELL_MS)) {
+      server_.send(400, "text/plain", "dwell out of range"); return;
+    }
+    dwell = static_cast<uint16_t>(v);
+  }
+  const bool ok = lora.scannerStart(
+      static_cast<uint8_t>(modeRaw == "2" ? 2 : 1), dwell);
+  server_.send(ok ? 200 : 409, "text/plain", ok ? "SCAN" : "FAIL");
+}
+
+void WebUi::handleScanStop() {
+  const bool ok = lora.scannerStop();
+  server_.send(ok ? 200 : 409, "text/plain", ok ? "STOP" : "FAIL");
+}
+
+void WebUi::handleScanResults() {
+  ChannelScanResult results[Config::SCANNER_MAX_CHANNELS] = {};
+  size_t count = 0;
+  lora.scannerGetResults(results, count);
+  String j = "[";
+  for (size_t i = 0; i < count; ++i) {
+    if (i) j += ",";
+    const ChannelScanResult& r = results[i];
+    j += "{\"freq\":" + String(r.freqMHz, 3) +
+         ",\"rssiAvg\":" + String(r.rssiAvgDbm) +
+         ",\"rssiPeak\":" + String(r.rssiPeakDbm) +
+         ",\"snr\":" + String(r.snrDb, 1) +
+         ",\"occupancy\":" + String(r.occupancyPercent) +
+         ",\"preamble\":" + String(r.preambleCount) +
+         ",\"ts\":" + String(r.timestamp) + "}";
+  }
+  j += "]";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleHopSuggest() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  uint8_t suggested[Config::HOP_CHANNEL_MAX] = {};
+  const size_t n = lora.scannerSuggestBestChannels(
+      suggested, Config::HOP_CHANNEL_MAX);
+  if (n == 0) {
+    server_.send(409, "text/plain", "no scan results");
+    return;
+  }
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+    for (size_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
+      gState.hopChannelList[i] = (i < n) ? suggested[i] : 0;
+    gState.hopChannelCount = static_cast<uint8_t>(n);
+  }
+  String j = "{\"count\":" + String(static_cast<unsigned>(n)) +
+             ",\"channels\":[";
+  for (size_t i = 0; i < n; ++i) {
+    if (i) j += ",";
+    j += String(suggested[i]);
+  }
+  j += "]}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleHopStatus() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "{";
+  j += "\"enabled\":" + String(gState.hopEnabled ? "true" : "false");
+  j += ",\"count\":" + String(gState.hopChannelCount);
+  j += ",\"dwellMs\":" + String(Config::HOP_DWELL_MS);
+  j += ",\"channels\":[";
+  for (size_t i = 0; i < gState.hopChannelCount &&
+                     i < Config::HOP_CHANNEL_MAX; ++i) {
+    if (i) j += ",";
+    j += String(gState.hopChannelList[i]);
+  }
+  j += "],\"error\":\"" + jsonEscape(gState.lastError) + "\"";
+  j += "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleHopEnable() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String raw = server_.arg("on");
+  if (raw != "0" && raw != "1") {
+    server_.send(400, "text/plain", "invalid enable"); return;
+  }
+  const bool on = (raw == "1");
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+    if (on && gState.hopChannelCount == 0) {
+      server_.send(409, "text/plain", "no channels suggested"); return;
+    }
+    gState.hopEnabled = on;
+  }
+  server_.send(200, "text/plain", on ? "HOP ENABLED" : "HOP DISABLED");
 }
 
 void WebUi::handlePtt() {

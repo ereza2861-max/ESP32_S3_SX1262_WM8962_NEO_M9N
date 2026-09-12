@@ -4,6 +4,17 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
+#include "Config.h"
+
+struct ChannelScanResult {
+  float freqMHz = 0.0f;
+  int16_t rssiAvgDbm = -127;
+  int16_t rssiPeakDbm = -127;
+  float snrDb = -20.0f;
+  uint8_t occupancyPercent = 0;
+  uint16_t preambleCount = 0;
+  uint32_t timestamp = 0;
+};
 
 class LoRaManager {
 public:
@@ -15,6 +26,11 @@ public:
   bool sendPosition();
   bool sendVoiceFrame();
   bool applyConfig();
+  bool scannerStart(uint8_t mode, uint16_t dwellMs);
+  bool scannerStop();
+  bool scannerIsActive() const;
+  void scannerGetResults(struct ChannelScanResult* results, size_t& count);
+  size_t scannerSuggestBestChannels(uint8_t* channels, size_t capacity);
 private:
   Module module_;
   SX1276 radio_;
@@ -77,6 +93,46 @@ private:
   };
   DedupEntry dedupCache_[DEDUP_CACHE_SIZE] = {};
   size_t dedupNext_ = 0;
+  struct ScannerState {
+    bool active = false;
+    uint8_t mode = 0;
+    uint16_t dwellMs = Config::SCANNER_DEFAULT_DWELL_MS;
+    uint8_t index = 0;
+    uint16_t sweepCount = 0;
+    uint32_t lastSampleMs = 0;
+    struct Result {
+      float freqMHz = 0.0f;
+      int16_t rssiAvgDbm = -127;
+      int16_t rssiPeakDbm = -127;
+      float snrDb = -20.0f;
+      uint8_t occupancyPercent = 0;
+      uint16_t preambleCount = 0;
+      uint32_t timestamp = 0;
+    } results[Config::SCANNER_MAX_CHANNELS] = {};
+  } scanner_;
+  uint32_t hopFrame_ = 0;
+  uint32_t hopLastSyncMs_ = 0;
+  uint8_t currentHopIndex_ = 0;
+  uint8_t legacyRxCounter_ = 0;
+  uint16_t sosSeq_ = 0;
+  uint32_t sosSentMs_ = 0;
+  uint8_t sosRetryCount_ = 0;
+  bool sosAwaitingAck_ = false;
+  String sosPacket_;
+  uint8_t computeHopIndex(uint32_t frame) const;
+  bool retuneToHopChannel(uint8_t index);
+  bool retuneToChannel0();
+  bool encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
+                       uint16_t seq, uint8_t hopIndex, uint32_t epochMs,
+                       String& packet);
+  bool decryptPacketV3(const String& packet, uint8_t& type, uint16_t& seq,
+                       uint32_t& sourceId, uint8_t& ttl, uint8_t& hopIndex,
+                       uint32_t& epochMs, uint8_t* plain, size_t capacity,
+                       size_t& len);
+  bool transmitHopped(const String& text, uint8_t type);
+  bool sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId);
+  void handleSosAckPayload(const uint8_t* payload, size_t len);
+  void serviceSosRetry();
   bool encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
                      uint16_t seq, String& packet);
   bool decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,
