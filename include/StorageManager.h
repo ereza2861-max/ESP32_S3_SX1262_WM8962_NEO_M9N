@@ -11,6 +11,9 @@ public:
   bool isManagedAudioPath(const String& path) const;
   bool prepareRecordingSpace(uint32_t requiredBytes);
   bool isSafePath(const String& path) const;
+  bool checksumFile(const String& path, uint32_t& crc, uint64_t& size);
+  uint64_t totalBytes() const;
+  uint64_t usedBytes() const;
 private:
   bool ready_ = false;
 };

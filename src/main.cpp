@@ -406,16 +406,25 @@ void loop() {
   }
 
   bool sosActive = false;
+  bool sosEscalated = false;
   {
     StateLock lock(gState);
-    if (lock.ok()) sosActive = gState.sos;
-  }
-  if (sosActive && now - lastSos >= Config::SOS_REPEAT_MS) {
-    lastSos = now;
-    if (!lora.sendSOS()) {
-      StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "SOS repeat TX failed";
+    if (lock.ok()) {
+      sosActive = gState.sos;
+      sosEscalated = gState.sosEscalated;
     }
+  }
+  // SOS retries are owned by LoRaManager. Avoid creating a new sequence here,
+  // which would otherwise reset the ACK/retry state every few seconds.
+  if ((sosActive || sosEscalated) && now - lastSos >= Config::SOS_BEACON_PERIOD_MS) {
+    if (lora.sendPosition()) {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        ++gState.sosBeaconCount;
+        gState.sosLastBeaconMs = now;
+      }
+    }
+    lastSos = now;
   }
 
   if (shouldDeepSleep(now)) {

@@ -6,7 +6,7 @@
 #include <math.h>
 #include <SD.h>
 #include <driver/i2s.h>
-#include <SparkFun_WM8960_Arduino_Library.h>
+#include "Wm8962Codec.h"
 #include <esp_audio_simple_dec.h>
 #include <esp_audio_types.h>
 #include <esp_log.h>
@@ -15,83 +15,20 @@
 extern StorageManager storage;
 
 static const i2s_port_t AUDIO_I2S_PORT = I2S_NUM_0;
-static WM8960 codec;
+static Wm8962Codec codec;
 AudioManager* AudioManager::instance_ = nullptr;
 
-static void configureCodecForI2S() {
-  codec.enableVREF();
-  codec.enableVMID();
-
-  // Mic/line input -> ADC.
-  codec.enableLMIC();
-  codec.enableRMIC();
-  codec.connectLMN1();
-  codec.connectRMN1();
-  codec.disableLINMUTE();
-  codec.disableRINMUTE();
-  codec.setLINVOLDB(0.0);
-  codec.setRINVOLDB(0.0);
-  codec.setLMICBOOST(WM8960_MIC_BOOST_GAIN_0DB);
-  codec.setRMICBOOST(WM8960_MIC_BOOST_GAIN_0DB);
-  codec.connectLMIC2B();
-  codec.connectRMIC2B();
-  codec.enableAINL();
-  codec.enableAINR();
-
-  // Conservative codec-side processing for the microphone path. ALC/noise
-  // gate are disabled automatically for line-level sources by routeInput().
-  codec.enableAlc();
-  codec.setAlcTarget(WM8960_ALC_TARGET_LEVEL_NEG_12DB);
-  codec.setAlcAttack(WM8960_ALC_ATTACK_TIME_24MS);
-  codec.setAlcDecay(WM8960_ALC_DECAY_TIME_192MS);
-  codec.setAlcMaxGain(WM8960_ALC_MAX_GAIN_LEVEL_18DB);
-  codec.setAlcMinGain(WM8960_ALC_MIN_GAIN_LEVEL_NEG_5_25DB);
-  codec.setAlcHold(WM8960_ALC_HOLD_TIME_43MS);
-  codec.enableNoiseGate();
-  codec.setNoiseGateThreshold(3);
-
-  // DAC -> output mixer / headphone path.
-  codec.disableLB2LO();
-  codec.disableRB2RO();
-  codec.enableLD2LO();
-  codec.enableRD2RO();
-  codec.setLB2LOVOL(WM8960_OUTPUT_MIXER_GAIN_NEG_21DB);
-  codec.setRB2ROVOL(WM8960_OUTPUT_MIXER_GAIN_NEG_21DB);
-  codec.enableLOMIX();
-  codec.enableROMIX();
-
-  // 24 MHz MCLK on PCB -> WM8960 PLL -> 44.1 kHz audio clock.
-  codec.enablePLL();
-  codec.setPLLPRESCALE(WM8960_PLLPRESCALE_DIV_2);
-  codec.setSMD(WM8960_PLL_MODE_FRACTIONAL);
-  codec.setCLKSEL(WM8960_CLKSEL_PLL);
-  codec.setSYSCLKDIV(WM8960_SYSCLK_DIV_BY_2);
-  codec.setBCLKDIV(4);
-  codec.setDCLKDIV(WM8960_DCLKDIV_16);
-  codec.setPLLN(7);
-  codec.setPLLK(0x86, 0xC2, 0x26);
-  codec.setWL(WM8960_WL_16BIT);
-
-  // Codec is I2S master; ESP32 is I2S slave.
-  codec.enableMasterMode();
-  codec.setALRCGPIO();
-
-  codec.enableAdcLeft();
-  codec.enableAdcRight();
-  codec.enableDacLeft();
-  codec.enableDacRight();
-  codec.disableDacMute();
-
-  codec.enableHeadphones();
-  codec.enableOUT3MIX();
-  codec.setHeadphoneVolumeDB(0.0);
+static bool configureCodecForI2S() {
+  // WM8962 is the I2S master. The codec driver owns its clock tree and
+  // analogue power/mixer setup; ESP32-S3 remains an I2S slave.
+  return codec.configureI2sMaster(Config::AUDIO_SAMPLE_RATE, 16);
 }
 
 bool AudioManager::initCodec() {
   Wire.begin(Board::I2C_SDA, Board::I2C_SCL, 400000);
-  if (!codec.begin()) return false;
-  configureCodecForI2S();
-  return true;
+  Wire.setTimeOut(50);
+  if (!codec.begin(Wire, Board::WM8962_I2C_ADDR)) return false;
+  return configureCodecForI2S();
 }
 
 bool AudioManager::initI2S() {
@@ -273,7 +210,7 @@ bool AudioManager::begin() {
     StateLock lock(gState);
     if (lock.ok()) {
       gState.codecReady = false;
-      gState.lastError = "WM8960 init failed";
+      gState.lastError = "WM8962 init failed";
     }
     return false;
   }
@@ -350,7 +287,7 @@ bool AudioManager::startRecording() {
     if (lock.ok()) {
       allowed = gState.storageReady && !gState.recording &&
                 !playing_ && !recordFile_ &&
-                (recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC ||
+                (recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC ||
                  gState.usbAudioReady);
     }
   }
@@ -414,7 +351,7 @@ bool AudioManager::startRecording() {
         if (lock.ok()) {
           stillAllowed = gState.storageReady && !gState.recording &&
                          !playing_ &&
-                         (recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC ||
+                         (recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC ||
                           gState.usbAudioReady);
         } else {
           error = "State mutex unavailable";
@@ -436,7 +373,7 @@ bool AudioManager::startRecording() {
       if (lock.ok()) {
         if (gState.storageReady && !gState.recording &&
             !playing_ &&
-            (recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC ||
+            (recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC ||
              gState.usbAudioReady)) {
           gState.recording = true;
           gState.lastAudioFile = path;
@@ -454,7 +391,7 @@ bool AudioManager::startRecording() {
       ok = false;
     } else {
       captureUsbRecord_ = recordSource_ == Config::AUDIO_SOURCE_USB;
-      captureWm8960Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC;
+      captureWm8962Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC;
       if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
       if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
       if (aecRefBuffer_) (void)xStreamBufferReset(aecRefBuffer_);
@@ -472,58 +409,11 @@ bool AudioManager::startRecording() {
 
 
 bool AudioManager::routeInput(uint8_t source) {
-  // USB is not a WM8960 ADC source. Keep the codec on the selected local
-  // source so changing the USB record mode cannot silently alter the analog path.
+  if (source > Config::AUDIO_SOURCE_USB) return false;
+  // WM8962 uses its native input mixer. USB recording does not change the
+  // analogue path, so leave the codec on the last selected local input.
   if (source == Config::AUDIO_SOURCE_USB) return true;
-
-  codec.disableLoopBack();
-  codec.disconnectLMIC2B();
-  codec.disconnectRMIC2B();
-  codec.disableLMIC();
-  codec.disableRMIC();
-  codec.disableAlc();
-  codec.disableNoiseGate();
-
-  switch (source) {
-    case Config::AUDIO_SOURCE_WM8960_MIC:
-      codec.enableLMIC();
-      codec.enableRMIC();
-      codec.connectLMN1();
-      codec.connectRMN1();
-      codec.disableLINMUTE();
-      codec.disableRINMUTE();
-      codec.setLMICBOOST(WM8960_MIC_BOOST_GAIN_0DB);
-      codec.setRMICBOOST(WM8960_MIC_BOOST_GAIN_0DB);
-      codec.connectLMIC2B();
-      codec.connectRMIC2B();
-      codec.enableAlc();
-      codec.setAlcTarget(WM8960_ALC_TARGET_LEVEL_NEG_12DB);
-      codec.setAlcAttack(WM8960_ALC_ATTACK_TIME_24MS);
-      codec.setAlcDecay(WM8960_ALC_DECAY_TIME_192MS);
-      codec.setAlcMaxGain(WM8960_ALC_MAX_GAIN_LEVEL_18DB);
-      codec.setAlcMinGain(WM8960_ALC_MIN_GAIN_LEVEL_NEG_5_25DB);
-      codec.setAlcHold(WM8960_ALC_HOLD_TIME_43MS);
-      codec.enableNoiseGate();
-      codec.setNoiseGateThreshold(3);
-      return true;
-
-    case Config::AUDIO_SOURCE_LINEIN2:
-      codec.setLIN2BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
-      codec.setRIN2BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
-      codec.enableAINL();
-      codec.enableAINR();
-      return true;
-
-    case Config::AUDIO_SOURCE_LINEIN3:
-      codec.setLIN3BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
-      codec.setRIN3BOOST(WM8960_BOOST_MIXER_GAIN_0DB);
-      codec.enableAINL();
-      codec.enableAINR();
-      return true;
-
-    default:
-      return false;
-  }
+  return codec.routeInput(source);
 }
 
 void AudioManager::updateAudioLevel(const uint8_t* data, size_t len) {
@@ -610,10 +500,10 @@ bool AudioManager::setLoopback(bool enabled) {
     if (mutex_) xSemaphoreGive(mutex_);
     return false;
   }
-  if (enabled) {
-    codec.enableLoopBack();
-  } else {
-    codec.disableLoopBack();
+  const bool codecOk = codec.setLoopback(enabled);
+  if (!codecOk) {
+    if (mutex_) xSemaphoreGive(mutex_);
+    return false;
   }
   loopback_ = enabled;
   {
@@ -893,7 +783,7 @@ bool AudioManager::stopRecording() {
   bool ok = true;
   if (recording) {
     captureUsbRecord_ = false;
-    captureWm8960Mic_ = false;
+    captureWm8962Mic_ = false;
     if (i2sMutex_ &&
         xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
       xSemaphoreGive(mutex_);
@@ -986,7 +876,7 @@ bool AudioManager::splitRecording() {
   }
 
   captureUsbRecord_ = false;
-  captureWm8960Mic_ = false;
+  captureWm8962Mic_ = false;
   if (recordSource_ == Config::AUDIO_SOURCE_USB && !flushUsbRecordingBuffer()) {
     xSemaphoreGive(mutex_);
     return false;
@@ -1001,7 +891,7 @@ bool AudioManager::splitRecording() {
     return false;
   }
   captureUsbRecord_ = recordSource_ == Config::AUDIO_SOURCE_USB;
-  captureWm8960Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8960_MIC;
+  captureWm8962Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC;
   {
     StateLock lock(gState);
     if (lock.ok()) {
@@ -1408,8 +1298,7 @@ void AudioManager::stopPlayback() {
 
 void AudioManager::setVolume(uint8_t percent) {
   volume_ = constrain(percent, 0, 100);
-  const float db = -74.0f + (80.0f * volume_ / 100.0f);
-  codec.setHeadphoneVolumeDB(db);
+  codec.setVolumePercent(volume_);
   StateLock lock(gState);
   if (lock.ok()) gState.volume = volume_;
 }
@@ -1463,7 +1352,7 @@ esp_err_t AudioManager::usbInputCallback(uint8_t* data, size_t len,
         instance_->usbTransportBuffer_, data, len, 0);
     if (got < len) memset(data + got, 0, len - got);
     *bytesRead = len;
-  } else if (instance_->captureWm8960Mic_ && instance_->usbMicBuffer_) {
+  } else if (instance_->captureWm8962Mic_ && instance_->usbMicBuffer_) {
     const size_t got = xStreamBufferReceive(
         instance_->usbMicBuffer_, data, len, 0);
     if (got < len) memset(data + got, 0, len - got);
@@ -1684,7 +1573,7 @@ void AudioManager::task() {
       }
     }
     if (!writeRecordingData(buffer, got)) {
-      captureWm8960Mic_ = false;
+      captureWm8962Mic_ = false;
       StateLock lock(gState);
       if (lock.ok()) gState.recording = false;
       (void)finalizeWav();

@@ -8,6 +8,7 @@
 #include <esp_system.h>
 #include <WiFi.h>
 #include <SD.h>
+#include <Preferences.h>
 
 static String jsonEscape(const String& input) {
   String out;
@@ -44,18 +45,20 @@ extern AudioManager audio;
 static const char INDEX_HTML[] PROGMEM = R"HTML(
 <!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
 <title>FieldRadio</title><style>
-body{font-family:sans-serif;max-width:900px;margin:auto;padding:16px;background:#111;color:#eee}
-button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:10px;overflow:auto}
+body{font-family:sans-serif;max-width:1100px;margin:auto;padding:16px;background:#111;color:#eee}
+body.light{background:#f5f5f5;color:#111} body.light .card{border-color:#bbb} body.light pre{background:#e8e8e8}
 .card{border:1px solid #444;border-radius:8px;padding:12px;margin:8px 0}
+@media(max-width:600px){body{padding:8px}.card{padding:8px}button,input,select{width:100%;box-sizing:border-box;margin:3px 0}table{font-size:.8rem;display:block;overflow-x:auto}}
+button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:10px;overflow:auto}
 .battery-low{outline:3px solid orange}.battery-critical{outline:4px solid red}
 </style></head><body><h1>FieldRadio</h1>
 <div class=card>
 <button onclick="ptt(1)">PTT ON</button><button onclick="ptt(0)">PTT OFF</button>
-<button onclick="sos(1)">SOS</button><button onclick="sos(0)">SOS OFF</button><button onclick="rec(1)">REC</button>
+<button onclick="sos(1)">SOS</button><button onclick="sos(0)">Cancel SOS</button><span id=sosBadge></span><button onclick="refreshSosHistory()">SOS history</button><button onclick="rec(1)">REC</button>
 <button onclick="rec(0)">STOP REC</button><button onclick="recordPause(1)">PAUSE REC</button><button onclick="recordPause(0)">RESUME REC</button><button onclick="recordSplit()">SPLIT REC</button>
 <label>Record source
 <select id=audsrc onchange="setAudioSource()">
-<option value="0">WM8960 MIC</option>
+<option value="0">WM8962 MIC</option>
 <option value="1">LINE-IN 2</option>
 <option value="2">LINE-IN 3</option>
 <option value="3">USB Audio</option>
@@ -63,10 +66,17 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <button onclick="play()">PLAY</button><button onclick="pausePlay(1)">PAUSE</button><button onclick="pausePlay(0)">RESUME</button><button onclick="stopPlay()">STOP</button><input id=seekms type=number value="0" min="0"><button onclick="seekPlay()">SEEK ms</button><button onclick="queue()">QUEUE</button><button onclick="clearQueue()">CLEAR QUEUE</button>
 <button onclick="tone(880,120)">BEEP</button>
 <label>USB monitor <input id=usbmon type=checkbox onchange="setUsbMonitor()"></label><label>SD→USB <input id=usbtransport type=checkbox onchange="setUsbTransport()"></label>
-<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
+<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX threshold <input id=voxThreshold type=number step="0.01" min="0.01" max="1" value="0.08"></label><label>hang ms <input id=voxHang type=number min="50" max="5000" value="700"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
 </div>
 <div class=card><input id=msg placeholder="LoRa message">
-<button onclick="send()">Send</button></div>
+<button onclick="send()">Send</button></div><div class=card><h3>Messages <span id=unreadBadge>0 unread</span></h3>
+<input id=messageQuery placeholder="Search text/source ID">
+<input id=messageFrom type=number placeholder="From epoch"><input id=messageTo type=number placeholder="To epoch">
+<button onclick="refreshMessages()">Search</button><button onclick="readAllMessages()">Mark all read</button>
+<button onclick="clearMessages()">Delete history</button>
+<button onclick="exportMessages('csv')">Export CSV</button><button onclick="exportMessages('json')">Export JSON</button>
+<pre id=messages></pre><input id=replySource placeholder="Reply source ID"><input id=replyText placeholder="Reply text">
+<button onclick="replyMessage()">Reply</button></div>
 <div class=card><input id=file value="/REC/">
 <button onclick="play()">Play WAV</button></div>
 <div class=card><h3>Configuration</h3>
@@ -78,6 +88,10 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
 <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
 <button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button></div>
+<div class=card><h3>Radio diagnostics</h3>
+<input id=tuneFreq type=number step="0.001" min="920" max="923" placeholder="Frequency MHz">
+<button onclick="tuneRadio()">Manual tune</button><button onclick="refreshRadioHistory()">Refresh RSSI/SNR history</button>
+<pre id=radioHistory></pre><div id=storageInfo></div></div>
 <div class=card><h3>Channel Scanner</h3>
 <button onclick="scanStart(1)">Scan Once</button>
 <button onclick="scanStart(2)">Scan Continuous</button>
@@ -92,17 +106,40 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 </tr></thead><tbody id=scantbody></tbody></table></div>
 <div id=hopsummary></div>
 </div>
-<div class=card><h3>Status</h3><pre id=s></pre></div>
-<div class=card><h3>Files</h3><pre id=f></pre>
+<div class=card><button onclick="toggleTheme()">Dark/light</button><span id=toast></span></div><div class=card><h3>Status</h3><pre id=s></pre></div>
+<div class=card><h3>Files</h3><input id=fileDir value="/REC/"><button onclick="refreshFiles()">Open folder</button><pre id=f></pre>
 <input id=upfile type=file accept=".wav,.WAV"><button onclick="uploadFile()">UPLOAD WAV</button>
 <input id=renameFrom placeholder="/REC/old.WAV"><input id=renameTo placeholder="/REC/new.WAV"><button onclick="renameFile()">RENAME</button>
 <a id=trackDownload href="/api/track/download">Download GPS track</a>
 </div>
 <script>
 async function j(u,o){let r=await fetch(u,o);return await r.text()}
+function toast(t){document.getElementById('toast').textContent=t;setTimeout(()=>document.getElementById('toast').textContent='',2500)}
+function toggleTheme(){document.body.classList.toggle('light');localStorage.setItem('fieldradio-theme',document.body.classList.contains('light')?'light':'dark')}
+if(localStorage.getItem('fieldradio-theme')==='light')document.body.classList.add('light');
+async function refreshMessages(){
+ try{
+  const q=new URLSearchParams(); if(messageQuery.value)q.set('q',messageQuery.value);
+  if(messageFrom.value)q.set('from',messageFrom.value); if(messageTo.value)q.set('to',messageTo.value);
+  const a=await (await fetch('/api/messages?'+q)).json();
+  messages.textContent=a.map(x=>`${x.read?'':'[UNREAD] '}ts=${x.ts} source=${x.source}: ${x.text}`).join('\\n');
+ }catch(e){toast('Message refresh failed')}
+}
+async function readAllMessages(){await j('/api/messages/read?ts=all',{method:'POST'});refresh()}
+async function clearMessages(){if(!confirm('Delete message history?'))return;await j('/api/messages/clear',{method:'POST'});refreshMessages();refresh()}
+async function replyMessage(){const r=await j('/api/messages/reply?source='+encodeURIComponent(replySource.value),{method:'POST',headers:{'Content-Type':'text/plain'},body:replyText.value});toast(r);refresh()}
+function exportMessages(f){window.location='/api/messages/export?format='+f}
+async function tuneRadio(){const r=await j('/api/radio/tune?freq='+encodeURIComponent(tuneFreq.value),{method:'POST'});toast(r)}
+async function refreshRadioHistory(){
+ try{const a=await (await fetch('/api/radio/history')).json();radioHistory.textContent=a.map(x=>`+${x.ms}ms RSSI=${x.rssi} SNR=${x.snr}`).join('\\n');
+ const st=await (await fetch('/api/storage/info')).json();storageInfo.textContent=`SD used ${st.used} / ${st.total} bytes (${st.free} free)`;
+ }catch(e){toast('Radio/storage refresh failed')}
+}
+async function refreshSosHistory(){try{const a=await (await fetch('/api/sos-history')).json();sosBadge.textContent=a.map(x=>`event=${x.event} seq=${x.seq} peer=${x.peer}`).join(' | ')}catch(e){}}
+async function refreshFiles(){try{f.textContent=await j('/api/files?dir='+encodeURIComponent(fileDir.value))}catch(e){toast('File list failed')}}
 async function refresh(){
-  const raw=await j('/api/status');s.textContent=raw;f.textContent=await j('/api/files');
-  try{const x=JSON.parse(raw);document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical)}catch(e){}
+  const raw=await j('/api/status');s.textContent=raw;await refreshFiles();
+  try{const x=JSON.parse(raw);document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical)}catch(e){}
 }
 async function ptt(v){await j('/api/ptt?on='+v,{method:'POST'});refresh()}
 async function sos(v){await j('/api/sos?on='+v,{method:'POST'});refresh()}
@@ -172,7 +209,7 @@ async function queue(){await j('/api/queue?path='+encodeURIComponent(file.value)
 async function clearQueue(){await j('/api/queue-clear',{method:'POST'});refresh()}
 async function recordPause(v){await j('/api/record-pause?on='+v,{method:'POST'});refresh()}
 async function recordSplit(){await j('/api/record-split',{method:'POST'});refresh()}
-async function setVox(){await j('/api/vox?on='+(vox.checked?'1':'0'),{method:'POST'});refresh()}
+async function setVox(){await j('/api/vox?on='+(vox.checked?'1':'0')+'&threshold='+encodeURIComponent(voxThreshold.value)+'&hang='+encodeURIComponent(voxHang.value),{method:'POST'});refresh()}
 async function syncSource(){
   try {
     const x=await (await fetch('/api/status')).json();
@@ -221,8 +258,8 @@ async function refreshHop(){
       ' dwell='+h.dwellMs+'ms channels=['+h.channels.join(',')+']';
   }catch(e){}
 }
-setInterval(refresh,2000);syncSource();refresh()
-setInterval(refreshScan,3000);setInterval(refreshHop,3000);refreshScan();refreshHop()
+setInterval(refresh,1000);syncSource();refresh();refreshMessages();refreshRadioHistory();refreshSosHistory()
+setInterval(refreshScan,3000);setInterval(refreshHop,3000);setInterval(refreshMessages,2000);setInterval(refreshRadioHistory,3000);refreshScan();refreshHop()
 </script></body></html>)HTML";
 
 bool WebUi::sameOrigin() {
@@ -284,6 +321,15 @@ void WebUi::begin() {
   }}, [this]{ if (auth()) handleUpload(); });
   server_.on("/api/rename", HTTP_POST, [this]{ if (auth()) handleRename(); });
   server_.on("/api/messages", HTTP_GET, [this]{ if (auth()) handleMessages(); });
+  server_.on("/api/messages/clear", HTTP_POST, [this]{ if (auth()) handleMessageClear(); });
+  server_.on("/api/messages/read", HTTP_POST, [this]{ if (auth()) handleMessageRead(); });
+  server_.on("/api/messages/reply", HTTP_POST, [this]{ if (auth()) handleMessageReply(); });
+  server_.on("/api/messages/export", HTTP_GET, [this]{ if (auth()) handleMessageExport(); });
+  server_.on("/api/radio/history", HTTP_GET, [this]{ if (auth()) handleRadioHistory(); });
+  server_.on("/api/radio/tune", HTTP_POST, [this]{ if (auth()) handleRadioTune(); });
+  server_.on("/api/storage/info", HTTP_GET, [this]{ if (auth()) handleStorageInfo(); });
+  server_.on("/api/storage/checksum", HTTP_GET, [this]{ if (auth()) handleChecksum(); });
+  server_.on("/api/sos-history", HTTP_GET, [this]{ if (auth()) handleSosHistory(); });
   server_.on("/api/lora-log", HTTP_GET, [this]{ if (auth()) handleLoraLog(); });
   server_.on("/api/health-log", HTTP_GET, [this]{ if (auth()) handleHealthLog(); });
   server_.on("/api/battery-calibrate", HTTP_POST, [this]{ if (auth()) handleBatteryCalibrate(); });
@@ -315,6 +361,8 @@ void WebUi::begin() {
   server_.on("/api/track/download", HTTP_GET, [this]{ if (auth()) handleTrackDownload(); });
   server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
+  server_.on("/api/config/export", HTTP_GET, [this]{ if (auth()) handleConfigExport(); });
+  server_.on("/api/factory-reset", HTTP_POST, [this]{ if (auth()) handleFactoryReset(); });
   server_.on("/api/audio-source", HTTP_POST, [this]{ if (auth()) handleAudioSource(); });
   server_.on("/api/audio-monitor", HTTP_POST, [this]{
     if (!auth()) return;
@@ -388,6 +436,12 @@ void WebUi::handleStatus() {
   j += ",\"v\":";
   j += gState.batteryAvailable ? String(gState.batteryV, 2) : "null";
   j += ",\"low\":" + String(gState.batteryLow ? "true":"false");
+  int batteryPct = -1;
+  if (gState.batteryAvailable && isfinite(gState.batteryV)) {
+    batteryPct = static_cast<int>((gState.batteryV - 3.20f) * 100.0f);
+    batteryPct = constrain(batteryPct, 0, 100);
+  }
+  j += ",\"percent\":" + String(batteryPct);
   j += ",\"critical\":" + String(gState.batteryCritical ? "true":"false") + "},";
   j += "\"usbAudio\":" + String(gState.usbAudioReady ? "true":"false") + ",";
   j += "\"usbAudioActive\":" + String(gState.usbAudioActive ? "true":"false") + ",";
@@ -409,7 +463,7 @@ void WebUi::handleStatus() {
   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
   j += "\"volume\":" + String(gState.volume) + ",";
   j += "\"voiceRxLost\":" + String(gState.voiceRxLost) + ",";
-  j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",";
+  j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",\"messageUnread\":" + String(gState.messageUnreadCount) + ",\"sosEscalated\":" + String(gState.sosEscalated ? "true" : "false") + ",";
   j += "\"loraLog\":" + String(gState.loraPacketLogCount) + ",";
   j += "\"healthAlerts\":" + String(gState.healthAlerts) + ",";
   j += "\"tx\":" + String(gState.txPackets) + ",";
@@ -421,7 +475,7 @@ void WebUi::handleStatus() {
   server_.send(200, "application/json", j);
 }
 
-void WebUi::handleFiles() { server_.send(200, "application/json", storage.listJson("/REC")); }
+void WebUi::handleFiles() { const String dir = server_.arg("dir"); server_.send(200, "application/json", storage.listJson(dir.isEmpty() ? "/REC" : dir)); }
 
 
 void WebUi::handleDownload() {
@@ -496,16 +550,185 @@ void WebUi::handleRename() {
 void WebUi::handleMessages() {
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  const String query = server_.arg("q");
+  uint64_t from = 0, to = UINT64_MAX;
+  if (server_.hasArg("from")) from = strtoull(server_.arg("from").c_str(), nullptr, 10);
+  if (server_.hasArg("to")) to = strtoull(server_.arg("to").c_str(), nullptr, 10);
   String j = "[";
+  bool first = true;
   const size_t count = gState.messageHistoryCount;
   const size_t start = (gState.messageHistoryNext + Config::MESSAGE_HISTORY_SIZE - count) %
                        Config::MESSAGE_HISTORY_SIZE;
   for (size_t i = 0; i < count; ++i) {
     const auto& e = gState.messageHistory[(start + i) % Config::MESSAGE_HISTORY_SIZE];
-    if (i) j += ",";
+    if (e.timestamp < from || e.timestamp > to) continue;
+    if (!query.isEmpty() &&
+        String(e.sourceId).indexOf(query) < 0 &&
+        e.text.indexOf(query) < 0) continue;
+    if (!first) j += ",";
+    first = false;
     j += "{\"ts\":" + String(static_cast<unsigned long long>(e.timestamp)) +
          ",\"source\":" + String(e.sourceId) +
+         ",\"read\":" + String(e.read ? "true" : "false") +
          ",\"text\":\"" + jsonEscape(e.text) + "\"}";
+  }
+  j += "]";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleMessageClear() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  for (auto& e : gState.messageHistory) e = MessageHistoryEntry{};
+  gState.messageHistoryNext = 0;
+  gState.messageHistoryCount = 0;
+  gState.messageUnreadCount = 0;
+  server_.send(200, "text/plain", "OK");
+}
+
+void WebUi::handleMessageRead() {
+  const String raw = server_.arg("ts");
+  const bool all = raw == "all";
+  if (!all && (raw.isEmpty() || raw.length() > 20)) {
+    server_.send(400, "text/plain", "invalid timestamp"); return;
+  }
+  uint64_t ts = all ? 0 : strtoull(raw.c_str(), nullptr, 10);
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  for (auto& e : gState.messageHistory) {
+    if (e.timestamp != 0 && (all || e.timestamp == ts) && !e.read) {
+      e.read = true;
+      if (gState.messageUnreadCount) --gState.messageUnreadCount;
+    }
+  }
+  server_.send(200, "text/plain", "OK");
+}
+
+void WebUi::handleMessageReply() {
+  if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String target = server_.arg("source");
+  const String text = server_.arg("plain");
+  if (target.isEmpty() || target.length() > 10 || text.isEmpty() ||
+      text.length() > Config::LORA_MAX_PACKET - 16) {
+    server_.send(400, "text/plain", "invalid reply"); return;
+  }
+  for (size_t i = 0; i < target.length(); ++i)
+    if (target[i] < '0' || target[i] > '9') {
+      server_.send(400, "text/plain", "invalid source"); return;
+    }
+  String reply = "REPLY," + target + "," + text;
+  const bool ok = lora.sendText(reply);
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
+}
+
+void WebUi::handleMessageExport() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  const String format = server_.arg("format");
+  String out;
+  if (format.equalsIgnoreCase("csv")) {
+    out = "timestamp,source,read,text\n";
+    const size_t count = gState.messageHistoryCount;
+    const size_t start = (gState.messageHistoryNext + Config::MESSAGE_HISTORY_SIZE - count) %
+                         Config::MESSAGE_HISTORY_SIZE;
+    for (size_t i = 0; i < count; ++i) {
+      const auto& e = gState.messageHistory[(start + i) % Config::MESSAGE_HISTORY_SIZE];
+      String text = e.text;
+      text.replace("\"", "\"\"");
+      out += String(static_cast<unsigned long long>(e.timestamp)) + "," +
+             String(e.sourceId) + "," + (e.read ? "1" : "0") + ",\"" + text + "\"\n";
+    }
+    server_.sendHeader("Content-Disposition", "attachment; filename=\"messages.csv\"");
+    server_.send(200, "text/csv", out);
+    return;
+  }
+  out = "[";
+  const size_t count = gState.messageHistoryCount;
+  const size_t start = (gState.messageHistoryNext + Config::MESSAGE_HISTORY_SIZE - count) %
+                       Config::MESSAGE_HISTORY_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    if (i) out += ",";
+    const auto& e = gState.messageHistory[(start + i) % Config::MESSAGE_HISTORY_SIZE];
+    out += "{\"ts\":" + String(static_cast<unsigned long long>(e.timestamp)) +
+           ",\"source\":" + String(e.sourceId) +
+           ",\"read\":" + String(e.read ? "true" : "false") +
+           ",\"text\":\"" + jsonEscape(e.text) + "\"}";
+  }
+  out += "]";
+  server_.sendHeader("Content-Disposition", "attachment; filename=\"messages.json\"");
+  server_.send(200, "application/json", out);
+}
+
+void WebUi::handleRadioHistory() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "[";
+  const size_t count = gState.radioHistoryCount;
+  const size_t start = (gState.radioHistoryNext + RuntimeState::RADIO_HISTORY_SIZE - count) %
+                       RuntimeState::RADIO_HISTORY_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    const size_t idx = (start + i) % RuntimeState::RADIO_HISTORY_SIZE;
+    if (i) j += ",";
+    j += "{\"ms\":" + String(gState.radioHistoryMs[idx]) +
+         ",\"rssi\":" + String(gState.rssiHistory[idx]) +
+         ",\"snr\":" + String(gState.snrHistory[idx], 1) + "}";
+  }
+  j += "]";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleRadioTune() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String raw = server_.arg("freq");
+  char* end = nullptr;
+  const float freq = strtof(raw.c_str(), &end);
+  if (!end || *end != '\0' || !isfinite(freq) ||
+      freq < Config::LORA_MIN_FREQ_MHZ || freq > Config::LORA_MAX_FREQ_MHZ) {
+    server_.send(400, "text/plain", "frequency outside configured legal band"); return;
+  }
+  const bool ok = lora.manualTune(freq);
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "TUNE FAILED");
+}
+
+void WebUi::handleStorageInfo() {
+  const uint64_t total = storage.totalBytes();
+  const uint64_t used = storage.usedBytes();
+  if (!total) { server_.send(503, "text/plain", "storage unavailable"); return; }
+  String j = "{\"total\":" + String(static_cast<unsigned long long>(total)) +
+             ",\"used\":" + String(static_cast<unsigned long long>(used)) +
+             ",\"free\":" + String(static_cast<unsigned long long>(total > used ? total-used : 0)) + "}";
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleChecksum() {
+  const String path = server_.arg("path");
+  if (!storage.isSafePath(path)) {
+    server_.send(400, "text/plain", "invalid path"); return;
+  }
+  uint32_t crc = 0; uint64_t size = 0;
+  if (!storage.checksumFile(path, crc, size)) {
+    server_.send(404, "text/plain", "checksum failed"); return;
+  }
+  server_.send(200, "application/json",
+               "{\"size\":" + String(static_cast<unsigned long long>(size)) +
+               ",\"crc32\":\"" + String(crc, HEX) + "\"}");
+}
+
+void WebUi::handleSosHistory() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "[";
+  const size_t count = gState.sosHistoryCount;
+  const size_t start = (gState.sosHistoryNext + RuntimeState::SOS_HISTORY_SIZE - count) %
+                       RuntimeState::SOS_HISTORY_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    const auto& e = gState.sosHistory[(start + i) % RuntimeState::SOS_HISTORY_SIZE];
+    if (i) j += ",";
+    j += "{\"ts\":" + String(static_cast<unsigned long long>(e.timestamp)) +
+         ",\"seq\":" + String(e.seq) + ",\"event\":" + String(e.event) +
+         ",\"peer\":" + String(e.peer) + "}";
   }
   j += "]";
   server_.send(200, "application/json", j);
@@ -599,9 +822,10 @@ void WebUi::handleSos() {
   if (!rateLimit(lastSosMs_, Config::SOS_RATE_LIMIT_MS)) return;
   const String raw = server_.arg("on");
   if (raw == "0") {
-    StateLock lock(gState);
-    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
-    gState.sos = false;
+    if (!lora.cancelSOS()) {
+      server_.send(503, "text/plain", "SOS cancel failed");
+      return;
+    }
     server_.send(200, "text/plain", "SOS OFF");
     return;
   }
@@ -627,6 +851,9 @@ void WebUi::handleSosStatus() {
   j += ",\"lastAckMs\":" + String(gState.sosLastAckMs);
   j += ",\"source\":" + String(gState.sosLastAckSourceId);
   j += ",\"active\":" + String(gState.sos ? "true" : "false");
+  j += ",\"escalated\":" + String(gState.sosEscalated ? "true" : "false");
+  j += ",\"beacons\":" + String(gState.sosBeaconCount);
+  j += ",\"ackedBy\":" + String(gState.sosAckedBy);
   j += ",\"error\":\"" + jsonEscape(gState.lastError) + "\"";
   j += "}";
   server_.sendHeader("Cache-Control", "no-store");
@@ -857,7 +1084,26 @@ void WebUi::handleRecordSplit() {
 void WebUi::handleVox() {
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") { server_.send(400, "text/plain", "invalid vox"); return; }
-  const bool ok = audio.setVox(raw == "1", Config::VOX_THRESHOLD, Config::VOX_HANG_MS);
+  float threshold = Config::VOX_THRESHOLD;
+  uint32_t hang = Config::VOX_HANG_MS;
+  if (server_.hasArg("threshold")) {
+    char* end = nullptr;
+    threshold = strtof(server_.arg("threshold").c_str(), &end);
+    if (!end || *end != '\0' || !isfinite(threshold) || threshold < 0.01f || threshold > 1.0f) {
+      server_.send(400, "text/plain", "invalid vox threshold"); return;
+    }
+  }
+  if (server_.hasArg("hang")) {
+    const String rawHang = server_.arg("hang");
+    if (rawHang.isEmpty() || rawHang.length() > 5) {
+      server_.send(400, "text/plain", "invalid vox hang"); return;
+    }
+    hang = static_cast<uint32_t>(rawHang.toInt());
+    if (hang < 50 || hang > 5000) {
+      server_.send(400, "text/plain", "invalid vox hang"); return;
+    }
+  }
+  const bool ok = audio.setVox(raw == "1", threshold, hang);
   server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "FAIL");
 }
 
@@ -1052,6 +1298,44 @@ void WebUi::handleConfig() {
 
   server_.send(200, "text/plain",
                "Configuration saved; audio source updated; WiFi credential changes apply after reboot");
+}
+
+void WebUi::handleConfigExport() {
+  const RuntimeConfig& c = gConfig;
+  String j = "{";
+  j += "\"freq\":" + String(c.loraFreqMHz, 3);
+  j += ",\"bw\":" + String(c.loraBwKHz, 3);
+  j += ",\"sf\":" + String(c.loraSf) + ",\"cr\":" + String(c.loraCr);
+  j += ",\"sync\":" + String(c.loraSyncWord) + ",\"power\":" + String(c.loraPowerDbm);
+  j += ",\"volume\":" + String(c.volume) + ",\"audio_source\":" + String(c.audioRecordSource);
+  j += ",\"battery_calibration\":" + String(c.batteryCalibration, 5);
+  j += ",\"callsign\":\"" + jsonEscape(c.callsign) + "\"";
+  // Secrets are deliberately omitted; exporting them into browser downloads is
+  // an avoidable credential leak.
+  j += "}";
+  server_.sendHeader("Content-Disposition", "attachment; filename=\"fieldradio-config.json\"");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleFactoryReset() {
+  if (server_.arg("confirm") != "RESET") {
+    server_.send(400, "text/plain", "confirmation required");
+    return;
+  }
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", false)) {
+    server_.send(503, "text/plain", "NVS unavailable");
+    return;
+  }
+  const bool ok = prefs.clear();
+  prefs.end();
+  if (!ok) {
+    server_.send(503, "text/plain", "factory reset failed");
+    return;
+  }
+  server_.send(200, "text/plain", "factory reset; rebooting");
+  delay(100);
+  ESP.restart();
 }
 
 void WebUi::handleAudioSource() {

@@ -2,43 +2,43 @@
 
 Firmware baru ini ditujukan untuk PCB yang diberikan:
 - ESP32-S3-WROOM-1
-- SX1276
-- WM8960
-- NEO-M8N
+- SX1262
+- WM8962
+- NEO-M9N
 - microSD
 
 ## Pin mapping PCB
 
-`include/BoardConfig.h` and `docs/PCB_MAPPING.md` are the firmware pin-mapping source of truth. GPIO7 is the selected WM8960 ADCDAT input; the older GPIO34 reference is obsolete.
+`include/BoardConfig.h` and `docs/PCB_MAPPING.md` are the firmware pin-mapping source of truth. GPIO7 is the selected WM8962 ADCDAT input; the older GPIO34 reference is obsolete.
 
 | Fungsi | GPIO |
 |---|---:|
 | SPI SCK | 12 |
 | SPI MISO | 13 |
 | SPI MOSI | 11 |
-| SX1276 NSS | 10 |
-| SX1276 RESET | 14 |
-| SX1276 DIO0 | 2 |
-| SX1276 DIO1 | 15 |
+| SX1262 NSS | 10 |
+| SX1262 RESET | 14 |
+| SX1262 DIO1 / IRQ | 2 |
+| SX1262 BUSY | 15 |
 | microSD CS | 16 |
 | GNSS RX | 18 |
 | GNSS TX | 17 |
-| WM8960 SDA | 8 |
-| WM8960 SCL | 9 |
-| WM8960 BCLK | 4 |
-| WM8960 LRCLK | 5 |
-| WM8960 DACDAT / ESP32-S3 TX | 6 |
-| WM8960 ADCDAT / ESP32-S3 RX | 7 |
-| WM8960 MCLK | external 24 MHz oscillator |
+| WM8962 SDA | 8 |
+| WM8962 SCL | 9 |
+| WM8962 BCLK | 4 |
+| WM8962 LRCLK | 5 |
+| WM8962 DACDAT / ESP32-S3 TX | 6 |
+| WM8962 ADCDAT / ESP32-S3 RX | 7 |
+| WM8962 MCLK | external 24 MHz oscillator |
 
 ## Fitur
 
 - GNSS position/altitude/satellite telemetry.
-- LoRa text, SOS dan periodic position telemetry melalui SX1276.
+- LoRa text, SOS dan periodic position telemetry melalui SX1262.
 - WAV recorder 44.1 kHz stereo 16-bit ke microSD.
 - WAV playback 44.1 kHz stereo 16-bit.
-- USB Audio Class (UAC) stereo speaker + microphone ke WM8960.
-- Rekam WAV dengan source yang dapat dipilih: WM8960 MIC atau USB Audio; recording WM8960 MIC tidak lagi diblokir hanya karena USB Audio sedang aktif.
+- USB Audio Class (UAC) stereo speaker + microphone ke WM8962.
+- Rekam WAV dengan source yang dapat dipilih: WM8962 MIC atau USB Audio; recording WM8962 MIC tidak lagi diblokir hanya karena USB Audio sedang aktif.
 - Wi-Fi AP + HTTP dashboard.
 - Basic-auth untuk endpoint web.
 - Safe path validation untuk file deletion/playback.
@@ -55,14 +55,14 @@ ESP32-S3 tidak menyediakan Bluetooth Classic/A2DP, sehingga fitur A2DP dihapus. 
 ## Rekaman dan USB Audio
 
 Source rekaman dapat dipilih dari dashboard web:
-- `WM8960 MIC`: audio ADC WM8960 direkam ke WAV. Saat USB Audio aktif, data mic juga dicadangkan melalui ring buffer agar USB microphone tetap dapat mengirim audio ke host tanpa membaca I2S RX secara bersamaan.
-- `USB Audio`: stream speaker USB dari host direkam ke WAV melalui ring buffer, sementara playback ke WM8960 tetap berjalan.
+- `WM8962 MIC`: audio ADC WM8962 direkam ke WAV. Saat USB Audio aktif, data mic juga dicadangkan melalui ring buffer agar USB microphone tetap dapat mengirim audio ke host tanpa membaca I2S RX secara bersamaan.
+- `USB Audio`: stream speaker USB dari host direkam ke WAV melalui ring buffer, sementara playback ke WM8962 tetap berjalan.
 
 Source disimpan di NVS. Perubahan source ditolak saat recording atau playback sedang aktif. Buffer USB mencegah callback UAC melakukan operasi SD secara langsung.
 
 ## Catatan audio penting
 
-PCB menggunakan oscillator WM8960 24 MHz dan codec dikonfigurasi sebagai I2S master.
+PCB menggunakan oscillator WM8962 24 MHz dan codec dikonfigurasi sebagai I2S master.
 ESP32 dikonfigurasi sebagai I2S slave. Ini berbeda dari firmware MicroMod lama.
 
 ## Catatan RF
@@ -110,12 +110,12 @@ printed into the Actions log.
 
 ## Audio capabilities and runtime controls
 
-The audio subsystem supports WM8960 microphone, LINEIN2, LINEIN3 and USB
+The audio subsystem supports WM8962 microphone, LINEIN2, LINEIN3 and USB
 recording sources. The web UI exposes USB microphone monitoring, codec ADC/DAC
 loopback, a short diagnostic tone generator, USB mute/volume state and a
 peak/RMS/clipping level meter through `/api/status`.
 
-USB playback remains USB Audio OUT -> I2S -> WM8960. USB recording/monitoring
+USB playback remains USB Audio OUT -> I2S -> WM8962. USB recording/monitoring
 uses the UAC input callback. Codec-side ALC and noise gate are enabled only for
 the microphone source; line inputs are kept at unity boost to avoid applying
 microphone dynamics processing to external line-level equipment.
@@ -128,7 +128,7 @@ falls back to the raw microphone path.
 USB packet-rate detection is also exposed as `usbSampleRate` in `/api/status`.
 This is diagnostic/adaptive transport support, not true host-side sample-rate
 negotiation: `espressif/usb_device_uac` 1.3.1 explicitly does not support
-dynamic MIC/SPK sampling-rate configuration. The WM8960 clock remains at the
+dynamic MIC/SPK sampling-rate configuration. The WM8962 clock remains at the
 PCB's fixed 44.1 kHz configuration. A future true dynamic-rate implementation
 must replace or fork the UAC descriptor/driver rather than pretending that a
 runtime packet-size check changes the negotiated USB format.

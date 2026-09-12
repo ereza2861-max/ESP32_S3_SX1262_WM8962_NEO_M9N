@@ -36,7 +36,7 @@ constexpr bool CREDENTIALS_CONFIGURED =
     AP_PASSWORD[0] != '\0' && WEB_USER[0] != '\0' && WEB_PASSWORD[0] != '\0';
 constexpr uint16_t WEB_PORT = 80;
 
-// SX1276 / legal regional setting must be changed to the frequency allowed
+// SX1262 / legal regional setting must be changed to the frequency allowed
 // by the local radio regulations and the actual RF matching network.
 constexpr float LORA_FREQ_MHZ = 923.0f;
 constexpr float LORA_BW_KHZ = 125.0f;
@@ -44,6 +44,9 @@ constexpr uint8_t LORA_SF = 7;
 constexpr uint8_t LORA_CR = 5;
 constexpr uint8_t LORA_SYNC_WORD = 0x12;
 constexpr int8_t LORA_POWER_DBM = 14;
+// 0 V selects the SX1262 crystal/XTAL path in RadioLib. Change only if the
+// actual PCB routes a TCXO to the radio reference input.
+constexpr float LORA_TCXO_VOLTAGE = 0.0f;
 // Indonesia LPWAN nonseluler: 920-923 MHz, uplink duty cycle <= 1%.
 // Keep the application inside this range unless a different regulatory
 // profile is explicitly selected and validated for the deployment country.
@@ -104,12 +107,14 @@ constexpr uint32_t RX_ACTIVITY_HOLD_MS = 250;
 constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
+constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;
+constexpr uint32_t SOS_BEACON_PERIOD_MS = 15000UL;
 
-// WM8960/ESP32-S3 I2S audio
+// WM8962/ESP32-S3 I2S audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
 constexpr uint8_t AUDIO_BITS = 16;
 constexpr uint8_t AUDIO_CHANNELS = 2;
-constexpr uint8_t AUDIO_SOURCE_WM8960_MIC = 0;
+constexpr uint8_t AUDIO_SOURCE_WM8962_MIC = 0;
 constexpr uint8_t AUDIO_SOURCE_LINEIN2 = 1;
 constexpr uint8_t AUDIO_SOURCE_LINEIN3 = 2;
 constexpr uint8_t AUDIO_SOURCE_USB = 3;

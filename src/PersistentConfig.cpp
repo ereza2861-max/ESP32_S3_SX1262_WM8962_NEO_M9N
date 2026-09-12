@@ -10,7 +10,7 @@ RuntimeConfig gConfig{
     Config::LORA_SYNC_WORD,
     Config::LORA_POWER_DBM,
     70,
-    Config::AUDIO_SOURCE_WM8960_MIC,
+    Config::AUDIO_SOURCE_WM8962_MIC,
     1.0f,
     Config::LORA_DEFAULT_CALLSIGN,
     Config::LORA_KEY_HEX,

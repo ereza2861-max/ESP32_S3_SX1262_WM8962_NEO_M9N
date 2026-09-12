@@ -53,9 +53,9 @@ private:
   uint8_t volume_ = 70;
   uint8_t preMuteVolume_ = 70;
   volatile uint32_t lastUsbAudioMs_ = 0;
-  volatile uint8_t recordSource_ = Config::AUDIO_SOURCE_WM8960_MIC;
+  volatile uint8_t recordSource_ = Config::AUDIO_SOURCE_WM8962_MIC;
   volatile bool captureUsbRecord_ = false;
-  volatile bool captureWm8960Mic_ = false;
+  volatile bool captureWm8962Mic_ = false;
   volatile bool usbMonitor_ = false;
   volatile bool loopback_ = false;
   volatile bool usbMuted_ = false;

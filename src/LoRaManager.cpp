@@ -36,10 +36,10 @@ bool hexByte(const char* p, uint8_t& out) {
 LoRaManager* LoRaManager::instance_ = nullptr;
 
 LoRaManager::LoRaManager()
-    : module_(Board::LORA_CS, Board::LORA_DIO0, Board::LORA_RST, Board::LORA_DIO1),
+    : module_(Board::LORA_CS, Board::LORA_DIO1, Board::LORA_RST, Board::LORA_BUSY),
       radio_(&module_) {}
 
-void LoRaManager::onDio0() {
+void LoRaManager::onDio1() {
   if (instance_) {
     // RadioLib invokes this callback from the radio interrupt path. Keep it
     // ISR-safe: only increment a volatile counter; do not touch String/RTOS.
@@ -481,6 +481,12 @@ void LoRaManager::addMessageHistory(uint32_t sourceId, const char* text) {
   e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : millis();
   e.sourceId = sourceId;
   e.text = text;
+  e.read = false;
+  if (gState.messageHistoryCount == Config::MESSAGE_HISTORY_SIZE) {
+    if (!gState.messageHistory[gState.messageHistoryNext].read && gState.messageUnreadCount)
+      --gState.messageUnreadCount;
+  }
+  ++gState.messageUnreadCount;
   gState.messageHistoryNext =
       (gState.messageHistoryNext + 1) % Config::MESSAGE_HISTORY_SIZE;
   if (gState.messageHistoryCount < Config::MESSAGE_HISTORY_SIZE)
@@ -631,7 +637,7 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
       if (rxSt != RADIOLIB_ERR_NONE) {
         ready_ = false;
         gState.loraReady = false;
-        gState.lastError = "SX1276 RX restart failed after forward";
+        gState.lastError = "SX1262 RX restart failed after forward";
       }
       if (txOk) gState.txPackets++;
     }
@@ -730,14 +736,32 @@ size_t LoRaManager::scannerSuggestBestChannels(uint8_t* channels, size_t capacit
   return out;
 }
 
+void LoRaManager::addSosHistory(uint8_t event, uint32_t peer) {
+  StateLock lock(gState);
+  if (!lock.ok()) return;
+  auto& e = gState.sosHistory[gState.sosHistoryNext];
+  e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : millis();
+  e.seq = sosSeq_;
+  e.event = event;
+  e.peer = peer;
+  gState.sosHistoryNext = (gState.sosHistoryNext + 1) % RuntimeState::SOS_HISTORY_SIZE;
+  if (gState.sosHistoryCount < RuntimeState::SOS_HISTORY_SIZE) ++gState.sosHistoryCount;
+}
+
 void LoRaManager::serviceSosRetry() {
   if (!sosAwaitingAck_ || sosPacket_.isEmpty()) return;
   const uint32_t now = millis();
   if (now - sosSentMs_ < Config::SOS_REPEAT_MS) return;
-  if (sosRetryCount_ >= Config::SOS_MAX_RETRIES) {
+  if (sosRetryCount_ >= Config::SOS_MAX_RETRIES &&
+      now - sosSentMs_ >= Config::SOS_ESCALATION_DELAY_MS) {
     sosAwaitingAck_ = false;
+    addSosHistory(2);
     StateLock lock(gState);
-    if (lock.ok()) gState.lastError = "SOS ACK timeout";
+    if (lock.ok()) {
+      gState.sosEscalated = true;
+      gState.sosEscalatedMs = now;
+      gState.lastError = "SOS ACK timeout; escalation active";
+    }
     return;
   }
   if (transmit(sosPacket_, true)) {
@@ -760,7 +784,10 @@ void LoRaManager::handleSosAckPayload(const uint8_t* payload, size_t len) {
   if (lock.ok()) {
     gState.sosAcked = true;
     gState.sosLastAckMs = millis();
+    gState.sosAckedBy = ackedSource;
+    gState.sos = false;
   }
+  addSosHistory(1, ackedSource);
 }
 
 bool LoRaManager::sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId) {
@@ -790,26 +817,26 @@ bool LoRaManager::begin() {
   int16_t st = radio_.begin(
       gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
       gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
-      Config::LORA_PREAMBLE, 0);
+      Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
 
   if (st != RADIOLIB_ERR_NONE) {
     ready_ = false;
     StateLock lock(gState);
     if (lock.ok()) {
       gState.loraReady = false;
-      gState.lastError = "SX1276 init failed: " + String(st);
+      gState.lastError = "SX1262 init failed: " + String(st);
     }
     return false;
   }
 
-  radio_.setPacketReceivedAction(onDio0);
+  radio_.setPacketReceivedAction(onDio1);
   st = radio_.startReceive();
   if (st != RADIOLIB_ERR_NONE) {
     ready_ = false;
     StateLock lock(gState);
     if (lock.ok()) {
       gState.loraReady = false;
-      gState.lastError = "SX1276 RX failed: " + String(st);
+      gState.lastError = "SX1262 RX failed: " + String(st);
     }
     return false;
   }
@@ -963,6 +990,7 @@ void LoRaManager::task() {
   }
 
   (void)processPendingTx();
+  serviceSosRetry();
   serviceVoiceReorder();
 
   bool ptt = false;
@@ -990,9 +1018,9 @@ void LoRaManager::task() {
         beginSt = radio_.begin(
             gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
             gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
-            Config::LORA_PREAMBLE, 0);
+            Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
         if (beginSt == RADIOLIB_ERR_NONE) {
-          radio_.setPacketReceivedAction(onDio0);
+          radio_.setPacketReceivedAction(onDio1);
           rxSt = radio_.startReceive();
         }
       } else {
@@ -1153,6 +1181,12 @@ void LoRaManager::task() {
     if (rxState.ok()) {
       gState.loraRssi = rssi;
       gState.loraSnr = snr;
+      const size_t idx = gState.radioHistoryNext;
+      gState.rssiHistory[idx] = rssi;
+      gState.snrHistory[idx] = snr;
+      gState.radioHistoryMs[idx] = millis();
+      gState.radioHistoryNext = (idx + 1) % RuntimeState::RADIO_HISTORY_SIZE;
+      if (gState.radioHistoryCount < RuntimeState::RADIO_HISTORY_SIZE) ++gState.radioHistoryCount;
     }
   }
   StateLock lock(gState);
@@ -1170,7 +1204,7 @@ void LoRaManager::task() {
       gState.rxDrops++;
       ready_ = false;
       gState.loraReady = false;
-      gState.lastError = "SX1276 RX restart failed: " + String(rxSt);
+      gState.lastError = "SX1262 RX restart failed: " + String(rxSt);
     }
   }
   xSemaphoreGive(mutex_);
@@ -1249,7 +1283,7 @@ bool LoRaManager::processPendingTx() {
             pendingTx_.packet = String();
             done = true;
             ready_ = false;
-            pendingError = "SX1276 RX restart failed after LBT";
+            pendingError = "SX1262 RX restart failed after LBT";
           }
         }
       } else if (st == RADIOLIB_CHANNEL_FREE) {
@@ -1305,7 +1339,7 @@ bool LoRaManager::processPendingTx() {
     StateLock lock(gState);
     if (lock.ok()) {
       gState.loraReady = false;
-      gState.lastError = "SX1276 RX restart failed after LBT";
+      gState.lastError = "SX1262 RX restart failed after LBT";
     }
   } else if (txOk) {
     StateLock lock(gState);
@@ -1391,7 +1425,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       if (rxSt != RADIOLIB_ERR_NONE) {
         ready_ = false;
         gState.loraReady = false;
-        gState.lastError = "SX1276 RX restart failed: " + String(rxSt);
+        gState.lastError = "SX1262 RX restart failed: " + String(rxSt);
       }
       if (ok) gState.txPackets++;
     }
@@ -1412,9 +1446,9 @@ bool LoRaManager::applyConfig() {
       const int16_t st = radio_.begin(
           gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
           gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
-          Config::LORA_PREAMBLE, 0);
+          Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
       if (st == RADIOLIB_ERR_NONE) {
-        radio_.setPacketReceivedAction(onDio0);
+        radio_.setPacketReceivedAction(onDio1);
         ok = radio_.startReceive() == RADIOLIB_ERR_NONE;
       }
     }
@@ -1517,9 +1551,47 @@ bool LoRaManager::sendSOS() {
     if (lock.ok()) {
       gState.sosSeq = seq;
       gState.sosAcked = false;
+      gState.sosEscalated = false;
       gState.sosRetries = 0;
+      gState.sosStartedMs = millis();
+      gState.sosAckedBy = 0;
       gState.sos = true;
     }
   }
+  addSosHistory(0);
   return transmit(packet, true);
+}
+
+bool LoRaManager::cancelSOS() {
+  sosAwaitingAck_ = false;
+  sosPacket_ = String();
+  bool wasActive = false;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) return false;
+    wasActive = gState.sos || gState.sosEscalated;
+    gState.sos = false;
+    gState.sosEscalated = false;
+  }
+  if (wasActive) addSosHistory(3);
+  return true;
+}
+
+bool LoRaManager::manualTune(float freqMHz) {
+  if (!isfinite(freqMHz) || freqMHz < Config::LORA_MIN_FREQ_MHZ ||
+      freqMHz > Config::LORA_MAX_FREQ_MHZ || !mutex_) return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+  bool ok = false;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(500));
+    if (spiLock.ok()) ok = radio_.setFrequency(freqMHz) == RADIOLIB_ERR_NONE;
+  }
+  if (ok) {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.lastError = "";
+    }
+  }
+  xSemaphoreGive(mutex_);
+  return ok;
 }

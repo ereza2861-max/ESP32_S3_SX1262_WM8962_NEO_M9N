@@ -24,6 +24,8 @@ public:
   bool sendText(const String& text);
   bool sendSOS();
   bool sendPosition();
+  bool cancelSOS();
+  bool manualTune(float freqMHz);
   bool sendVoiceFrame();
   bool applyConfig();
   bool scannerStart(uint8_t mode, uint16_t dwellMs);
@@ -33,14 +35,14 @@ public:
   size_t scannerSuggestBestChannels(uint8_t* channels, size_t capacity);
 private:
   Module module_;
-  SX1276 radio_;
+  SX1262 radio_;
   volatile uint32_t irqCount_ = 0;
   portMUX_TYPE irqMux_ = portMUX_INITIALIZER_UNLOCKED;
   bool ready_ = false;
   uint32_t lastRecoveryMs_ = 0;
   SemaphoreHandle_t mutex_ = nullptr;
   static LoRaManager* instance_;
-  static void onDio0();
+  static void onDio1();
   struct ForwardPacket {
     uint8_t type;
     uint8_t ttl;
@@ -133,6 +135,7 @@ private:
   bool sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId);
   void handleSosAckPayload(const uint8_t* payload, size_t len);
   void serviceSosRetry();
+  void addSosHistory(uint8_t event, uint32_t peer = 0);
   bool encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
                      uint16_t seq, String& packet);
   bool decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,

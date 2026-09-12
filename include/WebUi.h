@@ -30,6 +30,15 @@ private:
   void handleUpload();
   void handleRename();
   void handleMessages();
+  void handleMessageClear();
+  void handleMessageRead();
+  void handleMessageReply();
+  void handleMessageExport();
+  void handleRadioHistory();
+  void handleRadioTune();
+  void handleStorageInfo();
+  void handleChecksum();
+  void handleSosHistory();
   void handleLoraLog();
   void handleHealthLog();
   void handleBatteryCalibrate();
@@ -62,5 +71,7 @@ private:
   void handleReboot();
   bool rateLimit(uint32_t& last, uint32_t interval);
   void handleConfig();
+  void handleConfigExport();
+  void handleFactoryReset();
   void handleAudioSource();
 };

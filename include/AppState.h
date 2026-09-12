@@ -20,6 +20,7 @@ struct MessageHistoryEntry {
   uint64_t timestamp = 0;
   uint32_t sourceId = 0;
   String text;
+  bool read = false;
 };
 
 struct LoraPacketLogEntry {
@@ -65,6 +66,12 @@ struct RuntimeState {
   uint32_t rxActivityMs = 0;
   int16_t loraRssi = -127;
   float loraSnr = -20.0f;
+  static constexpr size_t RADIO_HISTORY_SIZE = 60;
+  int16_t rssiHistory[RADIO_HISTORY_SIZE] = {};
+  float snrHistory[RADIO_HISTORY_SIZE] = {};
+  uint32_t radioHistoryMs[RADIO_HISTORY_SIZE] = {};
+  size_t radioHistoryNext = 0;
+  size_t radioHistoryCount = 0;
   bool wifiReady = false;
   bool storageReady = false;
   bool codecReady = false;
@@ -87,6 +94,7 @@ struct RuntimeState {
   MessageHistoryEntry messageHistory[Config::MESSAGE_HISTORY_SIZE] = {};
   size_t messageHistoryNext = 0;
   size_t messageHistoryCount = 0;
+  size_t messageUnreadCount = 0;
   LoraPacketLogEntry loraPacketLog[Config::LORA_PACKET_LOG_SIZE] = {};
   size_t loraPacketLogNext = 0;
   size_t loraPacketLogCount = 0;
@@ -109,6 +117,22 @@ struct RuntimeState {
   uint8_t sosRetries = 0;
   uint32_t sosLastAckMs = 0;
   uint32_t sosLastAckSourceId = 0;
+  bool sosEscalated = false;
+  uint32_t sosStartedMs = 0;
+  uint32_t sosEscalatedMs = 0;
+  uint32_t sosAckedBy = 0;
+  uint32_t sosBeaconCount = 0;
+  uint32_t sosLastBeaconMs = 0;
+  struct SosHistoryEntry {
+    uint64_t timestamp = 0;
+    uint16_t seq = 0;
+    uint8_t event = 0; // 0 sent, 1 ack, 2 escalated, 3 cancelled
+    uint32_t peer = 0;
+  };
+  static constexpr size_t SOS_HISTORY_SIZE = 16;
+  SosHistoryEntry sosHistory[SOS_HISTORY_SIZE] = {};
+  size_t sosHistoryNext = 0;
+  size_t sosHistoryCount = 0;
   bool scannerActive = false;
   uint8_t scannerMode = 0;
   uint16_t scannerSweepCount = 0;

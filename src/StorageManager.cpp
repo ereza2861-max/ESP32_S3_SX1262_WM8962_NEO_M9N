@@ -62,7 +62,7 @@ String StorageManager::listJson(const String& dir) {
         escaped += hex[c & 0x0F];
       } else escaped += static_cast<char>(c);
     }
-    out += "{\"name\":\"" + escaped + "\",\"size\":" +
+    out += "{\"name\":\"" + escaped + "\",\"dir\":" + String(f.isDirectory() ? "true" : "false") + ",\"size\":" +
            String(static_cast<uint32_t>(f.size())) + "}";
     f.close();
   }
@@ -158,5 +158,45 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
     if (!SD.remove(oldest)) return false;
     effectiveUsed = effectiveUsed > oldestSize ? effectiveUsed - oldestSize : 0;
   }
+  return true;
+}
+
+
+uint64_t StorageManager::totalBytes() const {
+  if (!ready_) return 0;
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  return spiLock.ok() ? SD.totalBytes() : 0;
+}
+
+uint64_t StorageManager::usedBytes() const {
+  if (!ready_) return 0;
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  return spiLock.ok() ? SD.usedBytes() : 0;
+}
+
+bool StorageManager::checksumFile(const String& path, uint32_t& crc, uint64_t& size) {
+  if (!isSafePath(path)) return false;
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) return false;
+  File f = SD.open(path, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return false;
+  }
+  crc = 0xFFFFFFFFU;
+  size = 0;
+  uint8_t buf[512];
+  while (f.available()) {
+    const size_t n = f.read(buf, sizeof(buf));
+    if (n == 0) { f.close(); return false; }
+    size += n;
+    for (size_t i = 0; i < n; ++i) {
+      crc ^= buf[i];
+      for (uint8_t b = 0; b < 8; ++b)
+        crc = (crc >> 1) ^ (0xEDB88320U & static_cast<uint32_t>(-(static_cast<int32_t>(crc & 1U))));
+    }
+  }
+  f.close();
+  crc ^= 0xFFFFFFFFU;
   return true;
 }
