@@ -20,7 +20,11 @@ PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 GH ?= gh
 CI_WORKFLOW ?= compile.yml
 CI_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || true)
+# Optional explicit Actions run ID. Useful when the same commit has multiple CI runs.
+CI_RUN_ID ?=
 ARTIFACT_DIR ?= artifacts
+
+gh_run_id = $(if $(strip $(CI_RUN_ID)),$(CI_RUN_ID),$$( $(GH) run list --workflow "$(CI_WORKFLOW)" --commit "$(CI_COMMIT)" --limit 1 --json databaseId --jq '.[0].databaseId' ))
 
 gh_check = set -eu; \
 	command -v "$(GH)" >/dev/null 2>&1 || { echo "ERROR: GitHub CLI '$(GH)' tidak ditemukan."; exit 127; }; \
@@ -43,7 +47,7 @@ build-log:
 
 download-artifacts:
 	@$(gh_check); \
-	run_id="$$( $(GH) run list --workflow "$(CI_WORKFLOW)" --commit "$(CI_COMMIT)" --limit 1 --json databaseId --jq '.[0].databaseId' )"; \
+	run_id="$(call gh_run_id)"; \
 	test -n "$$run_id" || { echo "ERROR: Tidak ditemukan CI run untuk commit $(CI_COMMIT)."; exit 1; }; \
 	mkdir -p "$(ARTIFACT_DIR)"; \
 	$(GH) run download "$$run_id" --repo "$$( $(GH) repo view --json nameWithOwner --jq .nameWithOwner )" \
@@ -51,13 +55,20 @@ download-artifacts:
 
 download-build-log:
 	@$(gh_check); \
-	run_id="$$( $(GH) run list --workflow "$(CI_WORKFLOW)" --commit "$(CI_COMMIT)" --limit 1 --json databaseId --jq '.[0].databaseId' )"; \
+	run_id="$(call gh_run_id)"; \
 	test -n "$$run_id" || { echo "ERROR: Tidak ditemukan CI run untuk commit $(CI_COMMIT)."; exit 1; }; \
 	mkdir -p "$(ARTIFACT_DIR)"; \
 	$(GH) run download "$$run_id" --repo "$$( $(GH) repo view --json nameWithOwner --jq .nameWithOwner )" \
 		--name "esp32-s3-build-log-$(CI_COMMIT)" --dir "$(ARTIFACT_DIR)"
 
-download-ci: download-artifacts download-build-log
+download-ci:
+	@set -eu; \
+	$(MAKE) download-build-log CI_RUN_ID="$(CI_RUN_ID)" CI_COMMIT="$(CI_COMMIT)" CI_WORKFLOW="$(CI_WORKFLOW)" ARTIFACT_DIR="$(ARTIFACT_DIR)"; \
+	if $(MAKE) download-artifacts CI_RUN_ID="$(CI_RUN_ID)" CI_COMMIT="$(CI_COMMIT)" CI_WORKFLOW="$(CI_WORKFLOW)" ARTIFACT_DIR="$(ARTIFACT_DIR)"; then \
+		echo "CI firmware artifact berhasil diunduh."; \
+	else \
+		echo "WARN: firmware artifact tidak tersedia (misalnya karena compile gagal). Compile log tetap tersedia di $(ARTIFACT_DIR)."; \
+	fi
 
 clean:
 	@set -eu; \
@@ -96,7 +107,9 @@ help:
 	@echo "  make build-log             Build firmware and save output to build.log"
 	@echo "  make download-artifacts    Download firmware artifacts from CI for HEAD"
 	@echo "  make download-build-log    Download the CI compile log for HEAD"
-	@echo "  make download-ci           Download firmware artifacts and compile log"
+	@echo "  make download-ci           Download compile log, then firmware artifacts (best effort on failed builds)"
+	@echo "  make download-build-log CI_RUN_ID=<id>  Download log from a specific Actions run"
+	@echo "  make download-artifacts CI_RUN_ID=<id> Download firmware from a specific Actions run"
 	@echo "  make ci-build              Same build entry point used by CI"
 	@echo "  make clean                 Clean PlatformIO build output"
 	@echo "  make upload                Build and upload to the selected board"

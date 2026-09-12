@@ -93,6 +93,11 @@ make monitor
 make preflight
 ```
 
+Cloud compiling is available through GitHub Actions; no local PlatformIO setup is
+required for the cloud build. The workflow uploads successful firmware artifacts
+and always uploads the compile log. See `docs/GITHUB_ACTIONS_BUILD.md` for web
+and optional `gh` download workflows.
+
 For a local deployment that needs Wi-Fi credentials, copy
 `include/LocalConfig.example.h` to `include/LocalConfig.h` and edit the values.
 `LocalConfig.h` is ignored by Git and is not created or injected by GitHub Actions.
