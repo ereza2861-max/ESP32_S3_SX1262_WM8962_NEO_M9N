@@ -83,6 +83,15 @@ static void updateBattery(uint32_t now) {
                       voltage <= Config::BATTERY_LOW_THRESHOLD;
   gState.batteryCritical = gState.batteryAvailable &&
                            voltage <= Config::BATTERY_CRITICAL;
+  if (gState.batteryAvailable) {
+    const float pct = (voltage - Config::BATTERY_PERCENT_EMPTY_V) *
+                      100.0f /
+                      (Config::BATTERY_PERCENT_FULL_V -
+                       Config::BATTERY_PERCENT_EMPTY_V);
+    gState.batteryPercent = static_cast<int8_t>(constrain(pct, 0.0f, 100.0f));
+  } else {
+    gState.batteryPercent = -1;
+  }
 #endif
 }
 
@@ -121,7 +130,26 @@ static bool shouldDeepSleep(uint32_t now) {
 static void enterDeepSleep() {
   Serial.println("POWER: entering deep sleep");
   Serial.flush();
+
+  // SX1262 DIO1 is the configured IRQ/wake line. Keep the radio in RX and
+  // allow a high level on DIO1 to wake the S3. The radio is reinitialized
+  // normally after wake, so no volatile application state is required here.
+  esp_sleep_enable_ext1_wakeup(1ULL << Board::LORA_DIO1, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+  (void)audio.stopRecording();
+  audio.stopPlayback();
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.ptt = false;
+      gState.recording = false;
+      gState.playing = false;
+    }
+  }
+
+  WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
+  delay(Config::DEEP_SLEEP_WAKE_GRACE_MS);
   esp_deep_sleep_start();
 }
 

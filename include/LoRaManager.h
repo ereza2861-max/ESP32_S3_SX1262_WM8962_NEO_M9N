@@ -62,7 +62,7 @@ private:
   bool queuePendingTx(const String& packet);
   bool enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                       uint8_t ttl, const uint8_t* payload, size_t len);
-  bool seenDedup(uint32_t sourceId, uint16_t seq, uint32_t payloadHash);
+  bool seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash);
   static uint32_t hashPayload(const uint8_t* data, size_t len);
   static uint32_t sourceIdFromCallsign(const String& callsign);
   bool isPttOrRecording() const;
@@ -95,6 +95,15 @@ private:
   };
   DedupEntry dedupCache_[DEDUP_CACHE_SIZE] = {};
   size_t dedupNext_ = 0;
+  struct ReplayEntry {
+    uint32_t sourceId = 0;
+    uint16_t highestSeq = 0;
+    uint8_t type = 0;
+    uint32_t bitmap = 0;
+    uint32_t seenMs = 0;
+  };
+  ReplayEntry replayCache_[Config::LORA_REPLAY_SOURCE_CACHE_SIZE] = {};
+  size_t replayNext_ = 0;
   struct ScannerState {
     bool active = false;
     uint8_t mode = 0;
@@ -142,6 +151,9 @@ private:
                      uint32_t& sourceId, uint8_t& ttl, uint8_t* plain,
                      size_t capacity, size_t& len);
   bool loadKey(uint8_t key[16]) const;
+  bool reserveTxSequenceBlock();
+  bool acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash);
+  int8_t effectiveTxPowerDbm() const;
   static uint16_t crc16(const uint8_t* data, size_t len);
   void logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t sourceId,
                  int16_t rssi, float snr, uint8_t ttl);

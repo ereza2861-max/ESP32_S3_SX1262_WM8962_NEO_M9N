@@ -119,3 +119,12 @@ help:
 	@echo "  make info                  Show PlatformIO information"
 	@echo ""
 	@echo "Optional: make PIO_ENV=esp32-s3-wroom-1 build"
+
+.PHONY: security-profile
+security-profile:
+	@test -n "$(SECURE_BOOT_SIGNING_KEY)" || (echo "ERROR: set SECURE_BOOT_SIGNING_KEY=/secure/path/signing_key.pem"; exit 2)
+	@test -f "$(SECURE_BOOT_SIGNING_KEY)" || (echo "ERROR: signing key not found"; exit 2)
+	@cp -f sdkconfig.secure.defaults sdkconfig
+	@printf '\\nCONFIG_SECURE_BOOT_SIGNING_KEY="%s"\\n' "$(SECURE_BOOT_SIGNING_KEY)" >> sdkconfig
+	@echo "Production security sdkconfig prepared."
+	@echo "Review sdkconfig and docs/SECURITY_PROVISIONING.md before flashing."

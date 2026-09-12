@@ -5,10 +5,17 @@
 #include "LoRaManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
-#include <esp_system.h>
 #include <WiFi.h>
 #include <SD.h>
 #include <Preferences.h>
+#include <mbedtls/md.h>
+#ifndef CONFIG_SECURE_BOOT_V2_ENABLED
+#define CONFIG_SECURE_BOOT_V2_ENABLED 0
+#endif
+#ifndef CONFIG_SECURE_FLASH_ENC_ENABLED
+#define CONFIG_SECURE_FLASH_ENC_ENABLED 0
+#endif
+#include <esp_system.h>
 
 static String jsonEscape(const String& input) {
   String out;
@@ -270,13 +277,136 @@ bool WebUi::sameOrigin() {
 }
 
 bool WebUi::rateLimit(uint32_t& last, uint32_t interval) {
+  struct RateSlot {
+    uintptr_t endpoint = 0;
+    String ip;
+    uint32_t last = 0;
+  };
+  static RateSlot slots[8];
   const uint32_t now = millis();
-  if (last != 0 && now - last < interval) {
+  const String ip = server_.client().remoteIP().toString();
+  const uintptr_t endpoint = reinterpret_cast<uintptr_t>(&last);
+
+  RateSlot* slot = nullptr;
+  RateSlot* oldest = &slots[0];
+  for (auto& candidate : slots) {
+    if (candidate.endpoint == endpoint && candidate.ip == ip) {
+      slot = &candidate;
+      break;
+    }
+    if (candidate.last < oldest->last) oldest = &candidate;
+  }
+  if (!slot) {
+    slot = oldest;
+    slot->endpoint = endpoint;
+    slot->ip = ip;
+    slot->last = 0;
+  }
+  if (slot->last != 0 && now - slot->last < interval) {
     server_.send(429, "text/plain", "rate limited");
     return false;
   }
+  slot->last = now;
   last = now;
   return true;
+}
+
+bool WebUi::sessionValid() {
+  const String cookie = server_.header("Cookie");
+  const String prefix = "FR-SESSION=";
+  const int start = cookie.indexOf(prefix);
+  if (start < 0 || !sessionSecretReady_) return false;
+  const int end = cookie.indexOf(';', start);
+  const String token = cookie.substring(start + prefix.length(),
+                                         end < 0 ? cookie.length() : end);
+  if (token.length() != 64) return false;
+
+  uint8_t raw[32] = {};
+  for (size_t i = 0; i < 32; ++i) {
+    const char a = token[i * 2], b = token[i * 2 + 1];
+    auto hex = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    const int hi = hex(a), lo = hex(b);
+    if (hi < 0 || lo < 0) return false;
+    raw[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+
+  // The token is HMAC-SHA256(secret, client-IP || issue-time).
+  // The signing secret exists only in RAM, so a reboot invalidates all sessions.
+  uint8_t expected[32] = {};
+  const IPAddress ip = server_.client().remoteIP();
+  uint8_t msg[8] = {};
+  const uint32_t ipValue = static_cast<uint32_t>(ip[0]) |
+                           (static_cast<uint32_t>(ip[1]) << 8) |
+                           (static_cast<uint32_t>(ip[2]) << 16) |
+                           (static_cast<uint32_t>(ip[3]) << 24);
+  memcpy(msg, &ipValue, sizeof(ipValue));
+  memcpy(msg + 4, &authWindowStartMs_, sizeof(authWindowStartMs_));
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
+                             msg, sizeof(msg), expected, sizeof(expected)) != 0)
+    return false;
+  if (memcmp(raw, expected, sizeof(raw)) != 0) return false;
+  return static_cast<int32_t>(millis() - authBlockedUntilMs_) >= 0 &&
+         static_cast<uint32_t>(millis() - authWindowStartMs_) <
+             Config::WEB_SESSION_TIMEOUT_MS;
+}
+
+void WebUi::issueSession() {
+  const IPAddress ip = server_.client().remoteIP();
+  uint8_t msg[8] = {};
+  const uint32_t ipValue = static_cast<uint32_t>(ip[0]) |
+                           (static_cast<uint32_t>(ip[1]) << 8) |
+                           (static_cast<uint32_t>(ip[2]) << 16) |
+                           (static_cast<uint32_t>(ip[3]) << 24);
+  authWindowStartMs_ = millis();
+  memcpy(msg, &ipValue, sizeof(ipValue));
+  memcpy(msg + 4, &authWindowStartMs_, sizeof(authWindowStartMs_));
+  uint8_t token[32] = {};
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
+                             msg, sizeof(msg), token, sizeof(token)) != 0)
+    return;
+  String hex;
+  hex.reserve(64);
+  const char* digits = "0123456789abcdef";
+  for (uint8_t b : token) {
+    hex += digits[b >> 4];
+    hex += digits[b & 0x0F];
+  }
+  server_.sendHeader("Set-Cookie",
+      "FR-SESSION=" + hex + "; Max-Age=" +
+      String(Config::WEB_SESSION_TIMEOUT_MS / 1000) +
+      "; HttpOnly; SameSite=Strict");
+}
+
+void WebUi::auditAuth(bool success) {
+  if (!storage.ready()) return;
+  SpiLock spiLock(pdMS_TO_TICKS(50));
+  if (!spiLock.ok()) return;
+  if (!SD.exists("/LOG")) (void)SD.mkdir("/LOG");
+  const char* path = "/LOG/WEB-AUTH.LOG";
+  File f = SD.open(path, FILE_APPEND);
+  if (!f) return;
+  if (f.size() >= Config::WEB_AUTH_LOG_ROTATE_BYTES) {
+    f.close();
+    const char* old = "/LOG/WEB-AUTH.1.LOG";
+    if (SD.exists(old)) SD.remove(old);
+    if (SD.exists(path)) SD.rename(path, old);
+    f = SD.open(path, FILE_APPEND);
+  }
+  if (f) {
+    const uint32_t now = millis();
+    f.printf("%lu,%s,%s\\n",
+             static_cast<unsigned long>(now),
+             server_.client().remoteIP().toString().c_str(),
+             success ? "AUTH_OK" : "AUTH_FAIL");
+    f.close();
+  }
 }
 
 bool WebUi::auth() {
@@ -286,20 +416,25 @@ bool WebUi::auth() {
     return false;
   }
 
-  if (!server_.authenticate(gConfig.webUser.c_str(), gConfig.webPassword.c_str())) {
-    if (now - authWindowStartMs_ >= 60000) {
-      authWindowStartMs_ = now;
-      authFailures_ = 0;
+  if (!sessionValid()) {
+    if (!server_.authenticate(gConfig.webUser.c_str(), gConfig.webPassword.c_str())) {
+      if (now - authWindowStartMs_ >= 60000) {
+        authWindowStartMs_ = now;
+        authFailures_ = 0;
+      }
+      ++authFailures_;
+      auditAuth(false);
+      if (authFailures_ >= 5) {
+        authBlockedUntilMs_ = now + 30000;
+        authFailures_ = 0;
+      }
+      server_.requestAuthentication();
+      return false;
     }
-    if (++authFailures_ >= 5) {
-      authBlockedUntilMs_ = now + 30000;
-      authFailures_ = 0;
-    }
-    server_.requestAuthentication();
-    return false;
+    authFailures_ = 0;
+    issueSession();
+    auditAuth(true);
   }
-
-  authFailures_ = 0;
   if (server_.method() == HTTP_POST && !sameOrigin()) {
     server_.send(403, "text/plain", "forbidden origin");
     return false;
@@ -308,11 +443,19 @@ bool WebUi::auth() {
 }
 
 void WebUi::begin() {
-  static const char* const headerKeys[] = {"Origin", "Host"};
-  server_.collectHeaders(headerKeys, 2);
+  for (size_t i = 0; i < sizeof(sessionSecret_); i += 4) {
+    const uint32_t r = esp_random();
+    memcpy(sessionSecret_ + i, &r, min<size_t>(4, sizeof(sessionSecret_) - i));
+  }
+  sessionSecretReady_ = true;
+  static const char* const headerKeys[] = {"Origin", "Host", "Cookie"};
+  server_.collectHeaders(headerKeys, 3);
 
   server_.on("/", HTTP_GET, [this]{ if (auth()) handleRoot(); });
   server_.on("/api/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
+  server_.on("/api/v1/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
+  server_.on("/api/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
+  server_.on("/api/v1/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
   server_.on("/api/files", HTTP_GET, [this]{ if (auth()) handleFiles(); });
   server_.on("/api/download", HTTP_GET, [this]{ if (auth()) handleDownload(); });
   server_.on("/api/upload", HTTP_POST, [this]{ if (auth()) {
@@ -415,6 +558,18 @@ void WebUi::handleRoot() {
   server_.send_P(200, "text/html", INDEX_HTML);
 }
 
+void WebUi::handleApiVersion() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json",
+               "{\"api\":1,\"protocol\":" +
+               String(Config::LORA_PROTOCOL_VERSION) +
+               ",\"secureBootV2\":" +
+               String(CONFIG_SECURE_BOOT_V2_ENABLED ? "true" : "false") +
+               ",\"flashEncryption\":" +
+               String(CONFIG_SECURE_FLASH_ENC_ENABLED ? "true" : "false") +
+               "}");
+}
+
 void WebUi::handleStatus() {
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
@@ -436,12 +591,7 @@ void WebUi::handleStatus() {
   j += ",\"v\":";
   j += gState.batteryAvailable ? String(gState.batteryV, 2) : "null";
   j += ",\"low\":" + String(gState.batteryLow ? "true":"false");
-  int batteryPct = -1;
-  if (gState.batteryAvailable && isfinite(gState.batteryV)) {
-    batteryPct = static_cast<int>((gState.batteryV - 3.20f) * 100.0f);
-    batteryPct = constrain(batteryPct, 0, 100);
-  }
-  j += ",\"percent\":" + String(batteryPct);
+  j += ",\"percent\":" + String(gState.batteryPercent);
   j += ",\"critical\":" + String(gState.batteryCritical ? "true":"false") + "},";
   j += "\"usbAudio\":" + String(gState.usbAudioReady ? "true":"false") + ",";
   j += "\"usbAudioActive\":" + String(gState.usbAudioActive ? "true":"false") + ",";

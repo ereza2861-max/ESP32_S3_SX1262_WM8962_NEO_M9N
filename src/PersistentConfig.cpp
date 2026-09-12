@@ -21,6 +21,7 @@ RuntimeConfig gConfig{
 
 namespace {
 constexpr char NVS_NS[] = "fieldradio";
+constexpr uint32_t CONFIG_VERSION = 2;
 constexpr float MIN_FREQ_MHZ = 920.0f;
 constexpr float MAX_FREQ_MHZ = 923.0f;
 constexpr float MIN_BW_KHZ = 7.8f;
@@ -66,6 +67,7 @@ void RuntimeConfig::load() {
   Preferences prefs;
   if (!prefs.begin(NVS_NS, true)) return;
 
+  const uint32_t version = prefs.getUInt("cfgver", 0);
   const float freq = prefs.getFloat("freq", loraFreqMHz);
   const float bw = prefs.getFloat("bw", loraBwKHz);
   const uint8_t sf = prefs.getUChar("sf", loraSf);
@@ -122,6 +124,11 @@ void RuntimeConfig::load() {
   if (candidate.apPassword.length() <= 63) apPassword = candidate.apPassword;
   if (validCredential(candidate.webUser, 32)) webUser = candidate.webUser;
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
+
+  // Older layouts are read using the same keys, then rewritten with an
+  // explicit version on the next successful save. Invalid credentials never
+  // replace the compiled/default values.
+  (void)version;
 }
 
 bool RuntimeConfig::save() const {
@@ -135,7 +142,8 @@ bool RuntimeConfig::save() const {
 
   Preferences prefs;
   if (!prefs.begin(NVS_NS, false)) return false;
-  bool ok = prefs.putFloat("freq", loraFreqMHz) &&
+  bool ok = prefs.putUInt("cfgver", CONFIG_VERSION) > 0 &&
+            prefs.putFloat("freq", loraFreqMHz) &&
             prefs.putFloat("bw", loraBwKHz) &&
             prefs.putUChar("sf", loraSf) &&
             prefs.putUChar("cr", loraCr) &&

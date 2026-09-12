@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WebServer.h>
 #include <FS.h>
+#include <IPAddress.h>
 
 class WebUi {
 public:
@@ -15,6 +16,8 @@ private:
   uint32_t authWindowStartMs_ = 0;
   uint8_t authFailures_ = 0;
   uint32_t authBlockedUntilMs_ = 0;
+  uint8_t sessionSecret_[32] = {};
+  bool sessionSecretReady_ = false;
   uint32_t lastMessageMs_ = 0;
   uint32_t lastSosMs_ = 0;
   uint32_t lastPttMs_ = 0;
@@ -25,6 +28,7 @@ private:
   bool uploadFailed_ = false;
   void handleRoot();
   void handleStatus();
+  void handleApiVersion();
   void handleFiles();
   void handleDownload();
   void handleUpload();
@@ -70,6 +74,9 @@ private:
   void handleTrackDownload();
   void handleReboot();
   bool rateLimit(uint32_t& last, uint32_t interval);
+  bool sessionValid();
+  void issueSession();
+  void auditAuth(bool success);
   void handleConfig();
   void handleConfigExport();
   void handleFactoryReset();

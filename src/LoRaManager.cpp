@@ -6,6 +6,7 @@
 #include "AudioManager.h"
 #include "Telemetry.h"
 #include <esp_system.h>
+#include <Preferences.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
 
@@ -85,6 +86,89 @@ bool LoRaManager::loadKey(uint8_t key[16]) const {
     if (!hexByte(gConfig.loraKeyHex.c_str() + i * 2, key[i])) return false;
   }
   return true;
+}
+
+bool LoRaManager::reserveTxSequenceBlock() {
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", false)) return false;
+
+  const uint32_t storedHighWater = prefs.getUInt("txseq_hi", 0);
+  if (storedHighWater > 0xFFFFFF00UL) {
+    prefs.end();
+    return false;
+  }
+  const uint32_t newHighWater = storedHighWater + Config::LORA_TX_SEQUENCE_RESERVATION;
+  if (prefs.putUInt("txseq_hi", newHighWater) != sizeof(uint32_t)) {
+    prefs.end();
+    return false;
+  }
+  prefs.end();
+
+  txSequence_ = static_cast<uint16_t>(storedHighWater & 0xFFFFU);
+  return true;
+}
+
+int8_t LoRaManager::effectiveTxPowerDbm() const {
+  int8_t configured = gConfig.loraPowerDbm;
+  float battery = NAN;
+  bool low = false, critical = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      battery = gState.batteryV;
+      low = gState.batteryLow;
+      critical = gState.batteryCritical;
+    }
+  }
+  if (!isfinite(battery)) return configured;
+  if (critical) {
+    const int8_t limit = static_cast<int8_t>(Config::BATTERY_TX_POWER_CRITICAL_DBM);
+    return configured < limit ? configured : limit;
+  }
+  if (low) {
+    const int8_t limit = static_cast<int8_t>(Config::BATTERY_TX_POWER_LOW_DBM);
+    return configured < limit ? configured : limit;
+  }
+  return configured;
+}
+
+bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash) {
+  const uint32_t now = millis();
+  ReplayEntry* slot = nullptr;
+  for (auto& entry : replayCache_) {
+    if (entry.sourceId == sourceId && entry.type == type) {
+      slot = &entry;
+      break;
+    }
+  }
+  if (!slot) {
+    slot = &replayCache_[replayNext_];
+    replayNext_ = (replayNext_ + 1) % Config::LORA_REPLAY_SOURCE_CACHE_SIZE;
+    slot->sourceId = sourceId;
+    slot->type = type;
+    slot->highestSeq = seq;
+    slot->bitmap = 1U;
+    slot->seenMs = now;
+    return false;
+  }
+
+  const int16_t delta = static_cast<int16_t>(seq - slot->highestSeq);
+  if (delta > 0) {
+    const uint8_t shift = static_cast<uint8_t>(min<int16_t>(delta, Config::LORA_REPLAY_WINDOW_BITS));
+    slot->bitmap = shift >= 32 ? 1U : (slot->bitmap << shift) | 1U;
+    slot->highestSeq = seq;
+    slot->seenMs = now;
+    return false;
+  }
+
+  const int16_t age = static_cast<int16_t>(slot->highestSeq - seq);
+  if (age >= Config::LORA_REPLAY_WINDOW_BITS) return true;
+  const uint32_t bit = 1UL << age;
+  if (slot->bitmap & bit) return true;
+  slot->bitmap |= bit;
+  slot->seenMs = now;
+  (void)payloadHash;
+  return false;
 }
 
 uint16_t LoRaManager::crc16(const uint8_t* data, size_t len) {
@@ -433,7 +517,8 @@ uint32_t LoRaManager::sourceIdFromCallsign(const String& callsign) {
   return hash ? hash : 1;
 }
 
-bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint32_t payloadHash) {
+bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash) {
+  if (acceptReplay(sourceId, seq, type, payloadHash)) return true;
   const uint32_t now = millis();
   for (size_t i = 0; i < DEDUP_CACHE_SIZE; ++i) {
     DedupEntry& entry = dedupCache_[i];
@@ -809,14 +894,14 @@ bool LoRaManager::begin() {
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_ = sourceIdFromCallsign(gConfig.callsign);
-  if (!mutex_ || !forwardQueue_) return false;
+  if (!mutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
 
   int16_t st = radio_.begin(
       gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
-      gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
+      gConfig.loraCr, gConfig.loraSyncWord, effectiveTxPowerDbm(),
       Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
 
   if (st != RADIOLIB_ERR_NONE) {
@@ -1109,7 +1194,7 @@ void LoRaManager::task() {
     const bool isV3 = authenticatedV3;
     const bool isForwardable = rxAuthenticated && (isV2 || isV3);
     const bool duplicateV2 = (isV2 || isV3) &&
-        seenDedup(rxSourceId, seq, hashPayload(plain, plainLen));
+        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen));
     bool pttOrRecording = false;
     {
       StateLock stateLock(gState);
