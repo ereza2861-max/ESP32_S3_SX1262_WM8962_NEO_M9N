@@ -4,6 +4,7 @@
 #include "AppState.h"
 #include <SD.h>
 #include <SPI.h>
+#include <mbedtls/sha256.h>
 
 bool StorageManager::begin() {
   if (!SD.begin(Board::SD_CS, SPI, 20000000U)) {
@@ -198,5 +199,38 @@ bool StorageManager::checksumFile(const String& path, uint32_t& crc, uint64_t& s
   }
   f.close();
   crc ^= 0xFFFFFFFFU;
+  return true;
+}
+
+
+bool StorageManager::sha256File(const String& path, String& digest, uint64_t& size) {
+  digest = String();
+  size = 0;
+  if (!isSafePath(path)) return false;
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) return false;
+  File f = SD.open(path, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return false;
+  }
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  bool ok = mbedtls_sha256_starts(&ctx, 0) == 0;
+  uint8_t buf[1024];
+  while (ok && f.available()) {
+    const size_t n = f.read(buf, sizeof(buf));
+    if (n == 0) { ok = false; break; }
+    size += n;
+    ok = mbedtls_sha256_update(&ctx, buf, n) == 0;
+  }
+  uint8_t hash[32] = {};
+  if (ok) ok = mbedtls_sha256_finish(&ctx, hash) == 0;
+  mbedtls_sha256_free(&ctx);
+  f.close();
+  if (!ok) return false;
+  const char* digits = "0123456789abcdef";
+  digest.reserve(64);
+  for (uint8_t b : hash) { digest += digits[b >> 4]; digest += digits[b & 0x0F]; }
   return true;
 }

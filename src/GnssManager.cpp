@@ -4,6 +4,8 @@
 #include "AppState.h"
 #include "StorageManager.h"
 #include <SD.h>
+#include <sys/time.h>
+#include <stdlib.h>
 extern StorageManager storage;
 
 namespace {
@@ -33,6 +35,7 @@ void GnssManager::task() {
   uint32_t sats = 0;
   uint64_t epoch = 0;
   bool timeValid = false;
+  bool syncSystemTime = false;
   {
     StateLock lock(gState);
     if (!lock.ok()) return;
@@ -53,6 +56,10 @@ void GnssManager::task() {
             static_cast<uint64_t>(gps_.time.hour()) * 3600ULL +
             static_cast<uint64_t>(gps_.time.minute()) * 60ULL +
             static_cast<uint64_t>(gps_.time.second());
+        epoch = gState.gps.utcEpoch;
+        const time_t systemNow = time(nullptr);
+        syncSystemTime = epoch > 1700000000ULL &&
+            (systemNow < 1700000000 || llabs(static_cast<long long>(systemNow) - static_cast<long long>(epoch)) > 2);
       }
       if (now - lastTrackLogMs >= Config::TRACK_LOG_PERIOD_MS) {
         lastTrackLogMs = now;
@@ -63,6 +70,11 @@ void GnssManager::task() {
     } else if (now - gState.gps.lastFixMs > Config::GNSS_STALE_MS) {
       gState.gps.valid = false;
     }
+  }
+
+  if (syncSystemTime) {
+    struct timeval tv{static_cast<time_t>(epoch), 0};
+    (void)settimeofday(&tv, nullptr);
   }
 
   if (logFix && storage.ready()) {

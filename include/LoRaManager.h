@@ -22,12 +22,14 @@ public:
   bool begin();
   void task();
   bool sendText(const String& text);
+  bool textAcked() const { return textAcked_; }
   bool sendSOS();
   bool sendPosition();
   bool cancelSOS();
   bool manualTune(float freqMHz);
   bool sendVoiceFrame();
   bool applyConfig();
+  void prepareForDeepSleep();
   bool scannerStart(uint8_t mode, uint16_t dwellMs);
   bool scannerStop();
   bool scannerIsActive() const;
@@ -62,7 +64,7 @@ private:
   bool queuePendingTx(const String& packet);
   bool enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                       uint8_t ttl, const uint8_t* payload, size_t len);
-  bool seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash);
+  bool seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec = 0);
   static uint32_t hashPayload(const uint8_t* data, size_t len);
   static uint32_t sourceIdFromCallsign(const String& callsign);
   bool isPttOrRecording() const;
@@ -101,6 +103,7 @@ private:
     uint8_t type = 0;
     uint32_t bitmap = 0;
     uint32_t seenMs = 0;
+    uint32_t lastEpochSec = 0;
   };
   ReplayEntry replayCache_[Config::LORA_REPLAY_SOURCE_CACHE_SIZE] = {};
   size_t replayNext_ = 0;
@@ -129,6 +132,16 @@ private:
   uint32_t sosSentMs_ = 0;
   uint8_t sosRetryCount_ = 0;
   bool sosAwaitingAck_ = false;
+  bool textAwaitingAck_ = false;
+  bool textAcked_ = false;
+  uint16_t textPendingSeq_ = 0;
+  uint8_t textRetryCount_ = 0;
+  uint32_t textSentMs_ = 0;
+  String textPendingPacket_;
+  bool textAckPending_ = false;
+  uint16_t textAckSeq_ = 0;
+  uint32_t textAckSourceId_ = 0;
+  uint8_t textAckHopIndex_ = 0;
   String sosPacket_;
   uint8_t computeHopIndex(uint32_t frame) const;
   bool retuneToHopChannel(uint8_t index);
@@ -143,6 +156,9 @@ private:
   bool transmitHopped(const String& text, uint8_t type);
   bool sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId);
   void handleSosAckPayload(const uint8_t* payload, size_t len);
+  void handleTextAckPayload(const uint8_t* payload, size_t len);
+  bool sendTextAck(uint16_t ackedSeq, uint32_t ackedSourceId, uint8_t hopIndex);
+  void serviceTextRetry();
   void serviceSosRetry();
   void addSosHistory(uint8_t event, uint32_t peer = 0);
   bool encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
@@ -152,7 +168,7 @@ private:
                      size_t capacity, size_t& len);
   bool loadKey(uint8_t key[16]) const;
   bool reserveTxSequenceBlock();
-  bool acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash);
+  bool acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec = 0);
   int8_t effectiveTxPowerDbm() const;
   static uint16_t crc16(const uint8_t* data, size_t len);
   void logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t sourceId,

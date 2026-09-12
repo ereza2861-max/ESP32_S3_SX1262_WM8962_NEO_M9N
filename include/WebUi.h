@@ -17,6 +17,8 @@ private:
   uint8_t authFailures_ = 0;
   uint32_t authBlockedUntilMs_ = 0;
   uint8_t sessionSecret_[32] = {};
+  uint8_t csrfToken_[16] = {};
+  String csrfTokenHex_;
   bool sessionSecretReady_ = false;
   uint32_t lastMessageMs_ = 0;
   uint32_t lastSosMs_ = 0;
@@ -75,10 +77,12 @@ private:
   void handleReboot();
   bool rateLimit(uint32_t& last, uint32_t interval);
   bool sessionValid();
+  bool csrfValid();
   void issueSession();
   void auditAuth(bool success);
   void handleConfig();
   void handleConfigExport();
   void handleFactoryReset();
   void handleAudioSource();
+  void handleChecksumSha256();
 };

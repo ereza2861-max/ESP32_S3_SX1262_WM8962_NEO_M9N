@@ -12,6 +12,7 @@ public:
   bool prepareRecordingSpace(uint32_t requiredBytes);
   bool isSafePath(const String& path) const;
   bool checksumFile(const String& path, uint32_t& crc, uint64_t& size);
+  bool sha256File(const String& path, String& digest, uint64_t& size);
   uint64_t totalBytes() const;
   uint64_t usedBytes() const;
 private:

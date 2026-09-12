@@ -16,6 +16,7 @@
 #define CONFIG_SECURE_FLASH_ENC_ENABLED 0
 #endif
 #include <esp_system.h>
+#include <nvs_flash.h>
 
 static String jsonEscape(const String& input) {
   String out;
@@ -120,7 +121,8 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <a id=trackDownload href="/api/track/download">Download GPS track</a>
 </div>
 <script>
-async function j(u,o){let r=await fetch(u,o);return await r.text()}
+const CSRF_TOKEN='__CSRF_TOKEN__';
+async function j(u,o={}){o.headers=Object.assign({},o.headers||{},o.method&&o.method.toUpperCase()!=='GET'?{'X-CSRF-Token':CSRF_TOKEN}:{});let r=await fetch(u,o);return await r.text()}
 function toast(t){document.getElementById('toast').textContent=t;setTimeout(()=>document.getElementById('toast').textContent='',2500)}
 function toggleTheme(){document.body.classList.toggle('light');localStorage.setItem('fieldradio-theme',document.body.classList.contains('light')?'light':'dark')}
 if(localStorage.getItem('fieldradio-theme')==='light')document.body.classList.add('light');
@@ -190,7 +192,7 @@ async function send(){await j('/api/message',{method:'POST',headers:{'Content-Ty
 async function uploadFile(){
  const file=upfile.files[0]; if(!file){alert('Choose a WAV file');return}
  const fd=new FormData(); fd.append('file',file,file.name);
- const r=await fetch('/api/upload',{method:'POST',body:fd}); alert(await r.text()); refresh()
+ const r=await fetch('/api/upload',{method:'POST',headers:{'X-CSRF-Token':CSRF_TOKEN},body:fd}); alert(await r.text()); refresh()
 }
 async function renameFile(){
  const r=await j('/api/rename',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
@@ -282,7 +284,7 @@ bool WebUi::rateLimit(uint32_t& last, uint32_t interval) {
     String ip;
     uint32_t last = 0;
   };
-  static RateSlot slots[8];
+  static RateSlot slots[32];
   const uint32_t now = millis();
   const String ip = server_.client().remoteIP().toString();
   const uintptr_t endpoint = reinterpret_cast<uintptr_t>(&last);
@@ -356,6 +358,16 @@ bool WebUi::sessionValid() {
              Config::WEB_SESSION_TIMEOUT_MS;
 }
 
+bool WebUi::csrfValid() {
+  if (server_.method() != HTTP_POST || csrfTokenHex_.isEmpty()) return false;
+  const String supplied = server_.header("X-CSRF-Token");
+  if (supplied.length() != csrfTokenHex_.length()) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < supplied.length(); ++i)
+    diff |= static_cast<uint8_t>(supplied[i] ^ csrfTokenHex_[i]);
+  return diff == 0;
+}
+
 void WebUi::issueSession() {
   const IPAddress ip = server_.client().remoteIP();
   uint8_t msg[8] = {};
@@ -378,10 +390,19 @@ void WebUi::issueSession() {
     hex += digits[b >> 4];
     hex += digits[b & 0x0F];
   }
+  csrfTokenHex_.reserve(sizeof(csrfToken_) * 2);
+  csrfTokenHex_ = String();
+  const char* digits = "0123456789abcdef";
+  for (uint8_t& b : csrfToken_) {
+    b = static_cast<uint8_t>(esp_random() & 0xFFU);
+    csrfTokenHex_ += digits[b >> 4];
+    csrfTokenHex_ += digits[b & 0x0F];
+  }
   server_.sendHeader("Set-Cookie",
       "FR-SESSION=" + hex + "; Max-Age=" +
       String(Config::WEB_SESSION_TIMEOUT_MS / 1000) +
       "; HttpOnly; SameSite=Strict");
+
 }
 
 void WebUi::auditAuth(bool success) {
@@ -435,9 +456,15 @@ bool WebUi::auth() {
     issueSession();
     auditAuth(true);
   }
-  if (server_.method() == HTTP_POST && !sameOrigin()) {
-    server_.send(403, "text/plain", "forbidden origin");
-    return false;
+  if (server_.method() == HTTP_POST) {
+    if (!sameOrigin()) {
+      server_.send(403, "text/plain", "forbidden origin");
+      return false;
+    }
+    if (!csrfValid()) {
+      server_.send(403, "text/plain", "invalid CSRF token");
+      return false;
+    }
   }
   return true;
 }
@@ -448,14 +475,15 @@ void WebUi::begin() {
     memcpy(sessionSecret_ + i, &r, min<size_t>(4, sizeof(sessionSecret_) - i));
   }
   sessionSecretReady_ = true;
-  static const char* const headerKeys[] = {"Origin", "Host", "Cookie"};
-  server_.collectHeaders(headerKeys, 3);
+  static const char* const headerKeys[] = {"Origin", "Host", "Cookie", "X-CSRF-Token"};
+  server_.collectHeaders(headerKeys, 4);
 
   server_.on("/", HTTP_GET, [this]{ if (auth()) handleRoot(); });
   server_.on("/api/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
   server_.on("/api/v1/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
   server_.on("/api/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
   server_.on("/api/v1/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
+  server_.on("/api/v1/csrf", HTTP_GET, [this]{ if (auth()) server_.send(200, "application/json", "{\"token\":\"" + csrfTokenHex_ + "\"}"); });
   server_.on("/api/files", HTTP_GET, [this]{ if (auth()) handleFiles(); });
   server_.on("/api/download", HTTP_GET, [this]{ if (auth()) handleDownload(); });
   server_.on("/api/upload", HTTP_POST, [this]{ if (auth()) {
@@ -555,7 +583,9 @@ void WebUi::handleRoot() {
                      "default-src 'self'; script-src 'unsafe-inline'; "
                      "style-src 'unsafe-inline'; object-src 'none'; "
                      "base-uri 'none'; frame-ancestors 'none'");
-  server_.send_P(200, "text/html", INDEX_HTML);
+  String page = FPSTR(INDEX_HTML);
+  page.replace("__CSRF_TOKEN__", csrfTokenHex_);
+  server_.send(200, "text/html", page);
 }
 
 void WebUi::handleApiVersion() {
@@ -616,6 +646,14 @@ void WebUi::handleStatus() {
   j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",\"messageUnread\":" + String(gState.messageUnreadCount) + ",\"sosEscalated\":" + String(gState.sosEscalated ? "true" : "false") + ",";
   j += "\"loraLog\":" + String(gState.loraPacketLogCount) + ",";
   j += "\"healthAlerts\":" + String(gState.healthAlerts) + ",";
+  j += "\"diagnostics\":{\"bootCount\":" + String(gState.bootCount) +
+       ",\"wakeupCause\":" + String(gState.wakeupCause) +
+       ",\"resetReason\":" + String(gState.resetReason) +
+       ",\"brownout\":" + String(gState.brownoutReset ? "true" : "false") +
+       ",\"heapLargestFree\":" + String(gState.heapLargestFree) +
+       ",\"jammingDetected\":" + String(gState.jammingDetected ? "true" : "false") +
+       ",\"noiseFloorDbm\":" + String(gState.noiseFloorDbm) +
+       ",\"channelOccupancy\":" + String(gState.channelOccupancy) + "},";
   j += "\"tx\":" + String(gState.txPackets) + ",";
   j += "\"rx\":" + String(gState.rxPackets) + ",";
   j += "\"msg\":\"" + jsonEscape(gState.lastMessage) + "\",";
@@ -964,8 +1002,11 @@ void WebUi::handleMessage() {
   if (text.isEmpty() || text.length() > Config::LORA_MAX_PACKET) {
     server_.send(400, "text/plain", "invalid payload"); return;
   }
-  bool ok = lora.sendText(text);
-  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
+  const bool ok = lora.sendText(text);
+  const bool acked = lora.textAcked();
+  server_.send(ok ? 200 : 503, "application/json",
+               "{\"sent\":" + String(ok ? "true" : "false") +
+               ",\"acked\":" + String(acked ? "true" : "false") + "}");
 }
 
 void WebUi::handleSos() {
@@ -1467,20 +1508,32 @@ void WebUi::handleConfigExport() {
   server_.send(200, "application/json", j);
 }
 
+void WebUi::handleChecksumSha256() {
+  const String path = server_.arg("path");
+  if (!storage.isSafePath(path)) { server_.send(400, "text/plain", "invalid path"); return; }
+  String digest;
+  uint64_t size = 0;
+  if (!storage.sha256File(path, digest, size)) {
+    server_.send(404, "text/plain", "checksum failed");
+    return;
+  }
+  server_.send(200, "application/json", "{\"path\":\"" + jsonEscape(path) +
+               "\",\"size\":" + String(static_cast<unsigned long long>(size)) +
+               ",\"sha256\":\"" + digest + "\"}");
+}
+
 void WebUi::handleFactoryReset() {
   if (server_.arg("confirm") != "RESET") {
     server_.send(400, "text/plain", "confirmation required");
     return;
   }
-  Preferences prefs;
-  if (!prefs.begin("fieldradio", false)) {
-    server_.send(503, "text/plain", "NVS unavailable");
-    return;
-  }
-  const bool ok = prefs.clear();
-  prefs.end();
-  if (!ok) {
-    server_.send(503, "text/plain", "factory reset failed");
+  // Erase the complete default NVS partition rather than only the application
+  // namespace. With flash encryption/NVS encryption enabled this also removes
+  // encrypted records at the storage layer; without encryption, physical
+  // confidentiality cannot be guaranteed by software erase alone.
+  const esp_err_t err = nvs_flash_erase();
+  if (err != ESP_OK) {
+    server_.send(503, "text/plain", "NVS secure erase failed");
     return;
   }
   server_.send(200, "text/plain", "factory reset; rebooting");

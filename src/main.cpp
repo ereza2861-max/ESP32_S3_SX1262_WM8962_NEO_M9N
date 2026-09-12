@@ -6,6 +6,9 @@
 #include <esp_task_wdt.h>
 #include <esp_sleep.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <Preferences.h>
+#include <esp32-hal-cpu.h>
 #include <freertos/task.h>
 #include "BoardConfig.h"
 #include "Config.h"
@@ -40,6 +43,52 @@ static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0;
 static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr;
+static uint32_t bootCount = 0;
+
+static const char* wakeupCauseName(esp_sleep_wakeup_cause_t cause) {
+  switch (cause) {
+    case ESP_SLEEP_WAKEUP_EXT0: return "EXT0";
+    case ESP_SLEEP_WAKEUP_EXT1: return "EXT1";
+    case ESP_SLEEP_WAKEUP_GPIO: return "GPIO";
+    case ESP_SLEEP_WAKEUP_TIMER: return "TIMER";
+    case ESP_SLEEP_WAKEUP_TOUCHPAD: return "TOUCH";
+    case ESP_SLEEP_WAKEUP_ULP: return "ULP";
+    case ESP_SLEEP_WAKEUP_UART: return "UART";
+    default: return "POWERON/OTHER";
+  }
+}
+
+static void recordBootDiagnostics() {
+  const esp_sleep_wakeup_cause_t wake = esp_sleep_get_wakeup_cause();
+  const esp_reset_reason_t reset = esp_reset_reason();
+  Preferences prefs;
+  if (prefs.begin("fieldradio", false)) {
+    bootCount = prefs.getUInt("bootcnt", 0) + 1U;
+    (void)prefs.putUInt("bootcnt", bootCount);
+    prefs.end();
+  }
+  const bool brownout = reset == ESP_RST_BROWNOUT;
+  StateLock lock(gState);
+  if (lock.ok()) {
+    gState.bootCount = bootCount;
+    gState.wakeupCause = static_cast<uint32_t>(wake);
+    gState.resetReason = static_cast<uint32_t>(reset);
+    gState.brownoutReset = brownout;
+    if (brownout) gState.lastError = "Brownout reset detected";
+  }
+  Serial.printf("BOOT: count=%lu reset=%d wake=%d(%s)%s\n",
+                static_cast<unsigned long>(bootCount), static_cast<int>(reset),
+                static_cast<int>(wake), wakeupCauseName(wake),
+                brownout ? " BROWNOUT" : "");
+}
+
+static void setPowerProfile(bool active) {
+#if CONFIG_IDF_TARGET_ESP32S3
+  const uint32_t target = active ? Config::CPU_ACTIVE_MHZ : Config::CPU_IDLE_MHZ;
+  static uint32_t applied = 0;
+  if (applied != target && setCpuFrequencyMhz(target)) applied = target;
+#endif
+}
 
 static void watchdogInit() {
   esp_task_wdt_config_t cfg{};
@@ -115,6 +164,7 @@ static bool shouldDeepSleep(uint32_t now) {
   }
 
   static uint32_t idleSince = 0;
+  setPowerProfile(busy || critical);
   if (!Config::DEEP_SLEEP_ENABLED || busy) {
     idleSince = now;
     return false;
@@ -131,11 +181,17 @@ static void enterDeepSleep() {
   Serial.println("POWER: entering deep sleep");
   Serial.flush();
 
-  // SX1262 DIO1 is the configured IRQ/wake line. Keep the radio in RX and
-  // allow a high level on DIO1 to wake the S3. The radio is reinitialized
-  // normally after wake, so no volatile application state is required here.
-  esp_sleep_enable_ext1_wakeup(1ULL << Board::LORA_DIO1, ESP_EXT1_WAKEUP_ANY_HIGH);
+  // DIO1 is active-high; PTT/SOS are active-low. ESP32-S3 supports GPIO
+  // wake from deep sleep, so all three physical wake sources remain usable.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  if (Board::LORA_DIO1 >= 0)
+    (void)esp_sleep_enable_gpio_wakeup(1ULL << Board::LORA_DIO1, ESP_GPIO_WAKEUP_GPIO_HIGH);
+  if (Board::BTN_PTT >= 0)
+    (void)esp_sleep_enable_gpio_wakeup(1ULL << Board::BTN_PTT, ESP_GPIO_WAKEUP_GPIO_LOW);
+  if (Board::BTN_SOS >= 0)
+    (void)esp_sleep_enable_gpio_wakeup(1ULL << Board::BTN_SOS, ESP_GPIO_WAKEUP_GPIO_LOW);
 
+  lora.prepareForDeepSleep();
   (void)audio.stopRecording();
   audio.stopPlayback();
   {
@@ -270,26 +326,27 @@ static void handlePhysicalControls(uint32_t now) {
 }
 
 static void manageWifi(uint32_t now) {
-  if (WiFi.getMode() != WIFI_AP) return;
+  const wifi_mode_t mode = WiFi.getMode();
+  if (mode == WIFI_OFF) {
+    if (now - wifiRetryMs >= Config::WIFI_AP_RETRY_MS) {
+      wifiRetryMs = now;
+      setupWifi();
+    }
+    return;
+  }
+  if (mode != WIFI_AP) return;
   if (WiFi.softAPgetStationNum() > 0) {
     wifiIdleSince = now;
     return;
   }
   if (!wifiIdleSince) wifiIdleSince = now;
   if (now - wifiIdleSince >= Config::WIFI_AP_IDLE_TIMEOUT_MS) {
-    // softAPdisconnect() can leave the Wi-Fi mode set to WIFI_AP. Switch the
-    // radio fully off so the retry branch below can actually restart the AP.
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_OFF);
     StateLock lock(gState);
     if (lock.ok()) gState.wifiReady = false;
     wifiRetryMs = now;
     wifiIdleSince = now;
-    return;
-  }
-  if (WiFi.getMode() == WIFI_OFF && now - wifiRetryMs >= Config::WIFI_AP_RETRY_MS) {
-    wifiRetryMs = now;
-    setupWifi();
   }
 }
 
@@ -315,6 +372,7 @@ static void taskHealth(void*) {
       StateLock lock(gState);
       if (lock.ok()) {
         gState.heapFree = ESP.getFreeHeap();
+        gState.heapLargestFree = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
         gState.gnssStackMin = hGnss ? uxTaskGetStackHighWaterMark(hGnss) : 0;
         gState.loraStackMin = hLoRa ? uxTaskGetStackHighWaterMark(hLoRa) : 0;
         gState.audioStackMin = hAudio ? uxTaskGetStackHighWaterMark(hAudio) : 0;
@@ -345,6 +403,7 @@ void setup() {
   Serial.begin(Config::SERIAL_BAUD);
   delay(300);
   Serial.println("\nFieldRadio ESP32-S3-WROOM-1 boot");
+  recordBootDiagnostics();
   gConfig.load();
   watchdogInit();
 
@@ -410,6 +469,14 @@ void loop() {
   const uint32_t now = millis();
   updateBattery(now);
   handlePhysicalControls(now);
+  bool activePower = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) activePower = gState.ptt || gState.sos || gState.recording ||
+        gState.playing || gState.usbAudioActive || gState.rxActive ||
+        gState.wifiReady;
+  }
+  setPowerProfile(activePower);
   manageWifi(now);
 
   if (now - lastStatus >= Config::STATUS_PERIOD_MS) {
@@ -425,6 +492,13 @@ void loop() {
                     (unsigned long)gState.rxPackets,
                     gState.recording, gState.playing, gState.usbAudioActive,
                     gState.batteryV, gState.batteryLow, gState.batteryCritical);
+      Serial.printf("DIAG boot=%lu wake=%lu reset=%lu heap=%lu largest=%lu brownout=%d jam=%d noise=%d\n",
+                    static_cast<unsigned long>(gState.bootCount),
+                    static_cast<unsigned long>(gState.wakeupCause),
+                    static_cast<unsigned long>(gState.resetReason),
+                    static_cast<unsigned long>(gState.heapFree),
+                    static_cast<unsigned long>(gState.heapLargestFree),
+                    gState.brownoutReset, gState.jammingDetected, gState.noiseFloorDbm);
     }
   }
 

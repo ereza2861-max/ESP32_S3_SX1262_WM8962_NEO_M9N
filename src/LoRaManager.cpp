@@ -9,6 +9,8 @@
 #include <Preferences.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
+#include <time.h>
+#include <esp_attr.h>
 
 extern AudioManager audio;
 
@@ -19,6 +21,45 @@ constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
 constexpr size_t PACKET_HEADER_V3 = PACKET_HEADER_V2 + 1 + sizeof(uint32_t);
 constexpr uint8_t LORA_PROTOCOL_VERSION_HOP = 3;
 constexpr size_t PACKET_TAG = Config::LORA_TAG_BYTES;
+struct RtcRadioState {
+  uint32_t magic;
+  uint32_t hopFrame;
+  uint16_t sosSeq;
+  uint8_t sosRetryCount;
+  bool sosAwaitingAck;
+  uint32_t sosElapsedMs;
+  uint16_t sosPacketLen;
+  uint8_t sosPacket[Config::LORA_MAX_PACKET];
+  uint32_t crc;
+};
+RTC_DATA_ATTR RtcRadioState rtcRadioState{};
+constexpr uint32_t RTC_RADIO_MAGIC = 0x46525231UL;
+
+uint32_t stateCrc(const RtcRadioState& st) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(&st);
+  uint32_t crc = 2166136261UL;
+  for (size_t i = 0; i < offsetof(RtcRadioState, crc); ++i) {
+    crc ^= p[i];
+    crc *= 16777619UL;
+  }
+  return crc;
+}
+
+uint32_t currentEpochSec() {
+  const time_t now = time(nullptr);
+  return now > 1700000000 && now < 4102444800 ? static_cast<uint32_t>(now) : 0;
+}
+
+bool deriveRotatingKey(const uint8_t master[16], uint32_t epochSec, uint8_t out[16]) {
+  if (!master || !out || epochSec == 0) return false;
+  const uint32_t period = epochSec / Config::LORA_REKEY_PERIOD_SEC;
+  uint8_t msg[12] = {'F','R','-','R','E','K','E','Y', static_cast<uint8_t>(period), static_cast<uint8_t>(period >> 8), static_cast<uint8_t>(period >> 16), static_cast<uint8_t>(period >> 24)};
+  unsigned char digest[32] = {};
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md || mbedtls_md_hmac(md, master, 16, msg, sizeof(msg), digest, sizeof(digest)) != 0) return false;
+  memcpy(out, digest, 16);
+  return true;
+}
 
 bool hexByte(const char* p, uint8_t& out) {
   auto nibble = [](char c) -> int {
@@ -132,8 +173,13 @@ int8_t LoRaManager::effectiveTxPowerDbm() const {
   return configured;
 }
 
-bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash) {
+bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec) {
   const uint32_t now = millis();
+  const uint32_t currentEpoch = currentEpochSec();
+  if (packetEpochSec != 0 && currentEpoch != 0) {
+    const uint32_t age = currentEpoch >= packetEpochSec ? currentEpoch - packetEpochSec : packetEpochSec - currentEpoch;
+    if (age > Config::LORA_REPLAY_TIME_WINDOW_SEC) return true;
+  }
   ReplayEntry* slot = nullptr;
   for (auto& entry : replayCache_) {
     if (entry.sourceId == sourceId && entry.type == type) {
@@ -149,6 +195,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     slot->highestSeq = seq;
     slot->bitmap = 1U;
     slot->seenMs = now;
+    slot->lastEpochSec = packetEpochSec;
     return false;
   }
 
@@ -158,6 +205,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     slot->bitmap = shift >= 32 ? 1U : (slot->bitmap << shift) | 1U;
     slot->highestSeq = seq;
     slot->seenMs = now;
+    slot->lastEpochSec = packetEpochSec;
     return false;
   }
 
@@ -167,6 +215,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   if (slot->bitmap & bit) return true;
   slot->bitmap |= bit;
   slot->seenMs = now;
+  slot->lastEpochSec = packetEpochSec;
   (void)payloadHash;
   return false;
 }
@@ -236,6 +285,8 @@ bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type
   if (!plain || !loadKey(key) ||
       len + PACKET_HEADER_V3 + PACKET_TAG > Config::LORA_MAX_PACKET)
     return false;
+  uint8_t rotatingKey[16] = {};
+  if (epochMs != 0 && deriveRotatingKey(key, epochMs, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
 
   const uint32_t nonce = esp_random();
   packet.reserve(PACKET_HEADER_V3 + len + PACKET_TAG);
@@ -307,6 +358,8 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
 
   uint8_t key[16];
   if (!loadKey(key)) return false;
+  uint8_t rotatingKey[16] = {};
+  if (epochMs != 0 && deriveRotatingKey(key, epochMs, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
   unsigned char expected[32] = {};
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, key, sizeof(key),
@@ -342,6 +395,11 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
 uint8_t LoRaManager::computeHopIndex(uint32_t frame) const {
   StateLock lock(gState);
   if (!lock.ok() || gState.hopChannelCount == 0) return 0;
+  const uint32_t epochSec = currentEpochSec();
+  if (epochSec != 0) {
+    const uint32_t dwellSec = max<uint32_t>(1, Config::HOP_DWELL_MS / 1000U);
+    return static_cast<uint8_t>((epochSec / dwellSec) % gState.hopChannelCount);
+  }
   return static_cast<uint8_t>(frame % gState.hopChannelCount);
 }
 
@@ -378,61 +436,47 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type) {
     if (!lock.ok()) return false;
     hopOn = gState.hopEnabled && gState.hopChannelCount > 0;
   }
-  if (!hopOn) return false;
-  if (text.length() > Config::LORA_MAX_PACKET -
-                          PACKET_HEADER_V3 - PACKET_TAG)
-    return false;
-  const uint8_t hopIndex = computeHopIndex(hopFrame_);
-  const uint32_t epochMs = millis();
+  if (text.length() > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 - PACKET_TAG) return false;
+  const uint8_t hopIndex = hopOn ? computeHopIndex(hopFrame_) : 0;
+  const uint32_t epochSec = currentEpochSec();
   const uint16_t seq = ++txSequence_;
   String packet;
-  if (!encryptPacketV3(reinterpret_cast<const uint8_t*>(text.c_str()),
-                       text.length(), type, seq, hopIndex, epochMs, packet))
-    return false;
-  if (!retuneToHopChannel(hopIndex)) {
-    (void)retuneToChannel0();
-    return transmit(text, false);
-  }
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    (void)retuneToChannel0();
-    return false;
-  }
+  if (!encryptPacketV3(reinterpret_cast<const uint8_t*>(text.c_str()), text.length(), type, seq, hopIndex, epochSec, packet)) return false;
+  if (hopOn && !retuneToHopChannel(hopIndex)) { (void)retuneToChannel0(); return false; }
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) { (void)retuneToChannel0(); return false; }
   int16_t st = RADIOLIB_ERR_UNKNOWN;
   bool txOk = false;
   for (uint8_t attempt = 0; attempt <= Config::LORA_LBT_MAX_RETRIES; ++attempt) {
     {
       SpiLock spiLock(pdMS_TO_TICKS(1000));
       if (!spiLock.ok()) break;
-      const int16_t scanSt = Config::LORA_LBT_ENABLED ? radio_.scanChannel()
-                                                       : RADIOLIB_CHANNEL_FREE;
-      if (Config::LORA_LBT_ENABLED && lbtChannelBusy(scanSt)) {
-        st = scanSt;
-      } else if (scanSt == RADIOLIB_CHANNEL_FREE) {
+      const int16_t scanSt = Config::LORA_LBT_ENABLED ? radio_.scanChannel() : RADIOLIB_CHANNEL_FREE;
+      if (Config::LORA_LBT_ENABLED && lbtChannelBusy(scanSt)) st = scanSt;
+      else if (scanSt == RADIOLIB_CHANNEL_FREE) {
         const RadioLibTime_t airtimeUs = radio_.getTimeOnAir(packet.length());
-        if (airtimeUs != 0 && airtimeUs <= UINT32_MAX &&
-            consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
+        if (airtimeUs != 0 && airtimeUs <= UINT32_MAX && consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
           st = radio_.transmit(packet);
           txOk = st == RADIOLIB_ERR_NONE;
           (void)radio_.startReceive();
-        } else {
-          st = RADIOLIB_ERR_UNKNOWN;
-        }
-      } else {
-        st = scanSt;
-      }
+        } else st = RADIOLIB_ERR_UNKNOWN;
+      } else st = scanSt;
     }
-    if (txOk) break;
-    if (!Config::LORA_LBT_ENABLED || attempt >= Config::LORA_LBT_MAX_RETRIES) break;
-    const uint32_t span = Config::LORA_LBT_BACKOFF_MAX_MS -
-                          Config::LORA_LBT_BACKOFF_MIN_MS;
-    const uint32_t backoff = Config::LORA_LBT_BACKOFF_MIN_MS +
-        (span ? (esp_random() % (span + 1U)) : 0U);
-    vTaskDelay(pdMS_TO_TICKS(backoff));
+    if (txOk || attempt >= Config::LORA_LBT_MAX_RETRIES) break;
+    const uint32_t span = Config::LORA_LBT_BACKOFF_MAX_MS - Config::LORA_LBT_BACKOFF_MIN_MS;
+    vTaskDelay(pdMS_TO_TICKS(Config::LORA_LBT_BACKOFF_MIN_MS + (span ? (esp_random() % (span + 1U)) : 0U)));
   }
   xSemaphoreGive(mutex_);
-  if (!txOk) { (void)retuneToChannel0(); return false; }
-  ++hopFrame_;
   (void)retuneToChannel0();
+  if (!txOk) return false;
+  ++hopFrame_;
+  if (type == Config::LORA_TYPE_TEXT) {
+    textPendingPacket_ = packet;
+    textPendingSeq_ = seq;
+    textRetryCount_ = 0;
+    textSentMs_ = millis();
+    textAwaitingAck_ = true;
+    textAcked_ = false;
+  }
   logPacket(true, type, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
   return true;
 }
@@ -517,8 +561,8 @@ uint32_t LoRaManager::sourceIdFromCallsign(const String& callsign) {
   return hash ? hash : 1;
 }
 
-bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash) {
-  if (acceptReplay(sourceId, seq, type, payloadHash)) return true;
+bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec) {
+  if (acceptReplay(sourceId, seq, type, payloadHash, packetEpochSec)) return true;
   const uint32_t now = millis();
   for (size_t i = 0; i < DEDUP_CACHE_SIZE; ++i) {
     DedupEntry& entry = dedupCache_[i];
@@ -857,6 +901,42 @@ void LoRaManager::serviceSosRetry() {
   }
 }
 
+bool LoRaManager::sendTextAck(uint16_t ackedSeq, uint32_t ackedSourceId, uint8_t hopIndex) {
+  uint8_t payload[6] = {};
+  payload[0] = static_cast<uint8_t>(ackedSeq & 0xFF);
+  payload[1] = static_cast<uint8_t>(ackedSeq >> 8);
+  memcpy(payload + 2, &ackedSourceId, sizeof(ackedSourceId));
+  const uint16_t seq = ++txSequence_;
+  String packet;
+  const uint32_t epochSec = currentEpochSec();
+  if (!encryptPacketV3(payload, sizeof(payload), Config::LORA_TYPE_TEXT_ACK, seq, hopIndex, epochSec, packet)) return false;
+  return transmit(packet, true);
+}
+
+void LoRaManager::handleTextAckPayload(const uint8_t* payload, size_t len) {
+  if (!payload || len != 6) return;
+  uint16_t ackedSeq = static_cast<uint16_t>(payload[0]) | (static_cast<uint16_t>(payload[1]) << 8);
+  uint32_t ackedSource = 0;
+  memcpy(&ackedSource, payload + 2, sizeof(ackedSource));
+  if (ackedSource != sourceId_ || !textAwaitingAck_ || ackedSeq != textPendingSeq_) return;
+  textAwaitingAck_ = false;
+  textAcked_ = true;
+}
+
+void LoRaManager::serviceTextRetry() {
+  if (!textAwaitingAck_ || textPendingPacket_.isEmpty() || millis() - textSentMs_ < Config::SOS_REPEAT_MS) return;
+  if (textRetryCount_ >= Config::SOS_MAX_RETRIES) {
+    textAwaitingAck_ = false;
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "Text ACK timeout";
+    return;
+  }
+  if (transmit(textPendingPacket_, true)) {
+    ++textRetryCount_;
+    textSentMs_ = millis();
+  }
+}
+
 void LoRaManager::handleSosAckPayload(const uint8_t* payload, size_t len) {
   if (!payload || len != 6) return;
   uint16_t ackedSeq = static_cast<uint16_t>(payload[0]) |
@@ -894,6 +974,17 @@ bool LoRaManager::begin() {
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_ = sourceIdFromCallsign(gConfig.callsign);
+  if (rtcRadioState.magic == RTC_RADIO_MAGIC && rtcRadioState.crc == stateCrc(rtcRadioState)) {
+    hopFrame_ = rtcRadioState.hopFrame;
+    sosSeq_ = rtcRadioState.sosSeq;
+    sosRetryCount_ = rtcRadioState.sosRetryCount;
+    sosAwaitingAck_ = rtcRadioState.sosAwaitingAck;
+    if (sosAwaitingAck_ && rtcRadioState.sosPacketLen > 0 &&
+        rtcRadioState.sosPacketLen <= Config::LORA_MAX_PACKET) {
+      sosPacket_ = String(reinterpret_cast<const char*>(rtcRadioState.sosPacket), rtcRadioState.sosPacketLen);
+      sosSentMs_ = millis() - min<uint32_t>(rtcRadioState.sosElapsedMs, 0x7FFFFFFFU);
+    }
+  }
   if (!mutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
@@ -1012,6 +1103,27 @@ void LoRaManager::task() {
       r.occupancyPercent = lbtChannelBusy(scanSt) ? 100 : 0;
       r.preambleCount = lbtChannelBusy(scanSt) ? 1 : 0;
       r.timestamp = now;
+      int32_t rssiSum = 0;
+      uint16_t occupancySum = 0;
+      uint8_t validCount = 0;
+      for (const auto& sample : scanner_.results) {
+        if (sample.timestamp == 0) continue;
+        rssiSum += sample.rssiAvgDbm;
+        occupancySum += sample.occupancyPercent;
+        ++validCount;
+      }
+      const int16_t noiseFloor = validCount ? static_cast<int16_t>(rssiSum / validCount) : -127;
+      const uint8_t occupancy = validCount ? static_cast<uint8_t>(occupancySum / validCount) : 0;
+      const bool jammed = validCount >= 3 &&
+          noiseFloor >= Config::LORA_JAM_RSSI_THRESHOLD_DBM &&
+          occupancy >= Config::LORA_JAM_OCCUPANCY_THRESHOLD_PERCENT;
+      StateLock jamLock(gState);
+      if (jamLock.ok()) {
+        gState.noiseFloorDbm = validCount ? noiseFloor : -127;
+        gState.channelOccupancy = occupancy;
+        gState.jammingDetected = jammed;
+        if (jammed) gState.lastError = "Possible LoRa jamming detected";
+      }
     }
     ++scanner_.index;
     if (scanner_.index >= Config::SCANNER_MAX_CHANNELS) {
@@ -1076,6 +1188,7 @@ void LoRaManager::task() {
 
   (void)processPendingTx();
   serviceSosRetry();
+  serviceTextRetry();
   serviceVoiceReorder();
 
   bool ptt = false;
@@ -1194,11 +1307,17 @@ void LoRaManager::task() {
     const bool isV3 = authenticatedV3;
     const bool isForwardable = rxAuthenticated && (isV2 || isV3);
     const bool duplicateV2 = (isV2 || isV3) &&
-        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen));
+        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen), isV3 ? epochMs : 0);
     bool pttOrRecording = false;
     {
       StateLock stateLock(gState);
       if (stateLock.ok()) pttOrRecording = gState.ptt || gState.recording;
+    }
+    if (rxAuthenticated && type == Config::LORA_TYPE_TEXT) {
+      textAckSeq_ = seq;
+      textAckSourceId_ = rxSourceId;
+      textAckHopIndex_ = isV3 ? hopIndex : 0;
+      textAckPending_ = true;
     }
     if (rxAuthenticated && type == Config::LORA_TYPE_TEXT && plainLen > 0 && !duplicateV2) {
       char text[Config::LORA_MAX_PACKET + 1] = {};
@@ -1216,6 +1335,9 @@ void LoRaManager::task() {
     }
     if (rxAuthenticated && type == Config::LORA_TYPE_SOS_ACK && !duplicateV2) {
       handleSosAckPayload(plain, plainLen);
+    }
+    if (rxAuthenticated && type == Config::LORA_TYPE_TEXT_ACK) {
+      handleTextAckPayload(plain, plainLen);
     }
     if (rxAuthenticated && type == Config::LORA_TYPE_VOICE && !duplicateV2 && plainLen == 168 &&
         plain[0] == 0x56 && plain[1] == 1 &&
@@ -1293,6 +1415,14 @@ void LoRaManager::task() {
     }
   }
   xSemaphoreGive(mutex_);
+
+  if (textAckPending_) {
+    const uint16_t ackSeq = textAckSeq_;
+    const uint32_t ackSource = textAckSourceId_;
+    const uint8_t ackHop = textAckHopIndex_;
+    textAckPending_ = false;
+    (void)sendTextAck(ackSeq, ackSource, ackHop);
+  }
 
   // Forwarding is deliberately serialized outside the receive critical
   // section. Voice/PTT keeps priority; one queued packet is attempted per task
@@ -1520,6 +1650,23 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
   return ok;
 }
 
+void LoRaManager::prepareForDeepSleep() {
+  rtcRadioState.magic = RTC_RADIO_MAGIC;
+  rtcRadioState.hopFrame = hopFrame_;
+  rtcRadioState.sosSeq = sosSeq_;
+  rtcRadioState.sosRetryCount = sosRetryCount_;
+  rtcRadioState.sosAwaitingAck = sosAwaitingAck_;
+  rtcRadioState.sosElapsedMs = sosAwaitingAck_ ? millis() - sosSentMs_ : 0;
+  rtcRadioState.sosPacketLen = 0;
+  memset(rtcRadioState.sosPacket, 0, sizeof(rtcRadioState.sosPacket));
+  if (sosAwaitingAck_ && sosPacket_.length() <= Config::LORA_MAX_PACKET) {
+    rtcRadioState.sosPacketLen = static_cast<uint16_t>(sosPacket_.length());
+    if (rtcRadioState.sosPacketLen)
+      memcpy(rtcRadioState.sosPacket, sosPacket_.c_str(), rtcRadioState.sosPacketLen);
+  }
+  rtcRadioState.crc = stateCrc(rtcRadioState);
+}
+
 bool LoRaManager::applyConfig() {
   if (!mutex_) return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
@@ -1552,12 +1699,16 @@ bool LoRaManager::applyConfig() {
 }
 
 bool LoRaManager::sendText(const String& text) {
-  bool hopOn = false;
-  {
-    StateLock lock(gState);
-    if (lock.ok()) hopOn = gState.hopEnabled && gState.hopChannelCount > 0;
+  if (!transmitHopped(text, Config::LORA_TYPE_TEXT)) return false;
+  const uint32_t deadline = millis() + 1500;
+  while (textAwaitingAck_ && static_cast<int32_t>(millis() - deadline) < 0) {
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-  return hopOn ? transmitHopped(text, Config::LORA_TYPE_TEXT) : transmit(text);
+  if (!textAcked_) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "Text transmitted; ACK not received";
+  }
+  return true;
 }
 
 bool LoRaManager::sendVoiceFrame() {

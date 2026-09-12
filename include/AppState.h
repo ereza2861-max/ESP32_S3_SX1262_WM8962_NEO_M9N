@@ -42,6 +42,14 @@ struct HealthLogEntry {
   uint32_t loraStackMin = 0;
   uint32_t audioStackMin = 0;
   uint32_t webStackMin = 0;
+  uint32_t heapLargestFree = 0;
+  uint32_t bootCount = 0;
+  uint32_t wakeupCause = 0;
+  uint32_t resetReason = 0;
+  bool brownoutReset = false;
+  bool jammingDetected = false;
+  int16_t noiseFloorDbm = -127;
+  uint8_t channelOccupancy = 0;
 };
 
 extern SemaphoreHandle_t gSpiMutex;
@@ -148,6 +156,14 @@ struct RuntimeState {
   uint32_t loraStackMin = 0;
   uint32_t gnssStackMin = 0;
   uint32_t webStackMin = 0;
+  uint32_t heapLargestFree = 0;
+  uint32_t bootCount = 0;
+  uint32_t wakeupCause = 0;
+  uint32_t resetReason = 0;
+  bool brownoutReset = false;
+  bool jammingDetected = false;
+  int16_t noiseFloorDbm = -127;
+  uint8_t channelOccupancy = 0;
 };
 
 extern RuntimeState gState;
