@@ -19,6 +19,7 @@
 #include "StorageManager.h"
 #include "WebUi.h"
 #include "PersistentConfig.h"
+#include <Adafruit_NeoPixel.h>
 
 GnssManager gnss;
 LoRaManager lora;
@@ -44,6 +45,80 @@ static uint32_t wifiRetryMs = 0;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0;
 static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr;
 static uint32_t bootCount = 0;
+static Adafruit_NeoPixel rgb(1, Board::LED_RGB, NEO_GRB + NEO_KHZ800);
+static uint32_t lastBatteryHealthPersist = 0;
+static float previousBatteryV = NAN;
+static bool batteryWasFull = false;
+static bool batteryWasLow = false;
+
+static void pulseAuxiliary(uint16_t ms) {
+  if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, HIGH);
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
+  const uint32_t started = millis();
+  while (millis() - started < ms) delay(1);
+  if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
+}
+
+static void updateAuxiliaryIndicators(bool tx, bool rx) {
+  if (Board::LED_TX >= 0) digitalWrite(Board::LED_TX, tx ? HIGH : LOW);
+  if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, rx ? HIGH : LOW);
+  StateLock lock(gState);
+  if (lock.ok()) {
+    const bool critical = gState.batteryCritical;
+    const bool low = gState.batteryLow;
+    rgb.setPixelColor(0, critical ? rgb.Color(255, 0, 0) :
+                                 (low ? rgb.Color(255, 96, 0) :
+                                  (tx ? rgb.Color(0, 0, 255) :
+                                   (rx ? rgb.Color(0, 255, 0) : 0))));
+    rgb.show();
+    // GPIO41 cannot prove charger state without a charger STAT input. The
+    // LED is therefore used only for a clearly documented "charge probable"
+    // heuristic based on a sustained positive battery-voltage slope.
+    if (Board::LED_CHARGING >= 0)
+      digitalWrite(Board::LED_CHARGING, gState.batteryChargeProbable ? HIGH : LOW);
+  }
+}
+
+static void loadBatteryHealth() {
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", true)) return;
+  const uint32_t version = prefs.getUInt("bhealth_v", 0);
+  if (version == Config::BATTERY_HEALTH_VERSION) {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.batteryCycleCount = prefs.getUInt("bcycles", 0);
+      gState.batterySampleCount = prefs.getUInt("bsamples", 0);
+      gState.batteryMinV = prefs.getFloat("bmin", NAN);
+      gState.batteryMaxV = prefs.getFloat("bmax", NAN);
+    }
+  }
+  prefs.end();
+}
+
+static void persistBatteryHealth(uint32_t now) {
+  if (now - lastBatteryHealthPersist < Config::BATTERY_HEALTH_PERSIST_MS) return;
+  float minV = NAN, maxV = NAN;
+  uint32_t cycles = 0, samples = 0;
+  {
+    StateLock lock(gState);
+    if (!lock.ok() || !gState.batteryAvailable) return;
+    cycles = gState.batteryCycleCount;
+    samples = gState.batterySampleCount;
+    minV = gState.batteryMinV;
+    maxV = gState.batteryMaxV;
+  }
+  Preferences prefs;
+  if (prefs.begin("fieldradio", false)) {
+    (void)prefs.putUInt("bhealth_v", Config::BATTERY_HEALTH_VERSION);
+    (void)prefs.putUInt("bcycles", cycles);
+    (void)prefs.putUInt("bsamples", samples);
+    (void)prefs.putFloat("bmin", minV);
+    (void)prefs.putFloat("bmax", maxV);
+    prefs.end();
+    lastBatteryHealthPersist = now;
+  }
+}
 
 static const char* wakeupCauseName(esp_sleep_wakeup_cause_t cause) {
   switch (cause) {
@@ -138,10 +213,28 @@ static void updateBattery(uint32_t now) {
                       (Config::BATTERY_PERCENT_FULL_V -
                        Config::BATTERY_PERCENT_EMPTY_V);
     gState.batteryPercent = static_cast<int8_t>(constrain(pct, 0.0f, 100.0f));
+    ++gState.batterySampleCount;
+    if (!isfinite(gState.batteryMinV) || voltage < gState.batteryMinV) gState.batteryMinV = voltage;
+    if (!isfinite(gState.batteryMaxV) || voltage > gState.batteryMaxV) gState.batteryMaxV = voltage;
+    const bool fullNow = voltage >= Config::BATTERY_FULL_V;
+    const bool lowNow = voltage <= Config::BATTERY_CYCLE_RESET_V;
+    if (fullNow) batteryWasFull = true;
+    if (batteryWasFull && lowNow && !batteryWasLow) {
+      ++gState.batteryCycleCount;
+      batteryWasFull = false;
+    }
+    batteryWasLow = lowNow;
+    gState.batteryChargeProbable =
+        isfinite(previousBatteryV) &&
+        voltage >= Config::BATTERY_RECHARGE_START_V &&
+        voltage > previousBatteryV + 0.003f;
+    previousBatteryV = voltage;
   } else {
     gState.batteryPercent = -1;
+    gState.batteryChargeProbable = false;
   }
 #endif
+  persistBatteryHealth(now);
 }
 
 static bool shouldDeepSleep(uint32_t now) {
@@ -211,10 +304,11 @@ static void enterDeepSleep() {
 
 
 static bool credentialsConfigured() {
+  // Web password may be represented only by a salted hash after provisioning.
   return gConfig.apPassword.length() >= 8 &&
          gConfig.webUser.length() > 0 &&
-         gConfig.webPassword.length() >= 8 &&
-         gConfig.apPassword != gConfig.webPassword;
+         gConfig.webPasswordConfigured() &&
+         (gConfig.webPassword.isEmpty() || gConfig.apPassword != gConfig.webPassword);
 }
 
 static void setupWifi() {
@@ -287,6 +381,7 @@ static void handlePhysicalControls(uint32_t now) {
   if (pttPressed != lastPttButton) {
     lastPttButton = pttPressed;
     if (pttPressed) {
+      pulseAuxiliary(30);
       (void)audio.playTone(1000, 60);
       if (audio.startRecording()) {
         StateLock lock(gState);
@@ -306,6 +401,7 @@ static void handlePhysicalControls(uint32_t now) {
       StateLock lock(gState);
       if (lock.ok()) gState.sos = true;
     }
+    pulseAuxiliary(80);
     (void)audio.playTone(1400, 150);
   } else if (!sosPressed) {
     lastSosButton = false;
@@ -322,7 +418,7 @@ static void handlePhysicalControls(uint32_t now) {
         gState.rxActive = false;
     }
   }
-  if (Board::STATUS_LED >= 0) digitalWrite(Board::STATUS_LED, (tx || rx || rec) ? HIGH : LOW);
+  updateAuxiliaryIndicators(tx, rx);
 }
 
 static void manageWifi(uint32_t now) {
@@ -403,7 +499,6 @@ void setup() {
   Serial.begin(Config::SERIAL_BAUD);
   delay(300);
   Serial.println("\nFieldRadio ESP32-S3-WROOM-1 boot");
-  recordBootDiagnostics();
   gConfig.load();
   watchdogInit();
 
@@ -414,12 +509,26 @@ void setup() {
     for (;;) delay(1000);
   }
 
+  recordBootDiagnostics();
+  loadBatteryHealth();
   SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
 
 #if defined(ARDUINO_ARCH_ESP32)
   if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLUP);
   if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLUP);
-  if (Board::STATUS_LED >= 0) pinMode(Board::STATUS_LED, OUTPUT);
+  if (Board::BUZZER >= 0) pinMode(Board::BUZZER, OUTPUT);
+  if (Board::HAPTIC >= 0) pinMode(Board::HAPTIC, OUTPUT);
+  if (Board::LED_CHARGING >= 0) pinMode(Board::LED_CHARGING, OUTPUT);
+  if (Board::LED_TX >= 0) pinMode(Board::LED_TX, OUTPUT);
+  if (Board::LED_RX >= 0) pinMode(Board::LED_RX, OUTPUT);
+  digitalWrite(Board::BUZZER, LOW);
+  digitalWrite(Board::HAPTIC, LOW);
+  digitalWrite(Board::LED_CHARGING, LOW);
+  digitalWrite(Board::LED_TX, LOW);
+  digitalWrite(Board::LED_RX, LOW);
+  rgb.begin();
+  rgb.clear();
+  rgb.show();
   if (Board::BATTERY_ADC >= 0) {
     pinMode(Board::BATTERY_ADC, INPUT);
     analogSetPinAttenuation(Board::BATTERY_ADC, ADC_11db);

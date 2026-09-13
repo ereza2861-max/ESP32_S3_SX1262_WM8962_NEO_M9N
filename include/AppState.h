@@ -99,6 +99,11 @@ struct RuntimeState {
   bool batteryLow = false;
   bool batteryCritical = false;
   int8_t batteryPercent = -1;
+  uint32_t batteryCycleCount = 0;
+  uint32_t batterySampleCount = 0;
+  float batteryMinV = NAN;
+  float batteryMaxV = NAN;
+  bool batteryChargeProbable = false;
   String lastMessage;
   MessageHistoryEntry messageHistory[Config::MESSAGE_HISTORY_SIZE] = {};
   size_t messageHistoryNext = 0;

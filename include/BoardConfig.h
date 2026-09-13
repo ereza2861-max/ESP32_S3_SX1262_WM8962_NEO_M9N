@@ -37,14 +37,19 @@ constexpr int GNSS_RX = 18; // ESP32-S3 RX <- NEO-M9N TX
 constexpr int GNSS_TX = 17; // ESP32-S3 TX -> NEO-M9N RX
 constexpr uint32_t GNSS_BAUD = 38400;
 
-// Auxiliary controls are assigned to currently-unused ESP32-S3-WROOM GPIOs.
-// These nets MUST be routed on the PCB revision; they are not present in the
-// supplied PCB mapping. Active-low buttons use internal pull-ups.
-// GPIO47/48 are used only for auxiliary status I/O in this firmware.
-constexpr int BTN_PTT = 21;
-constexpr int BTN_SOS = 47;
-constexpr int BATTERY_ADC = 1;
-constexpr int STATUS_LED = 48;
+// Auxiliary Rev-B controls. These nets MUST be physically routed on the PCB.
+// PTT/SOS remain on dedicated inputs; the new GPIO38..42 block is reserved
+// for the requested buzzer/RGB/haptic/charge/TX indicators.
+constexpr int BTN_PTT = 21;       // active-low, INPUT_PULLUP
+constexpr int BTN_SOS = 47;       // active-low, INPUT_PULLUP
+constexpr int BATTERY_ADC = 1;    // battery divider ADC input
+constexpr int BUZZER = 38;        // active-high buzzer; passive buzzer needs PWM hardware
+constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
+constexpr int HAPTIC = 40;        // active-high haptic driver enable
+constexpr int LED_CHARGING = 41;  // charging-status LED; driven only from charger heuristic
+constexpr int LED_TX = 42;        // dedicated TX indicator
+constexpr int LED_RX = 48;        // dedicated RX indicator
+constexpr int STATUS_LED = -1;    // removed: do not alias status onto another function
 
 // ESP32-S3 native USB uses GPIO19=D- and GPIO20=D+.
 constexpr int USB_D_MINUS = 19;
@@ -54,4 +59,22 @@ constexpr int USB_D_PLUS = 20;
 // No ESP32 GPIO is assigned to MCLK.
 constexpr uint8_t WM8962_I2C_ADDR = 0x1A;
 constexpr uint32_t WM8962_MCLK_HZ = 24000000UL;
+
+// Catch accidental future pin aliasing at compile time.
+constexpr bool pinsUnique() {
+  constexpr int pins[] = {
+      I2C_SDA, I2C_SCL, I2S_BCLK, I2S_LRCLK, I2S_DOUT, I2S_DIN,
+      SPI_SCK, SPI_MISO, SPI_MOSI, LORA_CS, LORA_RST, LORA_DIO1,
+      LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, BTN_PTT, BTN_SOS, BATTERY_ADC,
+      BUZZER, LED_RGB, HAPTIC, LED_CHARGING, LED_TX, LED_RX,
+      USB_D_MINUS, USB_D_PLUS
+  };
+  for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
+    if (pins[i] < 0) continue;
+    for (size_t j = i + 1; j < sizeof(pins) / sizeof(pins[0]); ++j)
+      if (pins[i] == pins[j]) return false;
+  }
+  return true;
+}
+static_assert(pinsUnique(), "BoardConfig GPIO collision detected");
 }

@@ -5,10 +5,12 @@
 #include "LoRaManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
+#include <cstring>
 #include <WiFi.h>
 #include <SD.h>
 #include <Preferences.h>
 #include <mbedtls/md.h>
+#include <mbedtls/base64.h>
 #ifndef CONFIG_SECURE_BOOT_V2_ENABLED
 #define CONFIG_SECURE_BOOT_V2_ENABLED 0
 #endif
@@ -430,6 +432,30 @@ void WebUi::auditAuth(bool success) {
   }
 }
 
+static bool basicAuthMatches(WebServer& server, const String& user,
+                              const RuntimeConfig& config) {
+  const String header = server.header("Authorization");
+  if (!header.startsWith("Basic ")) return false;
+  const String encoded = header.substring(6);
+  if (encoded.length() == 0 || encoded.length() > 128) return false;
+
+  uint8_t decoded[96] = {};
+  size_t outLen = 0;
+  if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &outLen,
+                             reinterpret_cast<const uint8_t*>(encoded.c_str()),
+                             encoded.length()) != 0)
+    return false;
+  decoded[outLen] = 0;
+  const char* colon = reinterpret_cast<const char*>(memchr(decoded, ':', outLen));
+  if (!colon) return false;
+  const size_t userLen = static_cast<size_t>(colon - reinterpret_cast<const char*>(decoded));
+  if (userLen != user.length() ||
+      memcmp(decoded, user.c_str(), userLen) != 0)
+    return false;
+  const String password(reinterpret_cast<const char*>(colon + 1));
+  return config.verifyWebPassword(password);
+}
+
 bool WebUi::auth() {
   const uint32_t now = millis();
   if (static_cast<int32_t>(now - authBlockedUntilMs_) < 0) {
@@ -438,7 +464,7 @@ bool WebUi::auth() {
   }
 
   if (!sessionValid()) {
-    if (!server_.authenticate(gConfig.webUser.c_str(), gConfig.webPassword.c_str())) {
+    if (!basicAuthMatches(server_, gConfig.webUser, gConfig)) {
       if (now - authWindowStartMs_ >= 60000) {
         authWindowStartMs_ = now;
         authFailures_ = 0;
@@ -475,8 +501,9 @@ void WebUi::begin() {
     memcpy(sessionSecret_ + i, &r, min<size_t>(4, sizeof(sessionSecret_) - i));
   }
   sessionSecretReady_ = true;
-  static const char* const headerKeys[] = {"Origin", "Host", "Cookie", "X-CSRF-Token"};
-  server_.collectHeaders(headerKeys, 4);
+  static const char* const headerKeys[] = {
+      "Origin", "Host", "Cookie", "X-CSRF-Token", "Authorization"};
+  server_.collectHeaders(headerKeys, 5);
 
   server_.on("/", HTTP_GET, [this]{ if (auth()) handleRoot(); });
   server_.on("/api/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
@@ -1355,6 +1382,35 @@ void WebUi::handleTrack() {
   server_.send(200, "application/json", j);
 }
 
+
+static void auditConfigChange(const RuntimeConfig& previous,
+                              const RuntimeConfig& current,
+                              const char* reason) {
+  if (!storage.ready()) return;
+  SpiLock spiLock(pdMS_TO_TICKS(50));
+  if (!spiLock.ok()) return;
+  if (!SD.exists("/LOG")) (void)SD.mkdir("/LOG");
+  const char* path = "/LOG/CONFIG-AUDIT.LOG";
+  File f = SD.open(path, FILE_APPEND);
+  if (!f) return;
+  if (f.size() >= Config::CONFIG_AUDIT_LOG_ROTATE_BYTES) {
+    f.close();
+    const char* old = "/LOG/CONFIG-AUDIT.1.LOG";
+    if (SD.exists(old)) SD.remove(old);
+    if (SD.exists(path)) SD.rename(path, old);
+    f = SD.open(path, FILE_APPEND);
+  }
+  if (!f) return;
+  StateLock lock(gState);
+  const uint64_t ts = lock.ok() && gState.gps.timeValid ? gState.gps.utcEpoch : millis();
+  f.printf("%llu,%s,freq=%.3f,bw=%.1f,sf=%u,pwr=%d,volume=%u,audio=%u,reason=%s\n",
+           static_cast<unsigned long long>(ts), current.callsign.c_str(),
+           current.loraFreqMHz, current.loraBwKHz,
+           current.loraSf, current.loraPowerDbm, current.volume,
+           current.audioRecordSource, reason ? reason : "web");
+  f.close();
+}
+
 void WebUi::handleConfig() {
   if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
   RuntimeConfig candidate = gConfig;
@@ -1455,8 +1511,8 @@ void WebUi::handleConfig() {
       candidate.loraKeyHex.length() != 32 ||
       candidate.apPassword.length() > 63 || candidate.webPassword.length() > 63 ||
       candidate.apSsid.isEmpty() || candidate.webUser.isEmpty() ||
-      candidate.webPassword.length() < 8 || candidate.apPassword.length() < 8 ||
-      candidate.apPassword == candidate.webPassword) {
+      candidate.apPassword.length() < 8 || !candidate.webPasswordConfigured() ||
+      (!candidate.webPassword.isEmpty() && candidate.apPassword == candidate.webPassword)) {
     server_.send(400, "text/plain", "invalid configuration");
     return;
   }
@@ -1487,6 +1543,7 @@ void WebUi::handleConfig() {
     return;
   }
 
+  auditConfigChange(previous, gConfig, "web");
   server_.send(200, "text/plain",
                "Configuration saved; audio source updated; WiFi credential changes apply after reboot");
 }

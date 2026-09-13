@@ -16,13 +16,17 @@ struct RuntimeConfig {
   String apSsid;
   String apPassword;
   String webUser;
-  String webPassword;
+  String webPassword;                 // runtime-only plaintext; never persisted
+  String webPasswordSaltHex;           // persisted credential salt
+  String webPasswordHashHex;           // persisted credential hash
 
   void load();
   bool save() const;
   bool setRadio(float freqMHz, float bwKHz, uint8_t sf, uint8_t cr,
                 uint8_t syncWord, int8_t powerDbm);
   bool validRadio() const;
+  bool webPasswordConfigured() const;
+  bool verifyWebPassword(const String& password) const;
 };
 
 extern RuntimeConfig gConfig;

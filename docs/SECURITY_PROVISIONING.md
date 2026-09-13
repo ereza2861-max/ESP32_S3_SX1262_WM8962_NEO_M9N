@@ -40,3 +40,15 @@ continues to accept a configured AES-128 key and protects it at rest through
 NVS/flash encryption. A coordinated rekey protocol should distribute a new
 key to all peers before activating it. Do not implement time-based unilateral
 rotation.
+
+
+## WebUI credential storage
+
+The legacy `webpass` NVS key is migrated to a per-device salted iterative SHA-256
+verifier (`websalt` + `webph`) on the first load/save. The cleartext password remains
+in RAM only when it is supplied/configured at runtime because HTTP Basic authentication
+requires the password for verification. This is **not** transport encryption.
+
+For production, pair this with the Secure Boot/flash-encryption provisioning flow and
+replace plaintext HTTP with a TLS-capable server/certificate policy before exposing the
+WebUI beyond a trusted local link.
