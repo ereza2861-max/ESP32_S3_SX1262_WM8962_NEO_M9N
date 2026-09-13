@@ -1,5 +1,7 @@
 # FieldRadio — ESP32-S3-WROOM-1 firmware
 
+Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
+
 Firmware baru ini ditujukan untuk PCB yang diberikan:
 - ESP32-S3-WROOM-1
 - SX1262

@@ -2042,7 +2042,7 @@ bool LoRaManager::processPendingTx() {
           const uint32_t backoff = Config::LORA_LBT_BACKOFF_MIN_MS +
               (span ? (esp_random() % (span + 1U)) : 0U);
           pendingTx_.nextAttemptMs = millis() + backoff;
-          // CAD leaves the SX127x in standby; restore RX while waiting.
+          // CAD leaves the SX1262 in standby; restore RX while waiting.
           rxSt = radio_.startReceive();
           if (rxSt != RADIOLIB_ERR_NONE) {
             pendingTx_.active = false;

@@ -1,5 +1,7 @@
 # FieldRadio Rev B — LoRa Routing Validation Test Matrix
 
+Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
+
 ## Tujuan
 
 Membuktikan sebelum flashing ke ESP32-S3-WROOM-1 bahwa mekanisme:
