@@ -44,6 +44,7 @@ private:
   bool ready_ = false;
   uint32_t lastRecoveryMs_ = 0;
   SemaphoreHandle_t mutex_ = nullptr;
+  SemaphoreHandle_t seqMutex_ = nullptr;
   static LoRaManager* instance_;
   static void onDio1();
   struct ForwardPacket {
@@ -110,6 +111,8 @@ private:
   uint16_t lastVoiceRxSequence_ = 0;
   bool haveVoiceRxSequence_ = false;
   uint16_t txSequence_ = 0;
+  uint32_t txSequenceAbsolute_ = 1;
+  uint32_t txSequenceReservedUntil_ = 0;
   uint32_t sourceId_ = 0;
   struct TxQueueEntry {
     bool used = false;
@@ -266,6 +269,7 @@ private:
                      size_t capacity, size_t& len);
   bool loadKey(uint8_t key[16]) const;
   bool reserveTxSequenceBlock();
+  bool nextTxSequence(uint16_t& seq);
   bool acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec = 0);
   int8_t effectiveTxPowerDbm() const;
   static uint16_t crc16(const uint8_t* data, size_t len);

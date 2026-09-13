@@ -828,12 +828,27 @@ void WebUi::handleMessageReply() {
       text.length() > Config::LORA_MAX_PACKET - 16) {
     server_.send(400, "text/plain", "invalid reply"); return;
   }
-  for (size_t i = 0; i < target.length(); ++i)
+
+  // Parse the source ID as an unsigned 32-bit value. String::toInt() is
+  // signed on ESP32 and would reject/overflow valid IDs above INT32_MAX.
+  uint32_t destination = 0;
+  for (size_t i = 0; i < target.length(); ++i) {
     if (target[i] < '0' || target[i] > '9') {
       server_.send(400, "text/plain", "invalid source"); return;
     }
-  String reply = "REPLY," + target + "," + text;
-  const bool ok = lora.sendText(reply);
+    const uint32_t digit = static_cast<uint32_t>(target[i] - '0');
+    if (destination > (UINT32_MAX - digit) / 10U) {
+      server_.send(400, "text/plain", "invalid source"); return;
+    }
+    destination = destination * 10U + digit;
+  }
+  if (destination == 0) {
+    server_.send(400, "text/plain", "invalid source"); return;
+  }
+
+  // Use the protocol's destination field so the reply is unicast to the
+  // selected source rather than broadcasting a "REPLY,<id>,..." text packet.
+  const bool ok = lora.sendTextTo(destination, text);
   server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
 }
 

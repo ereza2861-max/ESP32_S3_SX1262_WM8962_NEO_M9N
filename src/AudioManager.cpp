@@ -296,7 +296,17 @@ bool AudioManager::startRecording() {
   String path;
   String error;
   if (allowed) {
-    if (!storage.prepareRecordingSpace(Config::RECORD_MIN_FREE_BYTES)) {
+    // Reserve enough headroom for the complete maximum-length PCM WAV, not
+    // merely the minimum free-space margin. This prevents a recording from
+    // starting successfully and then failing part-way through when the SD
+    // card cannot hold the configured maximum segment.
+    constexpr uint64_t maxPcmBytes =
+        static_cast<uint64_t>(Config::AUDIO_SAMPLE_RATE) *
+        Config::AUDIO_CHANNELS * sizeof(int16_t) *
+        min<uint32_t>(Config::RECORD_SPLIT_SECONDS, Config::RECORD_MAX_SECONDS);
+    const uint32_t requiredBytes = static_cast<uint32_t>(
+        min<uint64_t>(UINT32_MAX - 44U, maxPcmBytes) + 44U);
+    if (!storage.prepareRecordingSpace(requiredBytes)) {
       StateLock lock(gState);
       if (lock.ok()) gState.lastError = "Insufficient SD recording space";
       xSemaphoreGive(mutex_);

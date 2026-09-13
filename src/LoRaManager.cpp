@@ -160,7 +160,7 @@ bool LoRaManager::reserveTxSequenceBlock() {
   if (!prefs.begin("fieldradio", false)) return false;
 
   const uint32_t storedHighWater = prefs.getUInt("txseq_hi", 0);
-  if (storedHighWater > 0xFFFFFF00UL) {
+  if (storedHighWater > UINT32_MAX - Config::LORA_TX_SEQUENCE_RESERVATION) {
     prefs.end();
     return false;
   }
@@ -171,8 +171,28 @@ bool LoRaManager::reserveTxSequenceBlock() {
   }
   prefs.end();
 
+  txSequenceAbsolute_ = static_cast<uint32_t>(storedHighWater) + 1U;
+  txSequenceReservedUntil_ = newHighWater;
   txSequence_ = static_cast<uint16_t>(storedHighWater & 0xFFFFU);
   return true;
+}
+
+bool LoRaManager::nextTxSequence(uint16_t& seq) {
+  if (!seqMutex_ || xSemaphoreTake(seqMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
+
+  bool ok = txSequenceAbsolute_ != 0;
+  if (ok && txSequenceAbsolute_ > txSequenceReservedUntil_)
+    ok = reserveTxSequenceBlock();
+
+  if (ok) {
+    seq = static_cast<uint16_t>(txSequenceAbsolute_ & 0xFFFFU);
+    ++txSequenceAbsolute_;
+    txSequence_ = seq;
+  }
+
+  xSemaphoreGive(seqMutex_);
+  return ok;
 }
 
 int8_t LoRaManager::effectiveTxPowerDbm() const {
@@ -487,7 +507,8 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
   if (text.length() + ROUTE_EXT_BYTES > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 - PACKET_TAG) return false;
   const uint8_t hopIndex = hopOn ? computeHopIndex(hopFrame_) : 0;
   const uint32_t epochSec = currentEpochSec();
-  const uint16_t seq = ++txSequence_;
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return false;
   uint8_t routed[Config::LORA_MAX_PACKET] = {};
   const size_t routedLen = addRouteExtension(
       reinterpret_cast<const uint8_t*>(text.c_str()), text.length(),
@@ -1337,7 +1358,8 @@ bool LoRaManager::sendTextAck(uint16_t ackedSeq, uint32_t ackedSourceId, uint8_t
   payload[0] = static_cast<uint8_t>(ackedSeq & 0xFF);
   payload[1] = static_cast<uint8_t>(ackedSeq >> 8);
   memcpy(payload + 2, &ackedSourceId, sizeof(ackedSourceId));
-  const uint16_t seq = ++txSequence_;
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return false;
   uint8_t routed[Config::LORA_MAX_PACKET] = {};
   const size_t routedLen = addRouteExtension(
       payload, sizeof(payload), ackedSourceId, 0, routed, sizeof(routed));
@@ -1400,7 +1422,8 @@ bool LoRaManager::sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId) {
   const size_t routedLen = addRouteExtension(
       payload, sizeof(payload), ackedSourceId, 0, routed, sizeof(routed));
   String packet;
-  const uint16_t seq = ++txSequence_;
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return false;
   if (!routedLen ||
       !encryptPacket(routed, routedLen, Config::LORA_TYPE_SOS_ACK, seq, packet))
     return false;
@@ -1410,6 +1433,7 @@ bool LoRaManager::sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId) {
 bool LoRaManager::begin() {
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
+  seqMutex_ = xSemaphoreCreateMutex();
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_ = sourceIdFromCallsign(gConfig.callsign);
@@ -1424,7 +1448,7 @@ bool LoRaManager::begin() {
       sosSentMs_ = millis() - min<uint32_t>(rtcRadioState.sosElapsedMs, 0x7FFFFFFFU);
     }
   }
-  if (!mutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
+  if (!mutex_ || !seqMutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
   (void)loadForwardQueue();
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
@@ -2153,7 +2177,8 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     packet = text;
   } else {
     const uint8_t packetType = Config::LORA_TYPE_TEXT;
-    const uint16_t seq = ++txSequence_;
+    uint16_t seq = 0;
+    if (!nextTxSequence(seq)) return false;
     uint8_t routed[Config::LORA_MAX_PACKET] = {};
     const size_t routedLen = addRouteExtension(
         reinterpret_cast<const uint8_t*>(text.c_str()), text.length(), 0, 0,
@@ -2224,7 +2249,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       if (ok) gState.txPackets++;
     }
   }
-  if (ok) logPacket(true, 0, static_cast<uint16_t>(txSequence_ - 1), sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
+  if (ok) logPacket(true, 0, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
   xSemaphoreGive(mutex_);
   return ok;
 }
@@ -2294,7 +2319,9 @@ bool LoRaManager::sendTextTo(uint32_t destination, const String& text) {
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "Text transmitted; ACK not received";
   }
-  return true;
+  // This API waits for the ACK above, so report the actual delivery result
+  // instead of reporting success merely because the RF transmission started.
+  return textAcked_;
 }
 
 bool LoRaManager::sendVoiceFrame() {
@@ -2365,7 +2392,8 @@ bool LoRaManager::sendVoiceAck(uint16_t ackedSeq, uint32_t ackedSourceId,
   payload[14] = Config::LORA_VOICE_WINDOW_SIZE;
   payload[15] = static_cast<uint8_t>(ackedSeq == voiceRxAckBase_ ? 1U : 0U);
 
-  const uint16_t seq = ++txSequence_;
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return false;
   uint8_t routed[Config::LORA_MAX_PACKET] = {};
   const size_t routedLen = addRouteExtension(
       payload, sizeof(payload), ackedSourceId, 0, routed, sizeof(routed));
@@ -2539,7 +2567,8 @@ void LoRaManager::serviceNeighborBeacon() {
   memcpy(payload + 2, &sourceId_, 4);
   uint16_t uptime10 = static_cast<uint16_t>(min<uint32_t>(65535U, now / 1000U));
   memcpy(payload + 6, &uptime10, 2);
-  const uint16_t seq = ++txSequence_;
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return;
   String packet;
   if (encryptPacket(payload, sizeof(payload), Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
     if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
@@ -2604,7 +2633,8 @@ bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination)
     payload[4] = index; payload[5] = count;
     payload[6] = static_cast<uint8_t>(text.length() & 0xFF); payload[7] = static_cast<uint8_t>(text.length() >> 8);
     memcpy(payload + Config::LORA_FRAGMENT_HEADER_BYTES, text.c_str() + offset, chunkLen);
-    const uint16_t seq = ++txSequence_;
+    uint16_t seq = 0;
+    if (!nextTxSequence(seq)) return false;
     uint8_t routed[Config::LORA_MAX_PACKET] = {};
     const size_t routedLen = addRouteExtension(
         payload, Config::LORA_FRAGMENT_HEADER_BYTES + chunkLen, destination, 0,

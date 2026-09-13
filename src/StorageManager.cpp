@@ -136,7 +136,6 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
     if (!dir || !dir.isDirectory()) return false;
 
     String oldest;
-    uint32_t oldestSize = 0;
     for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
       if (!f.isDirectory()) {
         String name = f.name();
@@ -149,7 +148,6 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
             name.length() > 5 &&
             (oldest.isEmpty() || name.compareTo(oldest) < 0)) {
           oldest = name;
-          oldestSize = static_cast<uint32_t>(f.size());
         }
       }
       f.close();
@@ -157,7 +155,11 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
     dir.close();
     if (oldest.isEmpty()) return false;
     if (!SD.remove(oldest)) return false;
-    effectiveUsed = effectiveUsed > oldestSize ? effectiveUsed - oldestSize : 0;
+    // FAT allocation is cluster-based, so subtracting the logical file size
+    // from SD.usedBytes() can underestimate the actual space reclaimed.
+    const uint64_t refreshedUsed = SD.usedBytes();
+    if (refreshedUsed > total) return false;
+    effectiveUsed = refreshedUsed;
   }
   return true;
 }

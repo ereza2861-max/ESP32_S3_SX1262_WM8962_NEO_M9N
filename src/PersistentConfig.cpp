@@ -219,7 +219,8 @@ bool RuntimeConfig::save() const {
       !isfinite(batteryCalibration) ||
       batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
 !validCallsign(callsign) || !validHexKey(loraKeyHex) || apSsid.isEmpty() || apSsid.length() > 32 ||
-      apPassword.length() > 63 || webUser.isEmpty() || webUser.length() > 32 ||
+      apPassword.length() < 8 || apPassword.length() > 63 ||
+      webUser.isEmpty() || webUser.length() > 32 ||
       !webPasswordConfigured())
     return false;
 
