@@ -112,5 +112,18 @@ bring-up production-final, verify on the PCB:
 - BCLK is approximately 1.4112 MHz and LRCLK is 44.1 kHz.
 - The final headphone load is within the WM8962 headphone-driver limits.
 
-The patch intentionally does not guess the speaker impedance or Class-D
-network because the supplied repository does not establish that hardware.
+The patch intentionally does not enable the speaker Class-D path by default.
+Its compile-time contract lives in `include/Config.h`:
+`CLASS_D_ENABLED`, `CLASS_D_OUTPUT_MODE`, `CLASS_D_MONO`,
+`CLASS_D_SPEAKER_IMPEDANCE_OHMS`, `CLASS_D_EXPECTED_SPKVDD_MV`,
+`CLASS_D_BOOST_LEVEL`, and `CLASS_D_MAX_SPKVDD_CURRENT_MA`.
+The branch is compile-time (`if constexpr`) so a disabled Class-D build emits
+no speaker activation path. When enabled, the firmware rejects single-ended
+Class-D, accepts only 8 ohm stereo or 4 ohm mono, and requires an explicitly
+declared 3.3 V or 5.0 V SPKVDD hardware contract. The current limit is an
+engineering-budget guard only; the firmware cannot measure or regulate SPKVDD
+current. The WM8962 datasheet defines the Class-D speaker output as BTL, with
+8 ohm stereo and 4 ohm mono configurations.
+
+Do not set `CLASS_D_ENABLED=true` until the PCB/netlist proves SPKVDD,
+SPKGND, SPKOUTLP/LN/RP/RN, the speaker load, and the required output network.

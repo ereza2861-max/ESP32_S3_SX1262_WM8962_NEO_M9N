@@ -148,6 +148,24 @@ constexpr uint8_t AUDIO_SOURCE_WM8962_MIC = 0;
 constexpr uint8_t AUDIO_SOURCE_LINEIN2 = 1;
 constexpr uint8_t AUDIO_SOURCE_LINEIN3 = 2;
 constexpr uint8_t AUDIO_SOURCE_USB = 3;
+
+// WM8962 Class-D speaker contract. These are compile-time hardware gates:
+// SPKVDD itself is supplied by the PCB and is not software-programmable.
+// The WM8962 Class-D output is BTL only: stereo mode is specified for 8 ohm
+// loads, while mono mode is specified for a 4 ohm load. "Single-ended" is
+// intentionally rejected when Class-D is enabled.
+enum class ClassDOutputMode : uint8_t {
+  BTL = 0,
+  SingleEnded = 1,
+};
+constexpr bool CLASS_D_ENABLED = false;
+constexpr ClassDOutputMode CLASS_D_OUTPUT_MODE = ClassDOutputMode::BTL;
+constexpr bool CLASS_D_MONO = false;
+constexpr uint8_t CLASS_D_SPEAKER_IMPEDANCE_OHMS = 8;
+constexpr uint16_t CLASS_D_EXPECTED_SPKVDD_MV = 5000;
+constexpr uint8_t CLASS_D_BOOST_LEVEL = 0; // 0..7 => 0,1.5,...,12 dB
+constexpr uint16_t CLASS_D_MAX_SPKVDD_CURRENT_MA = 0; // 0 = not specified/limited by firmware
+
 constexpr size_t USB_RECORD_BUFFER_BYTES = 32768;
 constexpr size_t USB_MIC_BUFFER_BYTES = 16384;
 constexpr size_t USB_AEC_REFERENCE_BYTES = 65536;

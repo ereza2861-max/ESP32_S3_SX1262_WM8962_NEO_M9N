@@ -21,6 +21,7 @@ private:
   bool updateReg(uint16_t reg, uint16_t mask, uint16_t value);
   bool configureClock44k1();
   bool configureAnaloguePath();
+  bool configureClassDSpeaker();
   bool runHeadphonePowerUp();
   bool runInputDcServo();
   bool waitForBits(uint16_t reg, uint16_t mask, uint16_t expected,

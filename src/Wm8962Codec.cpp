@@ -31,6 +31,10 @@ constexpr uint16_t R_INPUT_PGA_L = 0x25;
 constexpr uint16_t R_INPUT_PGA_R = 0x26;
 constexpr uint16_t R_HP_L = 0x02;
 constexpr uint16_t R_HP_R = 0x03;
+constexpr uint16_t R_SPKOUT_L = 0x28;
+constexpr uint16_t R_SPKOUT_R = 0x29;
+constexpr uint16_t R_CLASSD_1 = 0x31;
+constexpr uint16_t R_CLASSD_2 = 0x33;
 constexpr uint16_t R_DAC_L = 0x0A;
 constexpr uint16_t R_DAC_R = 0x0B;
 constexpr uint16_t R_FLL_1 = 0x9B;
@@ -65,6 +69,10 @@ constexpr uint16_t CLOCK2_BCLK_DIV_8 = 0x0006;
 constexpr uint16_t AIF2_BCLK_LRCLK_32 = 32;
 constexpr uint16_t DAC_MUTE = 0x0008;
 constexpr uint16_t DAC_MUTE_RAMP = 0x0010;
+constexpr uint16_t CLASSD_DAC_MUTE = 0x0010; // R49/R31 bit 4
+constexpr uint16_t SPKOUT_PGA_MUTE = 0x0003;
+constexpr uint16_t SPKOUT_EN = 0x00C0;
+constexpr uint16_t SPK_MONO = 0x0040;
 constexpr uint16_t DAC_UNMUTE_RAMP = 0x0008;
 constexpr uint16_t VOL_VU = 0x0100;
 constexpr uint16_t HP_VOL_MAX = 0x0079;
@@ -161,6 +169,52 @@ bool Wm8962Codec::runInputDcServo() {
   return waitForBits(R_DC_SERVO_6, 0x0600, 0x0600, 120);
 }
 
+bool Wm8962Codec::configureClassDSpeaker() {
+  if constexpr (!Config::CLASS_D_ENABLED) {
+    return true;
+  }
+
+  static_assert(Config::CLASS_D_OUTPUT_MODE == Config::ClassDOutputMode::BTL,
+                "WM8962 Class-D output is BTL; single-ended is unsupported");
+  static_assert(Config::CLASS_D_EXPECTED_SPKVDD_MV == 3300 ||
+                    Config::CLASS_D_EXPECTED_SPKVDD_MV == 5000,
+                "Class-D SPKVDD contract must be 3.3V or 5.0V");
+  static_assert(Config::CLASS_D_BOOST_LEVEL <= 7,
+                "WM8962 CLASSD_VOL must be in the 0..7 range");
+  static_assert(
+      (Config::CLASS_D_MONO && Config::CLASS_D_SPEAKER_IMPEDANCE_OHMS == 4) ||
+      (!Config::CLASS_D_MONO && Config::CLASS_D_SPEAKER_IMPEDANCE_OHMS == 8),
+      "WM8962 Class-D requires 4 ohm mono or 8 ohm stereo");
+  // The speaker PGAs must be powered before the speaker wake sequence.
+  if (!updateReg(R_PWR_2, 0x0018, 0x0018)) return false;
+
+  // Start muted. 0x00..0x2F is the hardware mute range; use -68 dB as the
+  // first non-mute code so a later unmute cannot jump to full scale.
+  if (!writeReg(R_SPKOUT_L, VOL_VU | 0x0030) ||
+      !writeReg(R_SPKOUT_R, VOL_VU | 0x0030))
+    return false;
+
+  const uint16_t classD2 =
+      (Config::CLASS_D_MONO ? SPK_MONO : 0) | Config::CLASS_D_BOOST_LEVEL;
+  if (!writeReg(R_CLASSD_2, classD2)) return false;
+
+  // Speaker wake is the datasheet-defined pop-minimising sequence.
+  if (!writeReg(R_CLASSD_1, SPKOUT_PGA_MUTE | CLASSD_DAC_MUTE)) return false;
+  if (!writeReg(R_WSEQ_CTRL_2, 0x00E8)) return false;
+  delay(2);
+
+  // The wake sequence ends by clearing DAC_MUTE. Keep the codec globally
+  // muted until a valid I2S stream is running.
+  if (!updateReg(R_CLASSD_1, CLASSD_DAC_MUTE | SPKOUT_PGA_MUTE,
+                 CLASSD_DAC_MUTE | SPKOUT_PGA_MUTE))
+    return false;
+
+  uint16_t status = 0;
+  if (!readReg(R_CLASSD_1, status) || (status & SPKOUT_EN) != SPKOUT_EN)
+    return false;
+  return true;
+}
+
 bool Wm8962Codec::configureAnaloguePath() {
   // VMID soft-start and buffered VMID first; use the fast VMID setting only
   // during startup. Normal operation is restored to the 2x50k divider below.
@@ -211,6 +265,7 @@ bool Wm8962Codec::configureI2sMaster(uint32_t sampleRate, uint8_t bitsPerSample)
   // The default headphone power-up sequence is the authoritative pop-free
   // order for VMID, charge pump and DC-servo. Do not manually approximate it.
   if (!runHeadphonePowerUp()) return false;
+  if (!configureClassDSpeaker()) return false;
 
   // Return VMID to the normal 2x50k divider after fast startup.
   if (!updateReg(R_PWR_1, 0x0180, 0x0080)) return false;
@@ -280,7 +335,14 @@ bool Wm8962Codec::setMuted(bool muted) {
   if (!writeReg(R_PWR_2, pwr2)) return false;
 
   // HPOUT_VU commits both channel mute bits atomically.
-  return updateReg(R_HP_L, VOL_VU, VOL_VU);
+  if (!updateReg(R_HP_L, VOL_VU, VOL_VU)) return false;
+
+  if constexpr (Config::CLASS_D_ENABLED) {
+    if (!updateReg(R_CLASSD_1, SPKOUT_PGA_MUTE,
+                   muted ? SPKOUT_PGA_MUTE : 0))
+      return false;
+  }
+  return true;
 }
 
 bool Wm8962Codec::setVolumePercent(uint8_t percent) {
@@ -299,6 +361,12 @@ bool Wm8962Codec::setVolumePercent(uint8_t percent) {
   if (!writeReg(R_HP_R, VOL_VU | hp)) return false;
   if (!writeReg(R_DAC_L, VOL_VU | dac)) return false;
   if (!writeReg(R_DAC_R, VOL_VU | dac)) return false;
+
+  if constexpr (Config::CLASS_D_ENABLED) {
+    if (!writeReg(R_SPKOUT_L, VOL_VU | hp) ||
+        !writeReg(R_SPKOUT_R, VOL_VU | hp))
+      return false;
+  }
   return setMuted(false);
 }
 
