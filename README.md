@@ -1,9 +1,9 @@
-# FieldRadio — ESP32-S3-WROOM-1 firmware
+# FieldRadio — ESP32-S3-WROOM-1-N16R8 firmware
 
 Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
 
 Firmware baru ini ditujukan untuk PCB yang diberikan:
-- ESP32-S3-WROOM-1
+- ESP32-S3-WROOM-1-N16R8 (16 MB Quad SPI flash + 8 MB Octal SPI PSRAM)
 - SX1262
 - WM8962
 - NEO-M9N
@@ -80,7 +80,7 @@ dan level/clock audio tetap harus divalidasi pada PCB final.
 
 ## Flash / partition layout
 
-This variant targets a 16 MiB flash device. The no-OTA partition table allocates the full remaining flash after the bootloader/table region to a single factory application (`0x10000..0xFFFFFF`). PlatformIO is explicitly configured for a 16 MiB flash image and matching maximum application size.
+This variant targets the ESP32-S3-WROOM-1-N16R8 module (16 MiB Quad SPI flash + 8 MiB Octal SPI PSRAM). The no-OTA partition table allocates the full remaining flash after the bootloader/table region to a single factory application (`0x10000..0xFFFFFF`). PlatformIO is explicitly configured for QIO flash + OPI PSRAM, a 16 MiB flash image, and the matching maximum application size. The build is compile-time pinned to this module variant.
 
 ## Build
 

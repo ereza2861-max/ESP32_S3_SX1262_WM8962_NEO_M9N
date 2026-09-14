@@ -1,7 +1,8 @@
 # WM8962 final register-by-register bring-up audit
 
 This audit is aligned with the Cirrus Logic WM8962 Rev 4.4 datasheet. The
-firmware target is 44.1 kHz / 16-bit I2S with the WM8962 as BCLK/LRCLK master,
+firmware target is ESP32-S3-WROOM-1-N16R8 (16 MiB Quad SPI flash + 8 MiB
+Octal SPI PSRAM), with 44.1 kHz / 16-bit I2S with the WM8962 as BCLK/LRCLK master,
 24 MHz MCLK, IN1/IN2/IN3 as documented by `PCB_MAPPING.md`, and headphone
 playback through the direct DAC-to-HPOUT bypass path.
 

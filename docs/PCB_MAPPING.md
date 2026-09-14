@@ -1,6 +1,6 @@
-# PCB mapping source of truth — ESP32-S3-WROOM-1
+# PCB mapping source of truth — ESP32-S3-WROOM-1-N16R8
 
-Mapping berikut adalah target mapping firmware ESP32-S3 dan harus tetap identik dengan `include/BoardConfig.h`. Ini membutuhkan rerouting PCB dari mapping ESP32-WROOM-32E lama.
+Mapping berikut adalah target mapping firmware ESP32-S3-WROOM-1-N16R8 dan harus tetap identik dengan `include/BoardConfig.h`. Ini membutuhkan rerouting PCB dari mapping ESP32-WROOM-32E lama.
 
 - GPIO12/13/11: shared SPI (SCK/MISO/MOSI)
 - GPIO10: SX1262 NSS

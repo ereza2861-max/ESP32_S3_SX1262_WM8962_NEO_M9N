@@ -1,5 +1,7 @@
 # Rev-B feature-gap audit and implementation gates
 
+The firmware target is ESP32-S3-WROOM-1-N16R8 (16 MiB Quad SPI flash + 8 MiB Octal SPI PSRAM).
+
 This patch implements only features that can be made deterministic from the supplied
 firmware and the GPIO contract. It deliberately does **not** claim to implement every
 item in the requested backlog.

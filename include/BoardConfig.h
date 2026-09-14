@@ -1,8 +1,19 @@
 #pragma once
 #include <Arduino.h>
 
+#if !defined(FIELD_RADIO_ESP32_S3_WROOM_1_N16R8)
+#error "This firmware is pinned to ESP32-S3-WROOM-1-N16R8"
+#endif
+#if !defined(BOARD_HAS_PSRAM)
+#error "ESP32-S3-WROOM-1-N16R8 requires PlatformIO PSRAM support"
+#endif
+
 /*
- * Target: ESP32-S3-WROOM-1 + SX1262 + WM8962 + NEO-M9N + microSD.
+ * Target: ESP32-S3-WROOM-1-N16R8 (16 MB Quad Flash + 8 MB Octal PSRAM)
+ *         + SX1262 + WM8962 + NEO-M9N + microSD.
+ *
+ * The PlatformIO environment must configure QIO flash + OPI PSRAM for this
+ * exact module variant. Do not silently substitute an N16R2 or no-PSRAM board.
  *
  * IMPORTANT: this is a new S3 routing map. It is NOT electrically compatible
  * with the old ESP32-WROOM-32E PCB without PCB trace/net changes.

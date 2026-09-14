@@ -4,7 +4,7 @@ Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
 
 ## Tujuan
 
-Membuktikan sebelum flashing ke ESP32-S3-WROOM-1 bahwa mekanisme:
+Membuktikan sebelum flashing ke ESP32-S3-WROOM-1-N16R8 bahwa mekanisme:
 
 - destination / next-hop payload extension
 - ETX + RSSI/SNR route selection
@@ -18,7 +18,7 @@ berjalan sesuai desain pada topologi 2-node, 3-node, dan 4-node.
 
 ## Baseline firmware
 
-Target: ESP32-S3-WROOM-1 + SX1262.
+Target: ESP32-S3-WROOM-1-N16R8 + SX1262.
 
 Nilai konfigurasi yang menjadi baseline:
 
