@@ -2306,12 +2306,17 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     return false;
 
   String packet;
+  uint8_t txType = Config::LORA_TYPE_TEXT;
+  uint16_t txSeq = 0;
+  uint8_t txTtl = Config::LORA_INITIAL_TTL;
   if (alreadyEncrypted) {
     packet = text;
   } else {
     const uint8_t packetType = Config::LORA_TYPE_TEXT;
     uint16_t seq = 0;
     if (!nextTxSequence(seq)) return false;
+    txType = packetType;
+    txSeq = seq;
     uint8_t routed[Config::LORA_MAX_PACKET] = {};
     const size_t routedLen = addRouteExtension(
         reinterpret_cast<const uint8_t*>(text.c_str()), text.length(), 0, 0,
@@ -2322,6 +2327,20 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       if (lock.ok()) gState.lastError = "LoRa encryption/key configuration failed";
       return false;
     }
+  }
+
+  if (alreadyEncrypted) {
+    if (packet.length() < PACKET_HEADER_V2 ||
+        static_cast<uint8_t>(packet[0]) != PACKET_MAGIC)
+      return false;
+    const uint8_t wireVersion = static_cast<uint8_t>(packet[1]);
+    if (wireVersion != Config::LORA_PROTOCOL_VERSION &&
+        wireVersion != LORA_PROTOCOL_VERSION_HOP)
+      return false;
+    txType = static_cast<uint8_t>(packet[2]);
+    txSeq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
+            (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
+    txTtl = static_cast<uint8_t>(packet[13]);
   }
 
   if (Config::LORA_LBT_ENABLED) {
@@ -2391,7 +2410,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       if (ok) gState.txPackets++;
     }
   }
-  if (ok) logPacket(true, 0, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
+  if (ok) logPacket(true, txType, txSeq, sourceId_, 0, 0.0f, txTtl);
   xSemaphoreGive(mutex_);
   if (hoppedPacket) (void)retuneToChannel0();
   return ok;
