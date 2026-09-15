@@ -208,6 +208,7 @@ async function saveCfg(){
   const q=new URLSearchParams({freq:freq.value,bw:bw.value,sf:sf.value,cr:cr.value,
     power:pwr.value,sync:sw.value,callsign:cs.value,volume:vol.value,batcal:bat.value,
     audio_source:audsrc.value});
+  if(key.value)q.set('lora_key',key.value);
   if(aps.value)q.set('ap_password',aps.value);
   if(wp.value)q.set('web_password',wp.value);
   alert(await j('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q}));refresh()
@@ -349,14 +350,17 @@ bool WebUi::sessionValid() {
                            (static_cast<uint32_t>(ip[2]) << 16) |
                            (static_cast<uint32_t>(ip[3]) << 24);
   memcpy(msg, &ipValue, sizeof(ipValue));
-  memcpy(msg + 4, &authWindowStartMs_, sizeof(authWindowStartMs_));
+  memcpy(msg + 4, &sessionIssuedMs_, sizeof(sessionIssuedMs_));
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
                              msg, sizeof(msg), expected, sizeof(expected)) != 0)
     return false;
-  if (memcmp(raw, expected, sizeof(raw)) != 0) return false;
+  uint8_t tokenDiff = 0;
+  for (size_t i = 0; i < sizeof(raw); ++i)
+    tokenDiff |= static_cast<uint8_t>(raw[i] ^ expected[i]);
+  if (tokenDiff != 0) return false;
   return static_cast<int32_t>(millis() - authBlockedUntilMs_) >= 0 &&
-         static_cast<uint32_t>(millis() - authWindowStartMs_) <
+         static_cast<uint32_t>(millis() - sessionIssuedMs_) <
              Config::WEB_SESSION_TIMEOUT_MS;
 }
 
@@ -370,21 +374,21 @@ bool WebUi::csrfValid() {
   return diff == 0;
 }
 
-void WebUi::issueSession() {
+bool WebUi::issueSession() {
   const IPAddress ip = server_.client().remoteIP();
   uint8_t msg[8] = {};
   const uint32_t ipValue = static_cast<uint32_t>(ip[0]) |
                            (static_cast<uint32_t>(ip[1]) << 8) |
                            (static_cast<uint32_t>(ip[2]) << 16) |
                            (static_cast<uint32_t>(ip[3]) << 24);
-  authWindowStartMs_ = millis();
+  sessionIssuedMs_ = millis();
   memcpy(msg, &ipValue, sizeof(ipValue));
-  memcpy(msg + 4, &authWindowStartMs_, sizeof(authWindowStartMs_));
+  memcpy(msg + 4, &sessionIssuedMs_, sizeof(sessionIssuedMs_));
   uint8_t token[32] = {};
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
                              msg, sizeof(msg), token, sizeof(token)) != 0)
-    return;
+    return false;
   String hex;
   hex.reserve(64);
   const char* digits = "0123456789abcdef";
@@ -394,7 +398,6 @@ void WebUi::issueSession() {
   }
   csrfTokenHex_.reserve(sizeof(csrfToken_) * 2);
   csrfTokenHex_ = String();
-  const char* digits = "0123456789abcdef";
   for (uint8_t& b : csrfToken_) {
     b = static_cast<uint8_t>(esp_random() & 0xFFU);
     csrfTokenHex_ += digits[b >> 4];
@@ -405,6 +408,7 @@ void WebUi::issueSession() {
       String(Config::WEB_SESSION_TIMEOUT_MS / 1000) +
       "; HttpOnly; SameSite=Strict");
 
+  return true;
 }
 
 void WebUi::auditAuth(bool success) {
@@ -465,8 +469,8 @@ bool WebUi::auth() {
 
   if (!sessionValid()) {
     if (!basicAuthMatches(server_, gConfig.webUser, gConfig)) {
-      if (now - authWindowStartMs_ >= 60000) {
-        authWindowStartMs_ = now;
+      if (now - authFailureWindowStartMs_ >= 60000) {
+        authFailureWindowStartMs_ = now;
         authFailures_ = 0;
       }
       ++authFailures_;
@@ -479,7 +483,11 @@ bool WebUi::auth() {
       return false;
     }
     authFailures_ = 0;
-    issueSession();
+    if (!issueSession()) {
+      auditAuth(false);
+      server_.send(503, "text/plain", "session initialization failed");
+      return false;
+    }
     auditAuth(true);
   }
   if (server_.method() == HTTP_POST) {

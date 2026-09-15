@@ -23,7 +23,12 @@ public:
   void task();
   bool sendText(const String& text);
   bool sendTextTo(uint32_t destination, const String& text);
-  bool textAcked() const { return textAcked_; }
+  bool textAcked() const {
+    if (!textStateMutex_ || xSemaphoreTake(textStateMutex_, 0) != pdTRUE) return false;
+    const bool value = textAcked_;
+    xSemaphoreGive(textStateMutex_);
+    return value;
+  }
   bool sendSOS();
   bool sendPosition();
   bool cancelSOS();
@@ -45,10 +50,12 @@ private:
   uint32_t lastRecoveryMs_ = 0;
   SemaphoreHandle_t mutex_ = nullptr;
   SemaphoreHandle_t seqMutex_ = nullptr;
+  SemaphoreHandle_t textStateMutex_ = nullptr;
   static LoRaManager* instance_;
   static void onDio1();
   struct ForwardPacket {
     uint8_t type;
+    uint8_t wireVersion = Config::LORA_PROTOCOL_VERSION;
     uint8_t ttl;
     uint16_t seq;
     uint32_t sourceId;
@@ -67,6 +74,9 @@ private:
   bool processPendingTx();
   bool queuePendingTx(const String& packet, uint8_t priority = 0);
   void serviceVoiceAckRetry();
+  bool sosAckPending_ = false;
+  uint16_t sosAckPendingSeq_ = 0;
+  uint32_t sosAckPendingSourceId_ = 0;
   bool voiceAckPending_ = false;
   uint16_t voiceAckPendingSeq_ = 0;
   uint32_t voiceAckPendingSourceId_ = 0;
@@ -123,6 +133,7 @@ private:
   TxQueueEntry txQueue_[TX_QUEUE_DEPTH] = {};
   uint32_t lastNeighborBeaconMs_ = 0;
   bool forwardInFlightActive_ = false;
+  uint32_t forwardInFlightNextHop_ = 0;
   ForwardPacket forwardInFlight_{};
   uint16_t fragmentMessageId_ = 0;
   struct VoiceTxSlot {

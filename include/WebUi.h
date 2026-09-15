@@ -13,7 +13,8 @@ private:
   WebServer& server_;
   bool auth();
   bool sameOrigin();
-  uint32_t authWindowStartMs_ = 0;
+  uint32_t authFailureWindowStartMs_ = 0;
+  uint32_t sessionIssuedMs_ = 0;
   uint8_t authFailures_ = 0;
   uint32_t authBlockedUntilMs_ = 0;
   uint8_t sessionSecret_[32] = {};
@@ -78,7 +79,7 @@ private:
   bool rateLimit(uint32_t& last, uint32_t interval);
   bool sessionValid();
   bool csrfValid();
-  void issueSession();
+  bool issueSession();
   void auditAuth(bool success);
   void handleConfig();
   void handleConfigExport();

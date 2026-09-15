@@ -55,3 +55,7 @@ managed_components/
 *.token
 *.tokens
 .github-token
+
+# Local patch/diff artifacts; do not accidentally commit review patches.
+*.patch
+*.diff

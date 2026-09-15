@@ -274,15 +274,17 @@ static void enterDeepSleep() {
   Serial.println("POWER: entering deep sleep");
   Serial.flush();
 
-  // DIO1 is active-high; PTT/SOS are active-low. ESP32-S3 supports GPIO
-  // wake from deep sleep, so all three physical wake sources remain usable.
+  // esp_sleep_enable_gpio_wakeup() is a light-sleep-only API on ESP32-S3.
+  // For deep sleep, only RTC-capable GPIOs can be used. On this board DIO1
+  // (GPIO2) is RTC-capable; PTT (GPIO21) and SOS (GPIO47) are not, so they
+  // cannot be deep-sleep wake sources without a hardware pin change.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-  if (Board::LORA_DIO1 >= 0)
-    (void)esp_sleep_enable_gpio_wakeup(1ULL << Board::LORA_DIO1, ESP_GPIO_WAKEUP_GPIO_HIGH);
-  if (Board::BTN_PTT >= 0)
-    (void)esp_sleep_enable_gpio_wakeup(1ULL << Board::BTN_PTT, ESP_GPIO_WAKEUP_GPIO_LOW);
-  if (Board::BTN_SOS >= 0)
-    (void)esp_sleep_enable_gpio_wakeup(1ULL << Board::BTN_SOS, ESP_GPIO_WAKEUP_GPIO_LOW);
+  if (Board::LORA_DIO1 >= 0) {
+    const esp_err_t wakeErr = esp_deep_sleep_enable_gpio_wakeup(
+        1ULL << Board::LORA_DIO1, ESP_GPIO_WAKEUP_GPIO_HIGH);
+    if (wakeErr != ESP_OK)
+      Serial.printf("POWER: failed to configure DIO1 wake: %d\\n", wakeErr);
+  }
 
   lora.prepareForDeepSleep();
   (void)audio.stopRecording();
@@ -308,7 +310,7 @@ static bool credentialsConfigured() {
   return gConfig.apPassword.length() >= 8 &&
          gConfig.webUser.length() > 0 &&
          gConfig.webPasswordConfigured() &&
-         (gConfig.webPassword.isEmpty() || gConfig.apPassword != gConfig.webPassword);
+         !gConfig.verifyWebPassword(gConfig.apPassword);
 }
 
 static void setupWifi() {
