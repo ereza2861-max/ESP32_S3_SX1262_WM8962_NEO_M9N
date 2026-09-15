@@ -295,7 +295,10 @@ static void enterDeepSleep() {
       Serial.printf("POWER: failed to configure EXT1 wake: %d\\n", wakeErr);
   }
 
-  lora.prepareForDeepSleep();
+  if (!lora.prepareForDeepSleep()) {
+    Serial.println("POWER: LoRa duty-cycle RX arm failed; aborting deep sleep");
+    return;
+  }
   (void)audio.stopRecording();
   audio.stopPlayback();
   {

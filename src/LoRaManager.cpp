@@ -2426,7 +2426,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
   return ok;
 }
 
-void LoRaManager::prepareForDeepSleep() {
+bool LoRaManager::prepareForDeepSleep() {
   rtcRadioState.magic = RTC_RADIO_MAGIC;
   rtcRadioState.hopFrame = hopFrame_;
   rtcRadioState.sosSeq = sosSeq_;
@@ -2441,6 +2441,31 @@ void LoRaManager::prepareForDeepSleep() {
       memcpy(rtcRadioState.sosPacket, sosPacket_.c_str(), rtcRadioState.sosPacketLen);
   }
   rtcRadioState.crc = stateCrc(rtcRadioState);
+
+  if (!Config::LORA_RX_DUTY_CYCLE_ENABLED || !ready_ || !mutex_) return ready_;
+
+  // Keep the same lock order used by task(): mutex -> SPI. This prevents
+  // entering deep sleep while another task is using the SX1262.
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+
+  bool armed = false;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(1000));
+    if (spiLock.ok()) {
+      // Drop stale IRQ state before arming duty-cycle RX. A new packet that
+      // arrives after this point is intentionally allowed to wake the MCU.
+      (void)radio_.clearIrqFlags(0xFFFFU);
+      const int16_t st = radio_.startReceiveDutyCycleAuto(
+          Config::LORA_PREAMBLE, Config::LORA_RX_DUTY_MIN_SYMBOLS);
+      armed = (st == RADIOLIB_ERR_NONE);
+      if (armed) {
+        ready_ = true;
+      }
+    }
+  }
+
+  xSemaphoreGive(mutex_);
+  return armed;
 }
 
 bool LoRaManager::applyConfig() {

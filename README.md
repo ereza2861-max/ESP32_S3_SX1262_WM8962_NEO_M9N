@@ -19,12 +19,12 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 | SPI MISO | 13 |
 | SPI MOSI | 11 |
 | SX1262 NSS | 10 |
-| SX1262 RESET | 14 |
-| SX1262 DIO1 / IRQ | 2 |
+| SX1262 RESET | 17 |
+| SX1262 DIO1 / IRQ | 14 |
 | SX1262 BUSY | 15 |
-| microSD CS | 16 |
-| GNSS RX | 18 |
-| GNSS TX | 17 |
+| microSD CS | 38 |
+| GNSS RX | 44 |
+| GNSS TX | 43 |
 | WM8962 SDA | 8 |
 | WM8962 SCL | 9 |
 | WM8962 BCLK | 4 |

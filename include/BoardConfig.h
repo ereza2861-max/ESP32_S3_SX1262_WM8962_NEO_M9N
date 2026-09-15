@@ -37,11 +37,11 @@ constexpr int SPI_MISO = 13;
 constexpr int SPI_MOSI = 11;
 
 constexpr int LORA_CS   = 10; // SX1262 NSS
-constexpr int LORA_RST  = 14;
-constexpr int LORA_DIO1 = 2; // SX1262 DIO1 IRQ
+constexpr int LORA_RST  = 17; // SX1262 RESET; moved off GPIO14
+constexpr int LORA_DIO1 = 14; // SX1262 DIO1 IRQ; RTC-capable, non-strapping
 constexpr int LORA_BUSY = 15; // SX1262 BUSY (mandatory for SX126x)
 
-constexpr int SD_CS = 16;
+constexpr int SD_CS = 38; // microSD CS; secondary SPI chip-select
 
 // NEO-M9N UART
 constexpr int GNSS_RX = 44; // ESP32-S3 RX <- NEO-M9N TX
@@ -57,7 +57,7 @@ constexpr uint32_t GNSS_BAUD = 38400;
 constexpr int BTN_PTT = 21;       // active-high, RTC wake, external pulldown
 constexpr int BTN_SOS = 18;       // active-high, RTC wake, external pulldown
 constexpr int BATTERY_ADC = 1;    // battery divider ADC input
-constexpr int BUZZER = 38;        // active-high buzzer; passive buzzer needs PWM hardware
+constexpr int BUZZER = 47;        // active-high buzzer; passive buzzer needs PWM hardware
 constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
 constexpr int HAPTIC = 40;        // active-high haptic driver enable
 constexpr int LED_CHARGING = 41;  // charging-status LED; driven only from charger heuristic

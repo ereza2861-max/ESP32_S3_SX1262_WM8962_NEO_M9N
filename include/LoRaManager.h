@@ -35,7 +35,9 @@ public:
   bool manualTune(float freqMHz);
   bool sendVoiceFrame();
   bool applyConfig();
-  void prepareForDeepSleep();
+  // Arms SX1262 duty-cycle RX before MCU deep sleep. Returns false if the
+  // radio cannot be armed safely; caller must not enter deep sleep then.
+  bool prepareForDeepSleep();
   bool scannerStart(uint8_t mode, uint16_t dwellMs);
   bool scannerStop();
   bool scannerIsActive() const;

@@ -4,12 +4,12 @@ Mapping berikut adalah target mapping firmware ESP32-S3-WROOM-1-N16R8 dan harus 
 
 - GPIO12/13/11: shared SPI (SCK/MISO/MOSI)
 - GPIO10: SX1262 NSS
-- GPIO14: SX1262 RESET
-- GPIO2: SX1262 DIO1 / IRQ (direct, active-high)
+- GPIO17: SX1262 RESET
+- GPIO14: SX1262 DIO1 / IRQ (direct, active-high, RTC-capable)
 - GPIO18: SOS button, active-high RTC wake input
 - GPIO21: PTT button, active-high RTC wake input
 - GPIO15: SX1262 BUSY (mandatory)
-- GPIO16: microSD CS
+- GPIO38: microSD CS
 - GPIO8/9: WM8962 I2C
 - GPIO4: WM8962 BCLK
 - GPIO5: WM8962 LRCLK
@@ -58,16 +58,17 @@ Do not enable speaker routing until the final schematic/netlist proves `SPKOUTL/
 
 ## Deep-sleep wake contract
 
-ESP32-S3 deep-sleep wake is configured with EXT1/ANY_HIGH on GPIO2 (SX1262 DIO1),
-GPIO21 (PTT), and GPIO18 (SOS). ESP32-S3 RTC deep-sleep wake GPIOs are GPIO0..21;
-GPIO47 is therefore not a valid deep-sleep GPIO wake source. The button inputs
-must have external bias because internal GPIO pulls are not relied upon while
-the RTC power domain is reduced.
+ESP32-S3 deep-sleep wake is configured with EXT1/ANY_HIGH on GPIO14 (SX1262 DIO1),
+GPIO21 (PTT), and GPIO18 (SOS). GPIO14 is an RTC-capable, non-strapping GPIO.
+The button inputs must have external bias because internal GPIO pulls are not
+relied upon while the RTC power domain is reduced.
 
-SX1262 DIO1 is connected directly to ESP32-S3 GPIO2. No transistor inverter is
+SX1262 DIO1 is connected directly to ESP32-S3 GPIO14. No transistor inverter is
 required: the SX1262 DIO1 interrupt is active-high and the radio/MCU logic are
-3.3 V compatible. The radio must remain powered and in receive mode while the
-MCU enters deep sleep; do not put the SX1262 into standby/sleep if DIO1 is the
-intended wake source. SX1262 packet IRQ status remains asserted until serviced,
-so a received packet can wake the MCU. The PCB should still provide a clean
-local decoupling network for the radio and controlled routing of DIO1.
+3.3 V compatible. The radio remains powered while the MCU enters deep sleep and
+is placed into SX1262 receive duty-cycle mode rather than standby/sleep. A
+received packet asserts DIO1 and wakes the ESP32-S3. The duty-cycle receiver
+requires a sufficiently long transmitter preamble; this firmware uses a
+32-symbol LoRa preamble and RadioLib's automatic duty-cycle timing. The PCB
+must provide continuous radio power, clean local decoupling, and controlled
+routing of DIO1.

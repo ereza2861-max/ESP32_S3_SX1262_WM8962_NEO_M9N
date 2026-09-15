@@ -56,7 +56,11 @@ constexpr uint32_t LORA_TX_TIMEOUT_MS = 5000;
 constexpr uint32_t LORA_DUTY_WINDOW_MS = 3600000UL;
 constexpr uint8_t LORA_DUTY_CYCLE_PERCENT = 1;
 constexpr char LORA_DEFAULT_CALLSIGN[] = "FIELD";
-constexpr uint16_t LORA_PREAMBLE = 8;
+// Deep-sleep RX uses SX1262 receive duty-cycle mode. A longer preamble is
+// required so a duty-cycled receiver can reliably acquire the packet.
+constexpr uint16_t LORA_PREAMBLE = 32;
+constexpr bool LORA_RX_DUTY_CYCLE_ENABLED = true;
+constexpr uint16_t LORA_RX_DUTY_MIN_SYMBOLS = 8;
 constexpr size_t LORA_MAX_PACKET = 220;
 constexpr bool LORA_REQUIRE_ENCRYPTION = true;
 // Listen-Before-Talk: CAD before every TX, with cooperative random backoff.
