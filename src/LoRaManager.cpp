@@ -751,8 +751,11 @@ bool LoRaManager::forwardRateAllowed(uint32_t sourceId, uint8_t type) {
 }
 
 bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
-                                  uint8_t ttl, const uint8_t* payload, size_t len) {
+                                  uint8_t ttl, const uint8_t* payload, size_t len,
+                                  uint8_t wireVersion) {
   if (!forwardQueue_ || !payload || !len || ttl <= 1 ||
+      (wireVersion != Config::LORA_PROTOCOL_VERSION &&
+       wireVersion != LORA_PROTOCOL_VERSION_HOP) ||
       len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG)
     return false;
   if (!forwardRateAllowed(sourceId, type)) return false;
@@ -778,8 +781,7 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
 
   ForwardPacket packet{};
   packet.type = type;
-  packet.wireVersion = wireVersion == LORA_PROTOCOL_VERSION_HOP
-      ? LORA_PROTOCOL_VERSION_HOP : Config::LORA_PROTOCOL_VERSION;
+  packet.wireVersion = wireVersion;
   packet.ttl = static_cast<uint8_t>(ttl - 1);
   packet.seq = seq;
   packet.sourceId = sourceId;
@@ -2750,31 +2752,64 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
   const size_t chunkLen = len - Config::LORA_FRAGMENT_HEADER_BYTES;
   const size_t offset = static_cast<size_t>(index) * chunkMax;
   if (chunkLen == 0 || offset + chunkLen > totalLen) return false;
-  if (!fragmentRx_.active || fragmentRx_.sourceId != sourceId || fragmentRx_.messageId != messageId ||
-      fragmentRx_.count != count || fragmentRx_.totalLen != totalLen ||
-      millis() - fragmentRx_.startedMs > 10000UL) {
-    fragmentRx_ = FragmentRxState{};
-    fragmentRx_.active = true;
-    fragmentRx_.sourceId = sourceId;
-    fragmentRx_.messageId = messageId;
-    fragmentRx_.count = count;
-    fragmentRx_.totalLen = totalLen;
-    fragmentRx_.startedMs = millis();
+  const uint32_t now = millis();
+  FragmentRxState* state = nullptr;
+  FragmentRxState* reusable = nullptr;
+  for (auto& candidate : fragmentRx_) {
+    if (candidate.active && now - candidate.startedMs > 10000UL)
+      candidate = FragmentRxState{};
+    if (candidate.active && candidate.sourceId == sourceId &&
+        candidate.messageId == messageId) {
+      state = &candidate;
+      break;
+    }
+    if (!candidate.active && !reusable) reusable = &candidate;
   }
+  if (!state) {
+    state = reusable;
+    if (!state) {
+      // All slots are busy. Replace the oldest incomplete message rather than
+      // corrupting an arbitrary active reassembly.
+      state = &fragmentRx_[0];
+      for (auto& candidate : fragmentRx_) {
+        if (static_cast<int32_t>(candidate.startedMs - state->startedMs) < 0)
+          state = &candidate;
+      }
+    }
+    *state = FragmentRxState{};
+    state->active = true;
+    state->sourceId = sourceId;
+    state->messageId = messageId;
+    state->count = count;
+    state->totalLen = totalLen;
+    state->startedMs = now;
+  } else if (state->count != count || state->totalLen != totalLen) {
+    // Same (source,messageId) with conflicting authenticated metadata is not a
+    // continuation of the current message; reject it instead of resetting a
+    // valid in-flight reassembly.
+    return false;
+  }
+
   const uint16_t bit = static_cast<uint16_t>(1U << index);
-  if (!(fragmentRx_.receivedMask & bit)) {
-    memcpy(fragmentRx_.data + offset, payload + Config::LORA_FRAGMENT_HEADER_BYTES, chunkLen);
-    fragmentRx_.lengths[index] = static_cast<uint16_t>(chunkLen);
-    fragmentRx_.receivedMask |= bit;
-    fragmentRx_.receivedBytes = static_cast<uint16_t>(fragmentRx_.receivedBytes + chunkLen);
+  if (!(state->receivedMask & bit)) {
+    memcpy(state->data + offset, payload + Config::LORA_FRAGMENT_HEADER_BYTES, chunkLen);
+    state->lengths[index] = static_cast<uint16_t>(chunkLen);
+    state->receivedMask |= bit;
+    state->receivedBytes = static_cast<uint16_t>(state->receivedBytes + chunkLen);
+  } else if (state->lengths[index] != chunkLen ||
+             memcmp(state->data + offset,
+                    payload + Config::LORA_FRAGMENT_HEADER_BYTES, chunkLen) != 0) {
+    // A duplicate fragment must be byte-identical. This catches conflicting
+    // fragment variants without destroying the already authenticated state.
+    return false;
   }
   const uint16_t completeMask = static_cast<uint16_t>((1UL << count) - 1UL);
-  if (fragmentRx_.receivedMask != completeMask || fragmentRx_.receivedBytes != totalLen) return true;
+  if (state->receivedMask != completeMask || state->receivedBytes != totalLen) return true;
   char text[Config::LORA_FRAGMENT_MAX_BYTES + 1] = {};
-  memcpy(text, fragmentRx_.data, totalLen);
+  memcpy(text, state->data, totalLen);
   text[totalLen] = '\0';
   addMessageHistory(sourceId, text);
-  fragmentRx_ = FragmentRxState{};
+  *state = FragmentRxState{};
   return true;
 }
 

@@ -95,7 +95,8 @@ private:
   static uint8_t txPriorityForPacket(const String& packet);
   bool lbtChannelBusy(int16_t scanStatus) const;
   bool enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
-                      uint8_t ttl, const uint8_t* payload, size_t len);
+                      uint8_t ttl, const uint8_t* payload, size_t len,
+                      uint8_t wireVersion);
   bool seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec = 0);
   static uint32_t hashPayload(const uint8_t* data, size_t len);
   static uint32_t sourceIdFromCallsign(const String& callsign);
@@ -164,7 +165,9 @@ private:
     uint32_t startedMs = 0;
     uint8_t data[Config::LORA_FRAGMENT_MAX_BYTES] = {};
     uint16_t lengths[Config::LORA_FRAGMENT_MAX_COUNT] = {};
-  } fragmentRx_;
+  };
+  static constexpr size_t FRAGMENT_RX_SLOTS = 3;
+  FragmentRxState fragmentRx_[FRAGMENT_RX_SLOTS] = {};
   struct NeighborEntry {
     uint32_t sourceId = 0;
     int16_t rssi = -127;
