@@ -44,15 +44,18 @@ constexpr int LORA_BUSY = 15; // SX1262 BUSY (mandatory for SX126x)
 constexpr int SD_CS = 16;
 
 // NEO-M9N UART
-constexpr int GNSS_RX = 18; // ESP32-S3 RX <- NEO-M9N TX
-constexpr int GNSS_TX = 17; // ESP32-S3 TX -> NEO-M9N RX
+constexpr int GNSS_RX = 44; // ESP32-S3 RX <- NEO-M9N TX
+constexpr int GNSS_TX = 43; // ESP32-S3 TX -> NEO-M9N RX
 constexpr uint32_t GNSS_BAUD = 38400;
 
 // Auxiliary Rev-B controls. These nets MUST be physically routed on the PCB.
-// PTT/SOS remain on dedicated inputs; the new GPIO38..42 block is reserved
-// for the requested buzzer/RGB/haptic/charge/TX indicators.
-constexpr int BTN_PTT = 21;       // active-low, INPUT_PULLUP
-constexpr int BTN_SOS = 47;       // active-low, INPUT_PULLUP
+// PTT/SOS are active-high RTC inputs for deep-sleep wake. Use an external
+// pulldown (47 kOhm recommended) to GND and a normally-open pushbutton to 3V3;
+// add a local 100 nF capacitor from each input to GND for debounce/noise
+// suppression. Do not use an external pullup with active-high logic: that
+// would make the idle state HIGH and invert the requested polarity.
+constexpr int BTN_PTT = 21;       // active-high, RTC wake, external pulldown
+constexpr int BTN_SOS = 18;       // active-high, RTC wake, external pulldown
 constexpr int BATTERY_ADC = 1;    // battery divider ADC input
 constexpr int BUZZER = 38;        // active-high buzzer; passive buzzer needs PWM hardware
 constexpr int LED_RGB = 39;       // one-wire/addressable RGB data

@@ -467,6 +467,8 @@ bool AudioManager::setRecordSource(uint8_t source) {
     return false;
   }
   recordSource_ = source;
+  captureUsbRecord_ = false;
+  captureWm8962Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC;
   if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
   if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
 
@@ -793,7 +795,10 @@ bool AudioManager::stopRecording() {
   bool ok = true;
   if (recording) {
     captureUsbRecord_ = false;
-    captureWm8962Mic_ = false;
+    // Keep WM8962 microphone capture available to the USB input endpoint
+    // after recording stops. The capture flag is tied to the selected source,
+    // not to the SD recording state.
+    captureWm8962Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC;
     if (i2sMutex_ &&
         xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
       xSemaphoreGive(mutex_);
@@ -935,7 +940,8 @@ bool AudioManager::setAec(bool enabled) {
 }
 
 bool AudioManager::setVox(bool enabled, float threshold, uint32_t hangMs) {
-  if (threshold < 0.005f || threshold > 1.0f || hangMs > 10000) return false;
+  if (threshold < 0.005f || threshold > 1.0f ||
+      hangMs < 50U || hangMs > 10000U) return false;
   if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
   voxEnabled_ = enabled;
   voxThreshold_ = threshold;
@@ -950,7 +956,8 @@ bool AudioManager::setVox(bool enabled, float threshold, uint32_t hangMs) {
 
 bool AudioManager::openPlaybackDecoder(const String& path) {
   closePlaybackDecoder();
-  const String upper = path;
+  String upper = path;
+  upper.toUpperCase();
   esp_audio_simple_dec_type_t type = ESP_AUDIO_SIMPLE_DEC_TYPE_NONE;
   if (upper.endsWith(".MP3")) type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
   else if (upper.endsWith(".OPUS")) type = ESP_AUDIO_SIMPLE_DEC_TYPE_OGG;
@@ -1178,10 +1185,16 @@ bool AudioManager::playNextQueued() {
 }
 
 bool AudioManager::playFile(const String& path) {
+  const bool wav = path.length() >= 4 &&
+                   path.substring(path.length() - 4).equalsIgnoreCase(".WAV");
+  const bool mp3 = path.length() >= 4 &&
+                   path.substring(path.length() - 4).equalsIgnoreCase(".MP3");
+  const bool opus = path.length() >= 5 &&
+                    path.substring(path.length() - 5).equalsIgnoreCase(".OPUS");
   if (!initialized_ || !mutex_ || path.length() > Config::MAX_PATH ||
       path.indexOf("..") >= 0 || path.indexOf('\\') >= 0 || path.indexOf('\0') >= 0 ||
       !path.startsWith("/REC/") || path.lastIndexOf('/') != 4 ||
-      (!path.endsWith(".WAV") && !path.endsWith(".MP3") && !path.endsWith(".OPUS")) ||
+      (!wav && !mp3 && !opus) ||
       xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
 
   bool allowed = false;
@@ -1216,7 +1229,7 @@ bool AudioManager::playFile(const String& path) {
     if (spiLock.ok()) {
       playFile_ = SD.open(path, FILE_READ);
       opened = static_cast<bool>(playFile_);
-      if (opened && path.endsWith(".WAV")) {
+      if (opened && wav) {
         /* WAV parser in the codec component accepts PCM and IMA-ADPCM. */
         if (!openPlaybackDecoder(path)) {
           playFile_.close();
@@ -1521,6 +1534,26 @@ void AudioManager::task() {
     rec = gState.recording;
   }
   if (!rec) {
+    if (recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC &&
+        captureWm8962Mic_ && !playing_ && usbMicBuffer_ &&
+        xStreamBufferSpacesAvailable(usbMicBuffer_) >= Config::AUDIO_IO_BYTES) {
+      uint8_t micBuffer[Config::AUDIO_IO_BYTES];
+      size_t micGot = 0;
+      bool i2sLocked = i2sMutex_ &&
+                       xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(5)) == pdTRUE;
+      const esp_err_t micErr = i2sLocked
+          ? i2s_read(AUDIO_I2S_PORT, micBuffer, sizeof(micBuffer), &micGot,
+                     pdMS_TO_TICKS(5))
+          : ESP_ERR_TIMEOUT;
+      if (i2sLocked) xSemaphoreGive(i2sMutex_);
+      if (micErr == ESP_OK && micGot > 0) {
+        updateAudioLevel(micBuffer, micGot);
+        if (xStreamBufferSend(usbMicBuffer_, micBuffer, micGot, 0) != micGot) {
+          StateLock lock(gState);
+          if (lock.ok()) ++gState.audioDrops;
+        }
+      }
+    }
     if (recordFile_) {
       (void)finalizeWav();
     } else if (!recordPath_.isEmpty()) {

@@ -39,7 +39,10 @@ static bool rawPttButton = false;
 static bool rawSosButton = false;
 static uint32_t pttDebounceMs = 0;
 static uint32_t sosDebounceMs = 0;
+static uint32_t sosPressedSinceMs = 0;
+static bool sosLongPressCancelled = false;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
+constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0;
@@ -274,16 +277,22 @@ static void enterDeepSleep() {
   Serial.println("POWER: entering deep sleep");
   Serial.flush();
 
-  // esp_sleep_enable_gpio_wakeup() is a light-sleep-only API on ESP32-S3.
-  // For deep sleep, only RTC-capable GPIOs can be used. On this board DIO1
-  // (GPIO2) is RTC-capable; PTT (GPIO21) and SOS (GPIO47) are not, so they
-  // cannot be deep-sleep wake sources without a hardware pin change.
+  // ESP32-S3 deep-sleep wake requires RTC-capable GPIOs (GPIO0..21).
+  // Use EXT1/ANY_HIGH so the SX1262 DIO1 IRQ and both active-high physical
+  // buttons can share the same wake domain. The buttons require external
+  // pulldowns because RTC internal pulls are not a substitute for the PCB
+  // bias network while RTC power is reduced.
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-  if (Board::LORA_DIO1 >= 0) {
-    const esp_err_t wakeErr = esp_deep_sleep_enable_gpio_wakeup(
-        1ULL << Board::LORA_DIO1, ESP_GPIO_WAKEUP_GPIO_HIGH);
+  uint64_t wakeMask = 0;
+  if (Board::LORA_DIO1 >= 0) wakeMask |= 1ULL << Board::LORA_DIO1;
+  if (Board::BTN_PTT >= 0) wakeMask |= 1ULL << Board::BTN_PTT;
+  if (Board::BTN_SOS >= 0) wakeMask |= 1ULL << Board::BTN_SOS;
+
+  if (wakeMask != 0) {
+    const esp_err_t wakeErr =
+        esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_HIGH);
     if (wakeErr != ESP_OK)
-      Serial.printf("POWER: failed to configure DIO1 wake: %d\\n", wakeErr);
+      Serial.printf("POWER: failed to configure EXT1 wake: %d\\n", wakeErr);
   }
 
   lora.prepareForDeepSleep();
@@ -371,8 +380,8 @@ static void taskWeb(void*) {
 
 
 static void handlePhysicalControls(uint32_t now) {
-  const bool pttRaw = Board::BTN_PTT >= 0 && digitalRead(Board::BTN_PTT) == LOW;
-  const bool sosRaw = Board::BTN_SOS >= 0 && digitalRead(Board::BTN_SOS) == LOW;
+  const bool pttRaw = Board::BTN_PTT >= 0 && digitalRead(Board::BTN_PTT) == HIGH;
+  const bool sosRaw = Board::BTN_SOS >= 0 && digitalRead(Board::BTN_SOS) == HIGH;
 
   if (pttRaw != rawPttButton) { rawPttButton = pttRaw; pttDebounceMs = now; }
   if (sosRaw != rawSosButton) { rawSosButton = sosRaw; sosDebounceMs = now; }
@@ -399,14 +408,26 @@ static void handlePhysicalControls(uint32_t now) {
 
   if (sosPressed && !lastSosButton) {
     lastSosButton = true;
+    sosPressedSinceMs = now;
+    sosLongPressCancelled = false;
     if (lora.sendSOS()) {
       StateLock lock(gState);
       if (lock.ok()) gState.sos = true;
     }
     pulseAuxiliary(80);
     (void)audio.playTone(1400, 150);
+  } else if (sosPressed && lastSosButton &&
+             !sosLongPressCancelled && sosPressedSinceMs != 0 &&
+             now - sosPressedSinceMs >= SOS_CANCEL_LONG_PRESS_MS) {
+    if (lora.cancelSOS()) {
+      sosLongPressCancelled = true;
+      pulseAuxiliary(120);
+      (void)audio.playTone(700, 120);
+    }
   } else if (!sosPressed) {
     lastSosButton = false;
+    sosPressedSinceMs = 0;
+    sosLongPressCancelled = false;
   }
 
   bool tx = false, rx = false, rec = false;
@@ -516,8 +537,8 @@ void setup() {
   SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
 
 #if defined(ARDUINO_ARCH_ESP32)
-  if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLUP);
-  if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLUP);
+  if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLDOWN);
+  if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
   if (Board::BUZZER >= 0) pinMode(Board::BUZZER, OUTPUT);
   if (Board::HAPTIC >= 0) pinMode(Board::HAPTIC, OUTPUT);
   if (Board::LED_CHARGING >= 0) pinMode(Board::LED_CHARGING, OUTPUT);

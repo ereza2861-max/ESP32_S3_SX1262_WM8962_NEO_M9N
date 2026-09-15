@@ -81,12 +81,19 @@ constexpr uint16_t DAC_VOL_MAX = 0x00FF;
 
 bool Wm8962Codec::writeReg(uint16_t reg, uint16_t value) {
   if (!wire_) return false;
-  wire_->beginTransmission(address_);
-  wire_->write(static_cast<uint8_t>(reg >> 8));
-  wire_->write(static_cast<uint8_t>(reg & 0xFF));
-  wire_->write(static_cast<uint8_t>(value >> 8));
-  wire_->write(static_cast<uint8_t>(value & 0xFF));
-  return wire_->endTransmission() == 0;
+  constexpr uint8_t kMaxAttempts = 3;
+  for (uint8_t attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    wire_->beginTransmission(address_);
+    const bool queued =
+        wire_->write(static_cast<uint8_t>(reg >> 8)) == 1 &&
+        wire_->write(static_cast<uint8_t>(reg & 0xFF)) == 1 &&
+        wire_->write(static_cast<uint8_t>(value >> 8)) == 1 &&
+        wire_->write(static_cast<uint8_t>(value & 0xFF)) == 1;
+    const uint8_t status = queued ? wire_->endTransmission() : 4;
+    if (status == 0) return true;
+    if (attempt + 1 < kMaxAttempts) delay(1);
+  }
+  return false;
 }
 
 bool Wm8962Codec::readReg(uint16_t reg, uint16_t& value) {
@@ -174,17 +181,19 @@ bool Wm8962Codec::configureClassDSpeaker() {
     return true;
   }
 
-  static_assert(Config::CLASS_D_OUTPUT_MODE == Config::ClassDOutputMode::BTL,
-                "WM8962 Class-D output is BTL; single-ended is unsupported");
-  static_assert(Config::CLASS_D_EXPECTED_SPKVDD_MV == 3300 ||
-                    Config::CLASS_D_EXPECTED_SPKVDD_MV == 5000,
-                "Class-D SPKVDD contract must be 3.3V or 5.0V");
-  static_assert(Config::CLASS_D_BOOST_LEVEL <= 7,
-                "WM8962 CLASSD_VOL must be in the 0..7 range");
-  static_assert(
-      (Config::CLASS_D_MONO && Config::CLASS_D_SPEAKER_IMPEDANCE_OHMS == 4) ||
-      (!Config::CLASS_D_MONO && Config::CLASS_D_SPEAKER_IMPEDANCE_OHMS == 8),
-      "WM8962 Class-D requires 4 ohm mono or 8 ohm stereo");
+  if constexpr (Config::CLASS_D_ENABLED) {
+    static_assert(Config::CLASS_D_OUTPUT_MODE == Config::ClassDOutputMode::BTL,
+                  "WM8962 Class-D output is BTL; single-ended is unsupported");
+    static_assert(Config::CLASS_D_EXPECTED_SPKVDD_MV == 3300 ||
+                      Config::CLASS_D_EXPECTED_SPKVDD_MV == 5000,
+                  "Class-D SPKVDD contract must be 3.3V or 5.0V");
+    static_assert(Config::CLASS_D_BOOST_LEVEL <= 7,
+                  "WM8962 CLASSD_VOL must be in the 0..7 range");
+    static_assert(
+        (Config::CLASS_D_MONO && Config::CLASS_D_SPEAKER_IMPEDANCE_OHMS == 4) ||
+        (!Config::CLASS_D_MONO && Config::CLASS_D_SPEAKER_IMPEDANCE_OHMS == 8),
+        "WM8962 Class-D requires 4 ohm mono or 8 ohm stereo");
+  }
   // The speaker PGAs must be powered before the speaker wake sequence.
   if (!updateReg(R_PWR_2, 0x0018, 0x0018)) return false;
 

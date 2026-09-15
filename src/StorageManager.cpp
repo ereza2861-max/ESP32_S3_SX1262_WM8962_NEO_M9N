@@ -129,6 +129,9 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
   if (total == 0 || used > total) return false;
 
   const uint64_t maxUsed = min<uint64_t>(total, Config::RECORD_MAX_TOTAL_BYTES);
+  if (requiredBytes > maxUsed ||
+      static_cast<uint64_t>(Config::RECORD_MIN_FREE_BYTES) + requiredBytes > total)
+    return false;
   uint64_t effectiveUsed = used;
   while (effectiveUsed + requiredBytes > maxUsed ||
          total - effectiveUsed < Config::RECORD_MIN_FREE_BYTES + requiredBytes) {

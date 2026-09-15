@@ -1334,23 +1334,32 @@ bool LoRaManager::scannerIsActive() const {
 
 void LoRaManager::scannerGetResults(ChannelScanResult* results, size_t& count) {
   count = 0;
-  if (!results) return;
+  if (!results || !mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return;
   const size_t n = min(static_cast<size_t>(Config::SCANNER_MAX_CHANNELS),
                        static_cast<size_t>(Config::HOP_CHANNEL_MAX));
   for (size_t i = 0; i < n; ++i) {
-    results[i].freqMHz = scanner_.results[i].freqMHz;
-    results[i].rssiAvgDbm = scanner_.results[i].rssiAvgDbm;
-    results[i].rssiPeakDbm = scanner_.results[i].rssiPeakDbm;
-    results[i].snrDb = scanner_.results[i].snrDb;
-    results[i].occupancyPercent = scanner_.results[i].occupancyPercent;
-    results[i].preambleCount = scanner_.results[i].preambleCount;
-    results[i].timestamp = scanner_.results[i].timestamp;
+    if (scanner_.results[i].timestamp == 0) continue;
+    results[count].freqMHz = scanner_.results[i].freqMHz;
+    results[count].rssiAvgDbm = scanner_.results[i].rssiAvgDbm;
+    results[count].rssiPeakDbm = scanner_.results[i].rssiPeakDbm;
+    results[count].snrDb = scanner_.results[i].snrDb;
+    results[count].occupancyPercent = scanner_.results[i].occupancyPercent;
+    results[count].preambleCount = scanner_.results[i].preambleCount;
+    results[count].timestamp = scanner_.results[i].timestamp;
+    ++count;
   }
-  count = n;
+  xSemaphoreGive(mutex_);
 }
 
 size_t LoRaManager::scannerSuggestBestChannels(uint8_t* channels, size_t capacity) {
-  if (!channels || capacity == 0) return 0;
+  if (!channels || capacity == 0 || !mutex_ ||
+      xSemaphoreTake(mutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return 0;
+  if (!scanner_.active) {
+    xSemaphoreGive(mutex_);
+    return 0;
+  }
   const size_t n = min(capacity, static_cast<size_t>(Config::HOP_CHANNEL_MAX));
   bool used[Config::HOP_CHANNEL_MAX] = {};
   size_t out = 0;
@@ -1373,6 +1382,7 @@ size_t LoRaManager::scannerSuggestBestChannels(uint8_t* channels, size_t capacit
     used[best] = true;
     channels[out++] = static_cast<uint8_t>(best);
   }
+  xSemaphoreGive(mutex_);
   return out;
 }
 
@@ -2474,7 +2484,9 @@ bool LoRaManager::sendTextTo(uint32_t destination, const String& text) {
     return enqueueTextFragments(text, destination);
   if (!transmitHopped(text, Config::LORA_TYPE_TEXT, destination)) return false;
 
-  const uint32_t deadline = millis() + 1500;
+  const uint32_t retryWindow =
+      Config::SOS_REPEAT_MS * (static_cast<uint32_t>(Config::SOS_MAX_RETRIES) + 1U);
+  const uint32_t deadline = millis() + retryWindow + 500U;
   while (static_cast<int32_t>(millis() - deadline) < 0) {
     bool awaiting = false;
     bool acked = false;
@@ -2546,7 +2558,10 @@ bool LoRaManager::sendVoiceFrame() {
   slot->sentMs = millis();
   slot->nextAttemptMs = slot->sentMs + Config::LORA_VOICE_ACK_TIMEOUT_MS;
   slot->peerSourceId = 0;
-  slot->peerQuality = 0;
+  // Seed retry timing from the freshest neighbor metric. A zero-quality value
+  // would otherwise pessimistically force the first retry onto the weak-peer
+  // timeout even when a strong neighbor is already known.
+  slot->peerQuality = bestNeighborQuality();
   ++voiceTxOutstanding_;
 
   {
@@ -2668,11 +2683,14 @@ void LoRaManager::handleVoiceAckPayload(uint32_t ackSenderSourceId,
 
   for (auto& slot : voiceTx_) {
     if (!slot.used || slot.acked) continue;
+    // The sender has at most LORA_VOICE_WINDOW_SIZE outstanding frames, so a
+    // cumulative ACK is only authoritative within that bounded window. This
+    // avoids treating an arbitrarily old sequence as ACKed after uint16 wrap.
     const uint16_t behind = static_cast<uint16_t>(ackBase - slot.seq);
-    bool acked = behind < 0x8000U;
+    bool acked = behind >= 1U && behind <= Config::LORA_VOICE_WINDOW_SIZE;
     if (!acked) {
       const uint16_t ahead = static_cast<uint16_t>(slot.seq - ackBase);
-      acked = ahead >= 1U && ahead <= 8U &&
+      acked = ahead >= 1U && ahead <= Config::LORA_VOICE_WINDOW_SIZE &&
               (ackBitmap & (1U << (ahead - 1U)));
     }
     if (acked) {
@@ -2766,16 +2784,22 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
   const uint16_t totalLen = static_cast<uint16_t>(payload[6]) | (static_cast<uint16_t>(payload[7]) << 8);
   if (count == 0 || count > Config::LORA_FRAGMENT_MAX_COUNT || index >= count ||
       totalLen == 0 || totalLen > Config::LORA_FRAGMENT_MAX_BYTES) return false;
+  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_V2 + PACKET_TAG +
+                                  Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
+    return false;
   const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG -
-                             Config::LORA_FRAGMENT_HEADER_BYTES - ROUTE_EXT_BYTES;
+                          Config::LORA_FRAGMENT_HEADER_BYTES - ROUTE_EXT_BYTES;
   const size_t chunkLen = len - Config::LORA_FRAGMENT_HEADER_BYTES;
+  if (chunkMax == 0 || chunkMax > Config::LORA_MAX_PACKET || chunkLen == 0 ||
+      chunkLen > chunkMax) return false;
   const size_t offset = static_cast<size_t>(index) * chunkMax;
-  if (chunkLen == 0 || offset + chunkLen > totalLen) return false;
+  if (offset >= totalLen || chunkLen > totalLen - offset) return false;
   const uint32_t now = millis();
   FragmentRxState* state = nullptr;
   FragmentRxState* reusable = nullptr;
   for (auto& candidate : fragmentRx_) {
-    if (candidate.active && now - candidate.startedMs > 10000UL)
+    if (candidate.active &&
+        now - candidate.startedMs > Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS)
       candidate = FragmentRxState{};
     if (candidate.active && candidate.sourceId == sourceId &&
         candidate.messageId == messageId) {
@@ -2835,8 +2859,12 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
 bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination) {
   if (text.length() <= Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG) return false;
   if (text.length() > Config::LORA_FRAGMENT_MAX_BYTES) return false;
+  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_V2 + PACKET_TAG +
+                                  Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
+    return false;
   const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG -
-                           Config::LORA_FRAGMENT_HEADER_BYTES - ROUTE_EXT_BYTES;
+                          Config::LORA_FRAGMENT_HEADER_BYTES - ROUTE_EXT_BYTES;
+  if (chunkMax == 0 || chunkMax > Config::LORA_MAX_PACKET) return false;
   const uint8_t count = static_cast<uint8_t>((text.length() + chunkMax - 1) / chunkMax);
   if (count == 0 || count > Config::LORA_FRAGMENT_MAX_COUNT) return false;
   const uint16_t messageId = ++fragmentMessageId_;
@@ -2879,7 +2907,9 @@ bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination)
       return false;
     }
 
-    const uint32_t deadline = millis() + Config::SOS_REPEAT_MS + 500;
+    const uint32_t retryWindow =
+        Config::SOS_REPEAT_MS * (static_cast<uint32_t>(Config::SOS_MAX_RETRIES) + 1U);
+    const uint32_t deadline = millis() + retryWindow + 500U;
     while (static_cast<int32_t>(millis() - deadline) < 0) {
       bool awaiting = false;
       bool acked = false;
@@ -2918,6 +2948,16 @@ bool LoRaManager::sendPosition() {
 }
 
 bool LoRaManager::sendSOS() {
+  // SOS retries are owned by the retry state machine. Reject a second manual
+  // trigger while an SOS is already active to avoid flooding the channel.
+  if (sosAwaitingAck_ && millis() - sosSentMs_ < Config::SOS_REPEAT_MS)
+    return false;
+  {
+    StateLock lock(gState);
+    if (lock.ok() && (gState.sos || gState.sosEscalated))
+      return false;
+  }
+
   bool valid;
   double lat, lon;
   {
@@ -2972,7 +3012,7 @@ bool LoRaManager::cancelSOS() {
     gState.sosEscalated = false;
   }
   if (wasActive) addSosHistory(3);
-  return true;
+  return wasActive;
 }
 
 bool LoRaManager::manualTune(float freqMHz) {

@@ -44,13 +44,26 @@ void GnssManager::task() {
       gState.gps.lat = gps_.location.lat();
       gState.gps.lon = gps_.location.lng();
       gState.gps.alt = gps_.altitude.isValid() ? gps_.altitude.meters() : 0.0;
-      gState.gps.satellites =
+      const uint32_t rawSatellites =
           gps_.satellites.isValid() ? gps_.satellites.value() : 0;
+      // NMEA satellite counts are small; reject corrupt parser values instead
+      // of allowing an implausible value to propagate into telemetry.
+      gState.gps.satellites = min<uint32_t>(rawSatellites, 64U);
       gState.gps.hdop_x10 =
           gps_.hdop.isValid() ? static_cast<uint32_t>(gps_.hdop.value() / 10) : 0;
       gState.gps.lastFixMs = now;
-      if (gps_.date.isValid() && gps_.time.isValid()) {
-        const uint64_t days = daysFromCivil(gps_.date.year(), gps_.date.month(), gps_.date.day());
+      const int year = gps_.date.year();
+      const int month = gps_.date.month();
+      const int day = gps_.date.day();
+      const int hour = gps_.time.hour();
+      const int minute = gps_.time.minute();
+      const int second = gps_.time.second();
+      if (gps_.date.isValid() && gps_.time.isValid() &&
+          year >= 2000 && year <= 2199 &&
+          month >= 1 && month <= 12 && day >= 1 && day <= 31 &&
+          hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 &&
+          second >= 0 && second <= 59) {
+        const uint64_t days = daysFromCivil(year, month, day);
         gState.gps.timeValid = true;
         gState.gps.utcEpoch = days * 86400ULL +
             static_cast<uint64_t>(gps_.time.hour()) * 3600ULL +

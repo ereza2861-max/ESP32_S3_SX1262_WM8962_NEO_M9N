@@ -48,6 +48,55 @@ static String jsonEscape(const String& input) {
   return out;
 }
 
+
+
+static bool isValidUploadedWav(const String& path) {
+  if (path.length() < 4 ||
+      !path.substring(path.length() - 4).equalsIgnoreCase(".WAV"))
+    return false;
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  if (!spiLock.ok()) return false;
+  File f = SD.open(path, FILE_READ);
+  if (!f || f.isDirectory() || f.size() < 44) {
+    if (f) f.close();
+    return false;
+  }
+  uint8_t header[12] = {};
+  const size_t got = f.read(header, sizeof(header));
+  f.close();
+  return got == sizeof(header) &&
+         memcmp(header, "RIFF", 4) == 0 &&
+         memcmp(header + 8, "WAVE", 4) == 0;
+}
+
+static bool eraseStorageTree(const char* path) {
+  if (!path || !*path) return false;
+  File dir = SD.open(path);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return false;
+  }
+
+  bool ok = true;
+  for (;;) {
+    File entry = dir.openNextFile();
+    if (!entry) break;
+    String child = entry.name();
+    const bool isDir = entry.isDirectory();
+    entry.close();
+    if (!child.startsWith("/")) {
+      child = String(path) + "/" + child;
+    }
+
+    const bool childOk = isDir
+        ? eraseStorageTree(child.c_str())
+        : SD.remove(child);
+    if (!childOk) ok = false;
+  }
+  dir.close();
+  return ok;
+}
+
 extern StorageManager storage;
 extern LoRaManager lora;
 extern AudioManager audio;
@@ -535,6 +584,7 @@ void WebUi::begin() {
   server_.on("/api/radio/tune", HTTP_POST, [this]{ if (auth()) handleRadioTune(); });
   server_.on("/api/storage/info", HTTP_GET, [this]{ if (auth()) handleStorageInfo(); });
   server_.on("/api/storage/checksum", HTTP_GET, [this]{ if (auth()) handleChecksum(); });
+  server_.on("/api/storage/checksum-sha256", HTTP_GET, [this]{ if (auth()) handleChecksumSha256(); });
   server_.on("/api/sos-history", HTTP_GET, [this]{ if (auth()) handleSosHistory(); });
   server_.on("/api/lora-log", HTTP_GET, [this]{ if (auth()) handleLoraLog(); });
   server_.on("/api/health-log", HTTP_GET, [this]{ if (auth()) handleHealthLog(); });
@@ -753,6 +803,11 @@ void WebUi::handleUpload() {
     uploadBytes_ += up.currentSize;
   } else if (up.status == UPLOAD_FILE_END || up.status == UPLOAD_FILE_ABORTED) {
     if (uploadFile_) uploadFile_.close();
+    if (up.status == UPLOAD_FILE_END && !uploadFailed_ &&
+        (uploadBytes_ == 0 || uploadBytes_ > Config::WEB_UPLOAD_MAX_BYTES ||
+         !isValidUploadedWav(uploadPath_))) {
+      uploadFailed_ = true;
+    }
     if (up.status == UPLOAD_FILE_ABORTED || uploadFailed_) {
       uploadFailed_ = true;
       if (!uploadPath_.isEmpty()) {
@@ -1611,6 +1666,23 @@ void WebUi::handleFactoryReset() {
   // namespace. With flash encryption/NVS encryption enabled this also removes
   // encrypted records at the storage layer; without encryption, physical
   // confidentiality cannot be guaranteed by software erase alone.
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(500));
+    if (!spiLock.ok()) {
+      server_.send(503, "text/plain", "storage busy");
+      return;
+    }
+    // Factory reset also removes user recordings/logs and routing artifacts.
+    // Keep the managed directory structure itself so the next boot can reuse it.
+    static const char* const managedDirs[] = {"/REC", "/LOG", "/TRACK", "/LORA"};
+    for (const char* dir : managedDirs) {
+      if (SD.exists(dir) && !eraseStorageTree(dir)) {
+        server_.send(503, "text/plain", "SD data erase failed");
+        return;
+      }
+    }
+  }
+
   const esp_err_t err = nvs_flash_erase();
   if (err != ESP_OK) {
     server_.send(503, "text/plain", "NVS secure erase failed");
