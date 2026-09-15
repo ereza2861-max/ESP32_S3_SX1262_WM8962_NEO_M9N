@@ -9,4 +9,6 @@ public:
 private:
   TinyGPSPlus gps_;
   HardwareSerial serial_{1};
+  uint64_t lastSyncEpoch_ = 0;
+  uint32_t lastSyncMs_ = 0;
 };

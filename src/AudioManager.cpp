@@ -167,6 +167,34 @@ void AudioManager::queueUsbAecReference(const uint8_t* data, size_t len,
   usbRatePhase_ = phase;
 }
 
+
+void AudioManager::logEvent(const char* event, const String& detail) {
+  static uint32_t lastWriteMs = 0;
+  static portMUX_TYPE logMux = portMUX_INITIALIZER_UNLOCKED;
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&logMux);
+  const bool throttled = (now - lastWriteMs) < 100U;
+  if (!throttled) lastWriteMs = now;
+  portEXIT_CRITICAL(&logMux);
+  if (throttled || !event || !*event || !storage.ready()) return;
+
+  SpiLock spiLock(pdMS_TO_TICKS(50));
+  if (!spiLock.ok()) return;
+  if (!SD.exists("/LOG")) (void)SD.mkdir("/LOG");
+  const char* path = "/LOG/AUDIO.LOG";
+  File f = SD.open(path, FILE_APPEND);
+  if (f && f.size() >= Config::AUDIO_LOG_ROTATE_BYTES) {
+    f.close();
+    if (SD.exists("/LOG/AUDIO.1.LOG")) SD.remove("/LOG/AUDIO.1.LOG");
+    if (SD.exists(path)) SD.rename(path, "/LOG/AUDIO.1.LOG");
+    f = SD.open(path, FILE_APPEND);
+  }
+  if (!f) return;
+  const time_t epoch = time(nullptr);
+  f.printf("%lld,%s,%s\n", static_cast<long long>(epoch), event, detail.c_str());
+  f.close();
+}
+
 bool AudioManager::begin() {
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
@@ -405,10 +433,12 @@ bool AudioManager::startRecording() {
       if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
       if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
       if (aecRefBuffer_) (void)xStreamBufferReset(aecRefBuffer_);
+      logEvent("REC_START", path);
     }
   }
 
   if (!ok && !error.isEmpty()) {
+    logEvent("ERROR", error);
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = error;
   }
@@ -564,9 +594,14 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
   if (err != ESP_OK || got != sizeof(pcm)) return false;
 
   const int16_t* samples = reinterpret_cast<const int16_t*>(pcm);
-  const size_t aecFrames = min(
+  size_t aecFrames = min(
       static_cast<size_t>(aecFrameSize_ ? aecFrameSize_ : Config::AEC_FRAME_SAMPLES),
       static_cast<size_t>(Config::AEC_FRAME_SAMPLES));
+  if (aecFrames == 0) {
+    aecFrames = Config::AEC_FRAME_SAMPLES;
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "AEC frame size invalid; using default";
+  }
   if (aecFrames == 0 || !aecMic_ || !aecRef_ || !aecOut_) return false;
   for (size_t i = 0; i < aecFrames; ++i) {
     const size_t src = min(micFrames - 1,
@@ -801,8 +836,20 @@ bool AudioManager::stopRecording() {
     captureWm8962Mic_ = recordSource_ == Config::AUDIO_SOURCE_WM8962_MIC;
     if (i2sMutex_ &&
         xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) {
+      // Do not leave an open WAV behind when the short I2S critical section
+      // cannot be acquired. Stop producers first, mark the recording closed,
+      // then finalize the file using the SPI path.
+      captureUsbRecord_ = false;
+      captureWm8962Mic_ = false;
+      {
+        StateLock stateLock(gState);
+        if (stateLock.ok()) gState.recording = false;
+      }
+      const bool finalized = finalizeWav();
       xSemaphoreGive(mutex_);
-      return false;
+      logEvent(finalized ? "REC_STOP" : "ERROR",
+               finalized ? String() : "REC_STOP_FORCED_FINALIZE_FAILED");
+      return finalized;
     }
     if (i2sMutex_) xSemaphoreGive(i2sMutex_);
     {
@@ -820,6 +867,7 @@ bool AudioManager::stopRecording() {
   }
 
   xSemaphoreGive(mutex_);
+  logEvent(ok ? "REC_STOP" : "ERROR", ok ? String() : "REC_STOP_FAILED");
   return ok;
 }
 
@@ -951,6 +999,14 @@ bool AudioManager::setVox(bool enabled, float threshold, uint32_t hangMs) {
     if (lock.ok()) gState.vox = enabled;
   }
   if (mutex_) xSemaphoreGive(mutex_);
+  return true;
+}
+
+bool AudioManager::setVoxAdapt(uint32_t adaptMs) {
+  if (adaptMs != 0 && (adaptMs < 100 || adaptMs > 60000)) return false;
+  voxAdaptMs_ = adaptMs;
+  voxAdaptStartedMs_ = millis();
+  voxNoiseFloor_ = 0.0f;
   return true;
 }
 
@@ -1297,6 +1353,7 @@ bool AudioManager::playFile(const String& path) {
   }
 
   xSemaphoreGive(mutex_);
+  logEvent("PLAY_START", path);
   return true;
 }
 
@@ -1317,6 +1374,7 @@ void AudioManager::stopPlayback() {
     if (lock.ok()) gState.playing = false;
   }
   xSemaphoreGive(mutex_);
+  logEvent("PLAY_STOP");
 }
 
 void AudioManager::setVolume(uint8_t percent) {
@@ -1548,6 +1606,16 @@ void AudioManager::task() {
       if (i2sLocked) xSemaphoreGive(i2sMutex_);
       if (micErr == ESP_OK && micGot > 0) {
         updateAudioLevel(micBuffer, micGot);
+        if (voxEnabled_ && voxAdaptMs_ &&
+            millis() - voxAdaptStartedMs_ <= voxAdaptMs_) {
+          StateLock noiseLock(gState);
+          if (noiseLock.ok() && gState.audioRms < max(0.02f, voxThreshold_)) {
+            voxNoiseFloor_ = voxNoiseFloor_ == 0.0f
+                ? gState.audioRms
+                : (voxNoiseFloor_ * 0.95f + gState.audioRms * 0.05f);
+            voxThreshold_ = max(voxThreshold_, voxNoiseFloor_ * 2.5f);
+          }
+        }
         if (xStreamBufferSend(usbMicBuffer_, micBuffer, micGot, 0) != micGot) {
           StateLock lock(gState);
           if (lock.ok()) ++gState.audioDrops;

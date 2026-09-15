@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <atomic>
 #include <RadioLib.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -24,10 +25,7 @@ public:
   bool sendText(const String& text);
   bool sendTextTo(uint32_t destination, const String& text);
   bool textAcked() const {
-    if (!textStateMutex_ || xSemaphoreTake(textStateMutex_, 0) != pdTRUE) return false;
-    const bool value = textAcked_;
-    xSemaphoreGive(textStateMutex_);
-    return value;
+    return textAcked_.load(std::memory_order_acquire);
   }
   bool sendSOS();
   bool sendPosition();
@@ -35,20 +33,54 @@ public:
   bool manualTune(float freqMHz);
   bool sendVoiceFrame();
   bool applyConfig();
+  void updateSourceId();
   // Arms SX1262 duty-cycle RX before MCU deep sleep. Returns false if the
   // radio cannot be armed safely; caller must not enter deep sleep then.
   bool prepareForDeepSleep();
+  bool prepareForFactoryReset();
+  void cancelFactoryReset();
   bool scannerStart(uint8_t mode, uint16_t dwellMs);
   bool scannerStop();
   bool scannerIsActive() const;
   void scannerGetResults(struct ChannelScanResult* results, size_t& count);
   size_t scannerSuggestBestChannels(uint8_t* channels, size_t capacity);
+  bool persistMessageHistory();
+  bool persistFragmentRx();
+  bool loadFragmentRx();
+  bool loadMessageHistory();
+  String neighborsJson() const;
+  String routesJson() const;
+  bool captureStart(uint32_t durationMs);
+  bool captureStop();
+  bool captureActive() const;
+  String captureDumpJson() const;
+  bool setAdrEnabled(bool enabled);
+  bool adrEnabled() const { return adrEnabled_; }
+  uint8_t currentDataRate() const { return currentAdrSf_; }
+  bool setHopSyncSource(bool gps);
+  bool setSosFormats(uint8_t mask);
+  bool scheduleMessage(uint64_t atEpoch, const String& text);
+  bool cancelScheduledMessage(uint32_t id);
+  String scheduledMessagesJson() const;
+  bool hopSyncUsesGps() const { return hopSyncGps_; }
+  uint32_t forwardDrops() const { return forwardDrops_; }
+  uint32_t forwardQueued() const;
+  uint32_t forwardLastDropMs() const { return forwardLastDropMs_; }
+  uint32_t fragmentEvictions() const { return fragmentEvictions_; }
+  uint32_t fragmentDrops() const { return fragmentDrops_; }
+  uint64_t dutyBudgetUs() const { return dutyTokensUs_; }
+  uint64_t dutyMaxBudgetUs() const;
+  uint32_t dedupHits() const { return dedupHits_; }
+  uint32_t dedupMisses() const { return dedupMisses_; }
+  uint32_t dedupEvictions() const { return dedupEvictions_; }
+  uint8_t lqi() const;
 private:
   Module module_;
   SX1262 radio_;
   volatile uint32_t irqCount_ = 0;
   portMUX_TYPE irqMux_ = portMUX_INITIALIZER_UNLOCKED;
   bool ready_ = false;
+  std::atomic<bool> storageResetting_{false};
   uint32_t lastRecoveryMs_ = 0;
   SemaphoreHandle_t mutex_ = nullptr;
   SemaphoreHandle_t seqMutex_ = nullptr;
@@ -96,6 +128,7 @@ private:
   bool handleTextFragment(uint32_t sourceId, const uint8_t* payload, size_t len);
   static uint8_t txPriorityForPacket(const String& packet);
   bool lbtChannelBusy(int16_t scanStatus) const;
+  bool validateTextAckHop() const;
   bool enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                       uint8_t ttl, const uint8_t* payload, size_t len,
                       uint8_t wireVersion);
@@ -104,10 +137,12 @@ private:
   static uint32_t sourceIdFromCallsign(const String& callsign);
   static constexpr size_t ROUTE_EXT_BYTES = 16;
   bool addRouteExtension(const uint8_t* payload, size_t len, uint32_t destination,
-                         uint32_t excludeNextHop, uint8_t* out, size_t capacity) const;
+                         uint32_t excludeNextHop, uint8_t* out, size_t capacity,
+                         uint32_t sourceIdOverride = 0) const;
   bool parseRouteExtension(const uint8_t* payload, size_t len, uint32_t& destination,
                            uint32_t& nextHop, uint32_t& previousHop, uint8_t& hopCount,
                            size_t& payloadOffset) const;
+  uint16_t calculateEtxQ8(uint16_t attempts, uint16_t success) const;
   uint32_t selectNextHop(uint32_t destination, uint32_t excludeNextHop) const;
   void learnRoute(uint32_t destination, uint32_t nextHop, int16_t rssi, float snr);
   bool routeAllowsForward(uint32_t destination, uint32_t nextHop,
@@ -115,6 +150,7 @@ private:
   void recordNeighborTxResult(uint32_t peerSourceId, bool success);
   bool isPttOrRecording() const;
   bool consumeDutyBudget(uint32_t airtimeUs);
+  void refundDutyBudget(uint32_t airtimeUs);
   void refillDutyBudget();
   uint64_t dutyTokensUs_ = 0;
   uint32_t lastDutyRefillMs_ = 0;
@@ -127,6 +163,37 @@ private:
   uint32_t txSequenceAbsolute_ = 1;
   uint32_t txSequenceReservedUntil_ = 0;
   uint32_t sourceId_ = 0;
+  bool adrEnabled_ = false;
+  uint8_t currentAdrSf_ = Config::LORA_SF;
+  uint32_t lastAdrMs_ = 0;
+  volatile bool messageHistoryDirty_ = false;
+  bool hopSyncGps_ = true;
+  SemaphoreHandle_t captureMutex_ = nullptr;
+  struct CaptureEntry {
+    uint32_t ts = 0;
+    int16_t rssi = -127;
+    float snr = -20.0f;
+    bool decrypted = false;
+    String rawHex;
+  };
+  static constexpr size_t CAPTURE_SIZE = 32;
+  CaptureEntry capture_[CAPTURE_SIZE] = {};
+  size_t captureNext_ = 0;
+  size_t captureCount_ = 0;
+  uint32_t captureUntilMs_ = 0;
+  uint32_t dedupHits_ = 0;
+  uint32_t dedupMisses_ = 0;
+  uint32_t dedupEvictions_ = 0;
+  static constexpr size_t SCHEDULED_MESSAGE_MAX = 8;
+  struct ScheduledMessage {
+    bool used = false;
+    uint32_t id = 0;
+    uint64_t atEpoch = 0;
+    String text;
+  };
+  ScheduledMessage scheduledMessages_[SCHEDULED_MESSAGE_MAX] = {};
+  uint32_t nextScheduledMessageId_ = 1;
+  uint8_t sosFormatMask_ = 1; // bit0=text, bit1=APRS-like, bit2=binary
   struct TxQueueEntry {
     bool used = false;
     uint8_t priority = 0;
@@ -138,6 +205,11 @@ private:
   bool forwardInFlightActive_ = false;
   uint32_t forwardInFlightNextHop_ = 0;
   ForwardPacket forwardInFlight_{};
+  uint32_t forwardDrops_ = 0;
+  uint32_t forwardLastDropMs_ = 0;
+  uint32_t forwardRetryNotBeforeMs_ = 0;
+  uint32_t forwardRetryBackoffMs_ = 100;
+  uint32_t forwardRetryPersistId_ = 0;
   uint16_t fragmentMessageId_ = 0;
   struct VoiceTxSlot {
     bool used = false;
@@ -170,6 +242,9 @@ private:
   };
   static constexpr size_t FRAGMENT_RX_SLOTS = 3;
   FragmentRxState fragmentRx_[FRAGMENT_RX_SLOTS] = {};
+  bool fragmentRxDirty_ = false;
+  uint32_t fragmentEvictions_ = 0;
+  uint32_t fragmentDrops_ = 0;
   struct NeighborEntry {
     uint32_t sourceId = 0;
     int16_t rssi = -127;
@@ -236,18 +311,20 @@ private:
       uint8_t occupancyPercent = 0;
       uint16_t preambleCount = 0;
       uint32_t timestamp = 0;
+      uint32_t generation = 0;
     } results[Config::SCANNER_MAX_CHANNELS] = {};
   } scanner_;
+  uint32_t scannerGeneration_ = 0;
   uint32_t hopFrame_ = 0;
   uint32_t hopLastSyncMs_ = 0;
   uint8_t currentHopIndex_ = 0;
   uint8_t legacyRxCounter_ = 0;
-  uint16_t sosSeq_ = 0;
+  std::atomic<uint16_t> sosSeq_{0};
   uint32_t sosSentMs_ = 0;
   uint8_t sosRetryCount_ = 0;
   bool sosAwaitingAck_ = false;
   bool textAwaitingAck_ = false;
-  bool textAcked_ = false;
+  std::atomic<bool> textAcked_{false};
   uint16_t textPendingSeq_ = 0;
   uint8_t textRetryCount_ = 0;
   uint32_t textSentMs_ = 0;
@@ -260,6 +337,10 @@ private:
   uint8_t computeHopIndex(uint32_t frame) const;
   bool retuneToHopChannel(uint8_t index);
   bool retuneToChannel0();
+  bool retuneToHopChannelLocked(uint8_t index);
+  bool retuneToChannel0Locked();
+  void serviceAdr();
+  void serviceScheduledMessages();
   bool encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
                        uint16_t seq, uint8_t hopIndex, uint32_t epochMs,
                        String& packet);
@@ -292,6 +373,7 @@ private:
   void logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t sourceId,
                  int16_t rssi, float snr, uint8_t ttl);
   void addMessageHistory(uint32_t sourceId, const char* text);
+  bool capturePacket(const String& raw, int16_t rssi, float snr, bool decrypted);
   bool forwardRateAllowed(uint32_t sourceId, uint8_t type);
   void serviceVoiceReorder();
   struct ForwardSourceRate {

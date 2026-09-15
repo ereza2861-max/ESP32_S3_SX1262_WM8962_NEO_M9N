@@ -27,6 +27,8 @@ constexpr uint8_t ROUTE_EXT_VERSION = 1;
 constexpr uint8_t ROUTE_EXT_FLAG_BROADCAST = 0x01;
 constexpr uint8_t ROUTE_EXT_MAX_HOPS = Config::LORA_INITIAL_TTL;
 constexpr uint32_t ROUTE_CACHE_TTL_MS = 120000UL;
+constexpr uint16_t FRAG_STORE_MAGIC = 0x4651;
+constexpr uint8_t FRAG_STORE_VERSION = 1;
 constexpr uint16_t ROUTE_ETX_MAX_Q8 = 0x7FFF;
 constexpr uint8_t LORA_PROTOCOL_VERSION_HOP = 3;
 constexpr size_t PACKET_TAG = Config::LORA_TAG_BYTES;
@@ -130,9 +132,7 @@ void LoRaManager::refillDutyBudget() {
   const uint32_t elapsedMs = now - lastDutyRefillMs_;
   if (!elapsedMs) return;
 
-  const uint64_t maxBudget =
-      (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
-       Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL;
+  const uint64_t maxBudget = dutyMaxBudgetUs();
   const uint64_t refill =
       (static_cast<uint64_t>(elapsedMs) * Config::LORA_DUTY_CYCLE_PERCENT *
        1000ULL) / 100ULL;
@@ -147,6 +147,23 @@ bool LoRaManager::consumeDutyBudget(uint32_t airtimeUs) {
   return true;
 }
 
+void LoRaManager::refundDutyBudget(uint32_t airtimeUs) {
+  if (airtimeUs == 0) return;
+  const uint64_t maxBudget = dutyMaxBudgetUs();
+  const uint64_t before = dutyTokensUs_;
+  dutyTokensUs_ = min(maxBudget, dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
+  if (before + static_cast<uint64_t>(airtimeUs) > maxBudget)
+    Serial.println("WARN: LoRa duty budget refund clamped");
+}
+
+uint64_t LoRaManager::dutyMaxBudgetUs() const {
+  return (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
+          Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL;
+}
+
+uint32_t LoRaManager::forwardQueued() const {
+  return forwardQueue_ ? static_cast<uint32_t>(uxQueueMessagesWaiting(forwardQueue_)) : 0;
+}
 
 bool LoRaManager::loadKey(uint8_t key[16]) const {
   if (!key || gConfig.loraKeyHex.length() != 32) return false;
@@ -265,10 +282,13 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   if (delta == 0) return true;
 
   const int16_t age = static_cast<int16_t>(slot->highestSeq - seq);
-  if (age >= Config::LORA_REPLAY_WINDOW_BITS) return true;
-  const uint32_t bit = 1UL << age;
+  if (age < 0 || age >= static_cast<int16_t>(Config::LORA_REPLAY_WINDOW_BITS)) return true;
+  const uint8_t clampedAge = static_cast<uint8_t>(
+      min<int16_t>(age, static_cast<int16_t>(Config::LORA_REPLAY_WINDOW_BITS - 1U)));
+  const uint32_t bit = 1UL << clampedAge;
   if (slot->bitmap & bit) return true;
   slot->bitmap |= bit;
+  slot->highestPayloadHash = payloadHash;
   slot->seenMs = now;
   slot->lastEpochSec = packetEpochSec;
   return false;
@@ -461,15 +481,15 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
 uint8_t LoRaManager::computeHopIndex(uint32_t frame) const {
   StateLock lock(gState);
   if (!lock.ok() || gState.hopChannelCount == 0) return 0;
-  const uint32_t epochSec = currentEpochSec();
-  if (epochSec != 0) {
+  const uint32_t epochSec = hopSyncGps_ ? currentEpochSec() : 0;
+  if (hopSyncGps_ && epochSec != 0) {
     const uint32_t dwellSec = max<uint32_t>(1, Config::HOP_DWELL_MS / 1000U);
     return static_cast<uint8_t>((epochSec / dwellSec) % gState.hopChannelCount);
   }
   return static_cast<uint8_t>(frame % gState.hopChannelCount);
 }
 
-bool LoRaManager::retuneToHopChannel(uint8_t index) {
+bool LoRaManager::retuneToHopChannelLocked(uint8_t index) {
   if (index >= Config::HOP_CHANNEL_MAX) return false;
   uint8_t count = 0;
   {
@@ -487,38 +507,81 @@ bool LoRaManager::retuneToHopChannel(uint8_t index) {
          radio_.startReceive() == RADIOLIB_ERR_NONE;
 }
 
-bool LoRaManager::retuneToChannel0() {
+bool LoRaManager::retuneToChannel0Locked() {
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
   return radio_.setFrequency(gConfig.loraFreqMHz) == RADIOLIB_ERR_NONE &&
          radio_.startReceive() == RADIOLIB_ERR_NONE;
 }
 
+bool LoRaManager::retuneToHopChannel(uint8_t index) {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+  const bool ok = retuneToHopChannelLocked(index);
+  xSemaphoreGive(mutex_);
+  return ok;
+}
+
+bool LoRaManager::retuneToChannel0() {
+  if (!mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+  const bool ok = retuneToChannel0Locked();
+  xSemaphoreGive(mutex_);
+  return ok;
+}
+
 bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t destination) {
   if (!ready_ || !mutex_ || text.isEmpty()) return false;
+
+  // Establish the global lock order before entering the text transaction.
+  // No text-state lock is held while acquiring mutex_ or StateLock.
   bool hopOn = false;
   {
     StateLock lock(gState);
     if (!lock.ok()) return false;
     hopOn = gState.hopEnabled && gState.hopChannelCount > 0;
   }
-  if (text.length() + ROUTE_EXT_BYTES > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 - PACKET_TAG) return false;
-  const uint8_t hopIndex = hopOn ? computeHopIndex(hopFrame_) : 0;
-  const uint32_t epochSec = currentEpochSec();
-  uint16_t seq = 0;
-  if (!nextTxSequence(seq)) return false;
-  uint8_t routed[Config::LORA_MAX_PACKET] = {};
-  const size_t routedLen = addRouteExtension(
-      reinterpret_cast<const uint8_t*>(text.c_str()), text.length(),
-      destination, 0, routed, sizeof(routed));
-  if (!routedLen) return false;
-  String packet;
-  if (!encryptPacketV3(routed, routedLen, type, seq, hopIndex, epochSec, packet)) return false;
 
+  bool textStateHeld = false;
+  uint32_t sourceIdSnapshot = 0;
   if (type == Config::LORA_TYPE_TEXT) {
     if (!textStateMutex_ ||
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
       return false;
+    if (textAwaitingAck_) {
+      xSemaphoreGive(textStateMutex_);
+      return false;
+    }
+    // Snapshot the authenticated origin while holding the same mutex used by
+    // updateSourceId(). Route construction below must use this exact identity.
+    sourceIdSnapshot = sourceId_;
+    textStateHeld = true;
+  }
+
+  if (text.length() + ROUTE_EXT_BYTES > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 - PACKET_TAG) {
+    if (textStateHeld) xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+  const uint8_t hopIndex = hopOn ? computeHopIndex(hopFrame_) : 0;
+  const uint32_t epochSec = currentEpochSec();
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) {
+    if (textStateHeld) xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+  uint8_t routed[Config::LORA_MAX_PACKET] = {};
+  const size_t routedLen = addRouteExtension(
+      reinterpret_cast<const uint8_t*>(text.c_str()), text.length(),
+      destination, 0, routed, sizeof(routed), sourceIdSnapshot);
+  if (!routedLen) {
+    if (textStateHeld) xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+  String packet;
+  if (!encryptPacketV3(routed, routedLen, type, seq, hopIndex, epochSec, packet)) {
+    if (textStateHeld) xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+
+  if (type == Config::LORA_TYPE_TEXT) {
     textPendingPacket_ = packet;
     textPendingSeq_ = seq;
     textRetryCount_ = 0;
@@ -526,6 +589,7 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     textAwaitingAck_ = true;
     textAcked_ = false;
     xSemaphoreGive(textStateMutex_);
+    textStateHeld = false;
   }
 
   // Keep the same mutex -> SPI lock ordering used by the other TX paths.
@@ -540,7 +604,7 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     }
     return false;
   }
-  if (hopOn && !retuneToHopChannel(hopIndex)) {
+  if (hopOn && !retuneToHopChannelLocked(hopIndex)) {
     xSemaphoreGive(mutex_);
     if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -564,6 +628,21 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
         if (airtimeUs != 0 && airtimeUs <= UINT32_MAX && consumeDutyBudget(static_cast<uint32_t>(airtimeUs))) {
           st = radio_.transmit(packet);
           txOk = st == RADIOLIB_ERR_NONE;
+          if (txOk) {
+            const int16_t txRssi = static_cast<int16_t>(radio_.getRSSI());
+            StateLock stateLock(gState);
+            if (stateLock.ok()) {
+              gState.txRssi = txRssi;
+              if (gState.antennaBaselineRssi <= -127) {
+                gState.antennaBaselineRssi = txRssi;
+                gState.antennaOk = true;
+              } else {
+                gState.antennaOk =
+                    abs(static_cast<int>(txRssi) -
+                        static_cast<int>(gState.antennaBaselineRssi)) >= 3;
+              }
+            }
+          }
           (void)radio_.startReceive();
         } else st = RADIOLIB_ERR_UNKNOWN;
       } else st = scanSt;
@@ -572,8 +651,8 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     const uint32_t span = Config::LORA_LBT_BACKOFF_MAX_MS - Config::LORA_LBT_BACKOFF_MIN_MS;
     vTaskDelay(pdMS_TO_TICKS(Config::LORA_LBT_BACKOFF_MIN_MS + (span ? (esp_random() % (span + 1U)) : 0U)));
   }
+  (void)retuneToChannel0Locked();
   xSemaphoreGive(mutex_);
-  (void)retuneToChannel0();
   if (!txOk) {
     if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -584,7 +663,15 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     return false;
   }
   ++hopFrame_;
-  logPacket(true, type, seq, sourceId_, 0, 0.0f, Config::LORA_INITIAL_TTL);
+  uint32_t loggedSourceId = 0;
+  if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
+    loggedSourceId = sourceId_;
+    xSemaphoreGive(textStateMutex_);
+  } else {
+    loggedSourceId = sourceId_;
+  }
+  logPacket(true, type, seq, loggedSourceId, 0, 0.0f, Config::LORA_INITIAL_TTL);
   return true;
 }
 
@@ -681,11 +768,14 @@ bool LoRaManager::seenDedup(uint32_t sourceId, uint16_t seq, uint8_t type, uint3
     if (entry.sourceId == sourceId && entry.seq == seq &&
         entry.payloadHash == payloadHash) {
       entry.seenMs = now;
+      ++dedupHits_;
       return true;
     }
   }
 
+  ++dedupMisses_;
   DedupEntry& slot = dedupCache_[dedupNext_];
+  if (slot.seenMs != 0) ++dedupEvictions_;
   slot.sourceId = sourceId;
   slot.seq = seq;
   slot.payloadHash = payloadHash;
@@ -711,23 +801,26 @@ void LoRaManager::logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t source
 
 void LoRaManager::addMessageHistory(uint32_t sourceId, const char* text) {
   if (!text) return;
-  StateLock lock(gState);
-  if (!lock.ok()) return;
-  MessageHistoryEntry& e = gState.messageHistory[gState.messageHistoryNext];
-  e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : millis();
-  e.sourceId = sourceId;
-  e.text = text;
-  e.read = false;
-  if (gState.messageHistoryCount == Config::MESSAGE_HISTORY_SIZE) {
-    if (!gState.messageHistory[gState.messageHistoryNext].read && gState.messageUnreadCount)
-      --gState.messageUnreadCount;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) return;
+    MessageHistoryEntry& e = gState.messageHistory[gState.messageHistoryNext];
+    e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : 0;
+    e.sourceId = sourceId;
+    e.text = text;
+    e.read = false;
+    if (gState.messageHistoryCount == Config::MESSAGE_HISTORY_SIZE) {
+      if (!gState.messageHistory[gState.messageHistoryNext].read && gState.messageUnreadCount)
+        --gState.messageUnreadCount;
+    }
+    ++gState.messageUnreadCount;
+    gState.messageHistoryNext =
+        (gState.messageHistoryNext + 1) % Config::MESSAGE_HISTORY_SIZE;
+    if (gState.messageHistoryCount < Config::MESSAGE_HISTORY_SIZE)
+      ++gState.messageHistoryCount;
+    gState.lastMessage = text;
   }
-  ++gState.messageUnreadCount;
-  gState.messageHistoryNext =
-      (gState.messageHistoryNext + 1) % Config::MESSAGE_HISTORY_SIZE;
-  if (gState.messageHistoryCount < Config::MESSAGE_HISTORY_SIZE)
-    ++gState.messageHistoryCount;
-  gState.lastMessage = text;
+  messageHistoryDirty_ = true;
 }
 
 bool LoRaManager::forwardRateAllowed(uint32_t sourceId, uint8_t type) {
@@ -793,13 +886,25 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
   packet.persistId = packet.dedupId;
   packet.len = static_cast<uint16_t>(len);
   memcpy(packet.payload, payload, len);
-  if (xQueueSend(forwardQueue_, &packet, 0) != pdPASS) return false;
+  bool queued = false;
+  for (uint8_t attempt = 0; attempt < 3 && !queued; ++attempt) {
+    queued = xQueueSend(forwardQueue_, &packet,
+                        attempt == 0 ? 0 : pdMS_TO_TICKS(2)) == pdPASS;
+    if (!queued) taskYIELD();
+  }
+  if (!queued) {
+    ++forwardDrops_;
+    forwardLastDropMs_ = millis();
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "LoRa forward queue full; packet dropped";
+    return false;
+  }
   (void)persistForwardQueue();
   return true;
 }
 
 bool LoRaManager::persistForwardQueue() {
-  if (!storage.ready() || !forwardQueue_) return false;
+  if (storageResetting_.load(std::memory_order_acquire) || !storage.ready() || !forwardQueue_) return false;
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return false;
   if (!SD.exists("/LORA") && !SD.mkdir("/LORA")) return false;
@@ -937,8 +1042,11 @@ bool LoRaManager::loadForwardQueue() {
     if (magic != FORWARD_RECORD_MAGIC || ttl == 0 || len == 0 ||
         len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG ||
         (wireVersion != Config::LORA_PROTOCOL_VERSION &&
-         wireVersion != LORA_PROTOCOL_VERSION_HOP))
+         wireVersion != LORA_PROTOCOL_VERSION_HOP)) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Corrupt forward queue record";
       break;
+    }
 
     uint8_t cipher[Config::LORA_MAX_PACKET] = {};
     uint8_t tag[PACKET_TAG] = {};
@@ -953,7 +1061,11 @@ bool LoRaManager::loadForwardQueue() {
                                expected, sizeof(expected)) != 0) break;
     uint8_t diff = 0;
     for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ tag[i];
-    if (diff != 0) continue;
+    if (diff != 0) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Corrupt forward queue checksum";
+      continue;
+    }
 
     uint8_t iv[16] = {};
     memcpy(iv, &nonce, 4);
@@ -968,7 +1080,11 @@ bool LoRaManager::loadForwardQueue() {
                     mbedtls_aes_crypt_ctr(&aes, len, &ncOff, iv, streamBlock,
                                           cipher, plain) == 0;
     mbedtls_aes_free(&aes);
-    if (!ok) continue;
+    if (!ok) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Corrupt forward queue payload";
+      continue;
+    }
 
     ForwardPacket item{};
     item.type = type;
@@ -1015,6 +1131,13 @@ bool LoRaManager::parseRouteExtension(const uint8_t* payload, size_t len,
   return true;
 }
 
+uint16_t LoRaManager::calculateEtxQ8(uint16_t attempts, uint16_t success) const {
+  if (!attempts || !success) return 256;
+  return static_cast<uint16_t>(
+      min<uint32_t>(ROUTE_ETX_MAX_Q8,
+                    256UL * attempts / max<uint16_t>(1, success)));
+}
+
 uint32_t LoRaManager::selectNextHop(uint32_t destination, uint32_t excludeNextHop) const {
   const uint32_t now = millis();
   uint32_t best = 0;
@@ -1029,7 +1152,7 @@ uint32_t LoRaManager::selectNextHop(uint32_t destination, uint32_t excludeNextHo
         continue;
       uint8_t q = route.quality;
       for (const auto& n : neighbors_) {
-        if (n.sourceId == route.nextHop && now - n.seenMs <= ROUTE_CACHE_TTL_MS) {
+        if (n.sourceId == route.nextHop && now - n.seenMs <= Config::NEIGHBOR_TTL_MS) {
           q = n.quality;
           break;
         }
@@ -1045,10 +1168,8 @@ uint32_t LoRaManager::selectNextHop(uint32_t destination, uint32_t excludeNextHo
     // Direct neighbor is always a valid destination route.
     for (const auto& n : neighbors_) {
       if (n.sourceId != destination || n.sourceId == excludeNextHop ||
-          now - n.seenMs > ROUTE_CACHE_TTL_MS) continue;
-      const uint32_t etxQ8 = n.txAttempts && n.txSuccess
-          ? static_cast<uint32_t>(256UL * n.txAttempts / max<uint16_t>(1, n.txSuccess))
-          : 256U;
+          now - n.seenMs > Config::NEIGHBOR_TTL_MS) continue;
+      const uint16_t etxQ8 = calculateEtxQ8(n.txAttempts, n.txSuccess);
       const uint32_t score = static_cast<uint32_t>(n.quality) * 7U +
                              (1000U - min<uint32_t>(1000U, etxQ8 * 100U / 256U)) * 3U / 10U;
       if (score >= bestScore) {
@@ -1063,10 +1184,8 @@ uint32_t LoRaManager::selectNextHop(uint32_t destination, uint32_t excludeNextHo
   // fresh neighbor, while explicitly avoiding the previous hop.
   for (const auto& n : neighbors_) {
     if (n.sourceId == 0 || n.sourceId == excludeNextHop ||
-        now - n.seenMs > ROUTE_CACHE_TTL_MS) continue;
-    const uint32_t etxQ8 = n.txAttempts && n.txSuccess
-        ? static_cast<uint32_t>(256UL * n.txAttempts / max<uint16_t>(1, n.txSuccess))
-        : 256U;
+        now - n.seenMs > Config::NEIGHBOR_TTL_MS) continue;
+    const uint16_t etxQ8 = calculateEtxQ8(n.txAttempts, n.txSuccess);
     const uint32_t score = static_cast<uint32_t>(n.quality) * 7U +
                            (1000U - min<uint32_t>(1000U, etxQ8 * 100U / 256U)) * 3U / 10U;
     if (score > bestScore) {
@@ -1079,8 +1198,10 @@ uint32_t LoRaManager::selectNextHop(uint32_t destination, uint32_t excludeNextHo
 
 size_t LoRaManager::addRouteExtension(const uint8_t* payload, size_t len,
                                        uint32_t destination, uint32_t excludeNextHop,
-                                       uint8_t* out, size_t capacity) const {
-  if (!payload || !out || destination == sourceId_ ||
+                                       uint8_t* out, size_t capacity,
+                                       uint32_t sourceIdOverride) const {
+  const uint32_t origin = sourceIdOverride != 0 ? sourceIdOverride : sourceId_;
+  if (!payload || !out || destination == origin ||
       len + ROUTE_EXT_BYTES > capacity) return 0;
   const uint32_t nextHop = selectNextHop(destination, excludeNextHop);
   if (destination != 0 && nextHop == 0) return 0;
@@ -1092,7 +1213,7 @@ size_t LoRaManager::addRouteExtension(const uint8_t* payload, size_t len,
   out[3] = hopCount;
   memcpy(out + 4, &destination, 4);
   memcpy(out + 8, &nextHop, 4);
-  memcpy(out + 12, &sourceId_, 4);
+  memcpy(out + 12, &origin, 4);
   memcpy(out + ROUTE_EXT_BYTES, payload, len);
   return len + ROUTE_EXT_BYTES;
 }
@@ -1124,7 +1245,7 @@ void LoRaManager::learnRoute(uint32_t destination, uint32_t nextHop,
   route.nextHop = nextHop;
   route.quality = 0;
   for (const auto& n : neighbors_) {
-    if (n.sourceId == nextHop && now - n.seenMs <= ROUTE_CACHE_TTL_MS) {
+    if (n.sourceId == nextHop && now - n.seenMs <= Config::NEIGHBOR_TTL_MS) {
       route.quality = n.quality;
       break;
     }
@@ -1135,10 +1256,8 @@ void LoRaManager::learnRoute(uint32_t destination, uint32_t nextHop,
   }
   route.etxQ8 = 256;
   for (const auto& n : neighbors_) {
-    if (n.sourceId == nextHop && n.txAttempts && n.txSuccess) {
-      route.etxQ8 = static_cast<uint16_t>(
-          min<uint32_t>(ROUTE_ETX_MAX_Q8,
-                        256UL * n.txAttempts / max<uint16_t>(1, n.txSuccess)));
+    if (n.sourceId == nextHop) {
+      route.etxQ8 = calculateEtxQ8(n.txAttempts, n.txSuccess);
       break;
     }
   }
@@ -1151,6 +1270,10 @@ void LoRaManager::recordNeighborTxResult(uint32_t peerSourceId, bool success) {
     if (n.sourceId != peerSourceId) continue;
     if (n.txAttempts != UINT16_MAX) ++n.txAttempts;
     if (success && n.txSuccess != UINT16_MAX) ++n.txSuccess;
+    for (auto& route : routes_) {
+      if (route.nextHop == peerSourceId)
+        route.etxQ8 = calculateEtxQ8(n.txAttempts, n.txSuccess);
+    }
     return;
   }
 }
@@ -1172,6 +1295,7 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   size_t routedLen = 0;
   uint32_t destination = 0;
   uint32_t nextHop = 0;
+  uint32_t txNextHop = 0;
   uint32_t previousHop = 0;
   uint8_t hopCount = 0;
   size_t routeOffset = 0;
@@ -1181,8 +1305,12 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   if (hasRoute) {
     if (!routeAllowsForward(destination, nextHop, previousHop) ||
         hopCount >= ROUTE_EXT_MAX_HOPS) return false;
-    const uint32_t selectedNextHop = selectNextHop(destination, previousHop);
+    uint32_t selectedNextHop = selectNextHop(destination, previousHop);
+    if (forwardRetryPersistId_ == forward.persistId && forwardRetryPersistId_ != 0) {
+      selectedNextHop = forwardInFlightNextHop_;
+    }
     if (selectedNextHop == 0 || selectedNextHop == previousHop) return false;
+    txNextHop = selectedNextHop;
     routed[0] = ROUTE_EXT_MAGIC;
     routed[1] = ROUTE_EXT_VERSION;
     routed[2] = destination == 0 ? ROUTE_EXT_FLAG_BROADCAST : 0;
@@ -1220,20 +1348,28 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   // Keep forwarding serialized with normal TX. The pending TX state machine
   // performs CAD/backoff and preserves this already-built forwarding envelope.
   if (Config::LORA_LBT_ENABLED) {
-    if (!queuePendingTx(packet, forward.priority)) return false;
-    // Keep the original queued packet for retry/persistence. The routed
-    // envelope is only the wire representation; re-queuing that representation
-    // after an LBT failure would make previousHop == this node and reject the
-    // packet on the next forwarding attempt.
+    // Publish the original ForwardPacket before making the wire packet visible
+    // to processPendingTx(). Otherwise the LoRa task can finish an immediate
+    // CAD/TX attempt before forwardInFlight_ is initialized, losing retry state.
+    if (forwardInFlightActive_) return false;
     forwardInFlight_ = forward;
-    forwardInFlightNextHop_ = nextHop;
+    forwardInFlightNextHop_ = hasRoute ? selectedNextHop : 0;
+    forwardRetryPersistId_ = forward.persistId;
     forwardInFlightActive_ = true;
+    if (!queuePendingTx(packet, forward.priority)) {
+      forwardInFlightActive_ = false;
+      forwardInFlightNextHop_ = 0;
+      forwardRetryPersistId_ = 0;
+      return false;
+    }
+    // On an LBT retry, processPendingTx() requeues this original envelope,
+    // never the already-mutated routed wire packet.
     (void)processPendingTx();
     return true;
   }
 
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
-  if (useV3 && !retuneToHopChannel(txHopIndex)) {
+  if (useV3 && !retuneToHopChannelLocked(txHopIndex)) {
     xSemaphoreGive(mutex_);
     return false;
   }
@@ -1254,10 +1390,7 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
           st = RADIOLIB_ERR_TX_TIMEOUT;
         rxSt = radio_.startReceive();
         if (st != RADIOLIB_ERR_NONE)
-          dutyTokensUs_ = min(
-              (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
-               Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL,
-              dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
+          refundDutyBudget(static_cast<uint32_t>(airtimeUs));
       } else {
         st = -1;
       }
@@ -1266,8 +1399,8 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
     }
   }
 
-  const bool txOk = budgetConsumed && st == RADIOLIB_ERR_NONE;
-  if (hasRoute) recordNeighborTxResult(nextHop, txOk);
+  bool txOk = budgetConsumed && st == RADIOLIB_ERR_NONE;
+  if (hasRoute) recordNeighborTxResult(txNextHop, txOk);
   {
     StateLock lock(gState);
     if (lock.ok()) {
@@ -1282,8 +1415,12 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
     }
   }
   if (txOk) logPacket(true, forward.type, forward.seq, forward.sourceId, 0, 0.0f, forward.ttl);
+  if (txOk && useV3 && !retuneToChannel0Locked()) {
+    txOk = false;
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "SX1262 channel-0 retune failed after forward";
+  }
   xSemaphoreGive(mutex_);
-  if (useV3) (void)retuneToChannel0();
   return txOk;
 }
 
@@ -1300,6 +1437,7 @@ bool LoRaManager::scannerStart(uint8_t mode, uint16_t dwellMs) {
   scanner_.index = 0;
   scanner_.sweepCount = 0;
   scanner_.lastSampleMs = 0;
+  ++scannerGeneration_;
   for (auto& result : scanner_.results) result = ScannerState::Result{};
   {
     StateLock lock(gState);
@@ -1307,6 +1445,7 @@ bool LoRaManager::scannerStart(uint8_t mode, uint16_t dwellMs) {
       gState.scannerActive = true;
       gState.scannerMode = mode;
       gState.scannerSweepCount = 0;
+      gState.scannerSweepInProgress = true;
       gState.scannerChannelCount = Config::SCANNER_MAX_CHANNELS;
       gState.scannerDwellMs = dwellMs;
     }
@@ -1319,10 +1458,13 @@ bool LoRaManager::scannerStop() {
   if (!mutex_) return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
   scanner_.active = false;
-  (void)retuneToChannel0();
+  (void)retuneToChannel0Locked();
   {
     StateLock lock(gState);
-    if (lock.ok()) gState.scannerActive = false;
+    if (lock.ok()) {
+      gState.scannerActive = false;
+      gState.scannerSweepInProgress = false;
+    }
   }
   xSemaphoreGive(mutex_);
   return true;
@@ -1339,7 +1481,7 @@ void LoRaManager::scannerGetResults(ChannelScanResult* results, size_t& count) {
   const size_t n = min(static_cast<size_t>(Config::SCANNER_MAX_CHANNELS),
                        static_cast<size_t>(Config::HOP_CHANNEL_MAX));
   for (size_t i = 0; i < n; ++i) {
-    if (scanner_.results[i].timestamp == 0) continue;
+    if (scanner_.results[i].timestamp == 0 || scanner_.results[i].generation != scannerGeneration_) continue;
     results[count].freqMHz = scanner_.results[i].freqMHz;
     results[count].rssiAvgDbm = scanner_.results[i].rssiAvgDbm;
     results[count].rssiPeakDbm = scanner_.results[i].rssiPeakDbm;
@@ -1370,7 +1512,7 @@ size_t LoRaManager::scannerSuggestBestChannels(uint8_t* channels, size_t capacit
     for (size_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i) {
       if (used[i]) continue;
       const auto& r = scanner_.results[i];
-      if (r.timestamp == 0) continue;
+      if (r.timestamp == 0 || r.generation != scannerGeneration_) continue;
       if (r.occupancyPercent < bestLoad ||
           (r.occupancyPercent == bestLoad && r.rssiAvgDbm < bestRssi)) {
         best = i;
@@ -1391,7 +1533,7 @@ void LoRaManager::addSosHistory(uint8_t event, uint32_t peer) {
   if (!lock.ok()) return;
   auto& e = gState.sosHistory[gState.sosHistoryNext];
   e.timestamp = gState.gps.timeValid ? gState.gps.utcEpoch : millis();
-  e.seq = sosSeq_;
+  e.seq = sosSeq_.load(std::memory_order_acquire);
   e.event = event;
   e.peer = peer;
   gState.sosHistoryNext = (gState.sosHistoryNext + 1) % RuntimeState::SOS_HISTORY_SIZE;
@@ -1414,7 +1556,33 @@ void LoRaManager::serviceSosRetry() {
     }
     return;
   }
-  if (transmit(sosPacket_, true)) {
+  String retryPacket = sosPacket_;
+  bool hopEnabled = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
+  }
+  if (hopEnabled && retryPacket.length() >= PACKET_HEADER_V2 &&
+      static_cast<uint8_t>(retryPacket[1]) == Config::LORA_PROTOCOL_VERSION) {
+    uint8_t plain[Config::LORA_MAX_PACKET] = {};
+    uint8_t type = 0, ttl = 0, hop = 0;
+    uint16_t seq = 0;
+    uint32_t source = 0;
+    size_t plainLen = 0;
+    if (decryptPacket(retryPacket, type, seq, source, ttl, plain,
+                      sizeof(plain), plainLen)) {
+      uint8_t routed[Config::LORA_MAX_PACKET] = {};
+      const size_t routedLen = addRouteExtension(plain, plainLen, 0, 0,
+                                                  routed, sizeof(routed));
+      String rebuilt;
+      const uint8_t newHop = computeHopIndex(hopFrame_);
+      if (routedLen && encryptPacketV3(routed, routedLen, type, seq, newHop,
+                                       currentEpochSec(), rebuilt))
+        retryPacket = rebuilt;
+    }
+  }
+  if (transmit(retryPacket, true)) {
+    sosPacket_ = retryPacket;
     ++sosRetryCount_;
     sosSentMs_ = now;
     StateLock lock(gState);
@@ -1455,6 +1623,20 @@ void LoRaManager::handleTextAckPayload(const uint8_t* payload, size_t len) {
   xSemaphoreGive(textStateMutex_);
 }
 
+bool LoRaManager::validateTextAckHop() const {
+  if (!textAwaitingAck_ || textPendingPacket_.isEmpty()) return true;
+  const bool hopEnabled = [&]() {
+    StateLock lock(gState);
+    return lock.ok() && gState.hopEnabled && gState.hopChannelCount > 0;
+  }();
+  const uint8_t version = textPendingPacket_.length() > 1
+      ? static_cast<uint8_t>(textPendingPacket_[1]) : 0;
+  if (!hopEnabled) return version != LORA_PROTOCOL_VERSION_HOP;
+  if (version != LORA_PROTOCOL_VERSION_HOP ||
+      textPendingPacket_.length() < PACKET_HEADER_V3) return false;
+  return static_cast<uint8_t>(textPendingPacket_[14]) == computeHopIndex(hopFrame_);
+}
+
 void LoRaManager::serviceTextRetry() {
   String packet;
   uint32_t sentMs = 0;
@@ -1475,6 +1657,89 @@ void LoRaManager::serviceTextRetry() {
       if (lock.ok()) gState.lastError = "Text ACK timeout";
       return;
     }
+
+    // V3 packets authenticate the hop index. A retry must be rebuilt when the
+    // hop frame has advanced; otherwise it can be transmitted on a channel
+    // that no longer matches the receiver's current hopping slot.
+    bool hopEnabled = false;
+    {
+      StateLock stateLock(gState);
+      if (stateLock.ok())
+        hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
+    }
+    if (hopEnabled) {
+      uint8_t plain[Config::LORA_MAX_PACKET] = {};
+      uint8_t type = 0, ttl = 0, hop = 0;
+      uint16_t seq = 0;
+      uint32_t source = 0, epoch = 0;
+      size_t plainLen = 0;
+      bool rebuiltNeeded = false;
+      uint8_t newHop = computeHopIndex(hopFrame_);
+      if (textPendingPacket_.length() >= PACKET_HEADER_V3 &&
+          static_cast<uint8_t>(textPendingPacket_[1]) == LORA_PROTOCOL_VERSION_HOP) {
+        const uint8_t oldHop = static_cast<uint8_t>(textPendingPacket_[14]);
+        rebuiltNeeded = oldHop != newHop;
+        if (rebuiltNeeded &&
+            !decryptPacketV3(textPendingPacket_, type, seq, source, ttl, hop,
+                             epoch, plain, sizeof(plain), plainLen)) {
+          textAwaitingAck_ = false;
+          textAcked_ = false;
+          xSemaphoreGive(textStateMutex_);
+          return;
+        }
+      } else if (textPendingPacket_.length() >= PACKET_HEADER_V2 &&
+                 static_cast<uint8_t>(textPendingPacket_[1]) == Config::LORA_PROTOCOL_VERSION) {
+        rebuiltNeeded = true;
+        if (!decryptPacket(textPendingPacket_, type, seq, source, ttl,
+                           plain, sizeof(plain), plainLen)) {
+          textAwaitingAck_ = false;
+          textAcked_ = false;
+          xSemaphoreGive(textStateMutex_);
+          return;
+        }
+      }
+      if (rebuiltNeeded) {
+        // A V2 pending text packet has no hop index. Once hopping is enabled,
+        // upgrade it to authenticated V3 rather than retrying it on channel 0.
+        String rebuilt;
+        if (!encryptPacketV3(plain, plainLen, type, seq, newHop,
+                             currentEpochSec(), rebuilt)) {
+          xSemaphoreGive(textStateMutex_);
+          return;
+        }
+        textPendingPacket_ = rebuilt;
+      }
+    } else if (textPendingPacket_.length() >= PACKET_HEADER_V3 &&
+               static_cast<uint8_t>(textPendingPacket_[1]) == LORA_PROTOCOL_VERSION_HOP) {
+      // Conversely, once hopping is disabled, do not keep a V3 hop index from
+      // the previous mode. Re-authenticate the same origin frame as V2.
+      uint8_t plain[Config::LORA_MAX_PACKET] = {};
+      uint8_t type = 0, ttl = 0, hop = 0;
+      uint16_t seq = 0;
+      uint32_t source = 0, epoch = 0;
+      size_t plainLen = 0;
+      if (!decryptPacketV3(textPendingPacket_, type, seq, source, ttl, hop,
+                           epoch, plain, sizeof(plain), plainLen)) {
+        textAwaitingAck_ = false;
+        textAcked_ = false;
+        xSemaphoreGive(textStateMutex_);
+        return;
+      }
+      String rebuilt;
+      if (!encryptPacket(plain, plainLen, type, seq, rebuilt)) {
+        xSemaphoreGive(textStateMutex_);
+        return;
+      }
+      textPendingPacket_ = rebuilt;
+    }
+    if (!validateTextAckHop()) {
+      textAwaitingAck_ = false;
+      textAcked_ = false;
+      xSemaphoreGive(textStateMutex_);
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Text retry hop validation failed";
+      return;
+    }
     packet = textPendingPacket_;
     sentMs = textSentMs_;
     retryCount = textRetryCount_;
@@ -1484,8 +1749,6 @@ void LoRaManager::serviceTextRetry() {
   if (transmit(packet, true)) {
     if (textStateMutex_ &&
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-      // Only update the retry timestamp if the same pending packet is still
-      // active; an ACK may have arrived while transmit() was running.
       if (textAwaitingAck_ && textPendingPacket_ == packet &&
           textRetryCount_ == retryCount && textSentMs_ == sentMs) {
         ++textRetryCount_;
@@ -1502,7 +1765,7 @@ void LoRaManager::handleSosAckPayload(const uint8_t* payload, size_t len) {
                       (static_cast<uint16_t>(payload[1]) << 8);
   uint32_t ackedSource = 0;
   memcpy(&ackedSource, payload + 2, sizeof(ackedSource));
-  if (!sosAwaitingAck_ || ackedSeq != sosSeq_ || ackedSource != sourceId_) return;
+  if (!sosAwaitingAck_ || ackedSeq != sosSeq_.load(std::memory_order_acquire) || ackedSource != sourceId_) return;
   sosAwaitingAck_ = false;
   StateLock lock(gState);
   if (lock.ok()) {
@@ -1537,12 +1800,13 @@ bool LoRaManager::begin() {
   mutex_ = xSemaphoreCreateMutex();
   seqMutex_ = xSemaphoreCreateMutex();
   textStateMutex_ = xSemaphoreCreateMutex();
+  captureMutex_ = xSemaphoreCreateMutex();
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_ = sourceIdFromCallsign(gConfig.callsign);
   if (rtcRadioState.magic == RTC_RADIO_MAGIC && rtcRadioState.crc == stateCrc(rtcRadioState)) {
     hopFrame_ = rtcRadioState.hopFrame;
-    sosSeq_ = rtcRadioState.sosSeq;
+    sosSeq_.store(rtcRadioState.sosSeq, std::memory_order_release);
     sosRetryCount_ = rtcRadioState.sosRetryCount;
     sosAwaitingAck_ = rtcRadioState.sosAwaitingAck;
     if (sosAwaitingAck_ && rtcRadioState.sosPacketLen > 0 &&
@@ -1551,8 +1815,11 @@ bool LoRaManager::begin() {
       sosSentMs_ = millis() - min<uint32_t>(rtcRadioState.sosElapsedMs, 0x7FFFFFFFU);
     }
   }
-  if (!mutex_ || !seqMutex_ || !textStateMutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
+  if (!mutex_ || !seqMutex_ || !textStateMutex_ || !captureMutex_ ||
+      !forwardQueue_ || !reserveTxSequenceBlock()) return false;
   (void)loadForwardQueue();
+  (void)loadMessageHistory();
+  (void)loadFragmentRx();
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
@@ -1639,6 +1906,15 @@ void LoRaManager::serviceVoiceReorder() {
 
 void LoRaManager::task() {
   if (!mutex_) return;
+  if (adrEnabled_ && millis() - lastAdrMs_ >= Config::ADR_REEVALUATE_MS) {
+    lastAdrMs_ = millis();
+    serviceAdr();
+  }
+  serviceScheduledMessages();
+  if (messageHistoryDirty_ && storage.ready()) {
+    if (persistMessageHistory()) messageHistoryDirty_ = false;
+  }
+  if (fragmentRxDirty_ && storage.ready()) (void)persistFragmentRx();
 
   if (scanner_.active) {
     const uint32_t now = millis();
@@ -1670,6 +1946,7 @@ void LoRaManager::task() {
       r.occupancyPercent = lbtChannelBusy(scanSt) ? 100 : 0;
       r.preambleCount = lbtChannelBusy(scanSt) ? 1 : 0;
       r.timestamp = now;
+      r.generation = scannerGeneration_;
       int32_t rssiSum = 0;
       uint16_t occupancySum = 0;
       uint8_t validCount = 0;
@@ -1696,16 +1973,21 @@ void LoRaManager::task() {
     if (scanner_.index >= Config::SCANNER_MAX_CHANNELS) {
       scanner_.index = 0;
       ++scanner_.sweepCount;
+      {
+        StateLock sweepLock(gState);
+        if (sweepLock.ok()) gState.scannerSweepInProgress = false;
+      }
       if (scanner_.mode == 1) scanner_.active = false;
       if (scanner_.active) scanner_.lastSampleMs = now;
     } else {
       scanner_.lastSampleMs = now;
     }
     if (!scanner_.active) {
-      (void)retuneToChannel0();
+      (void)retuneToChannel0Locked();
       StateLock lock(gState);
       if (lock.ok()) {
         gState.scannerActive = false;
+        gState.scannerSweepInProgress = false;
         gState.scannerSweepCount = scanner_.sweepCount;
         gState.scannerLastSweepMs = now;
       }
@@ -1734,10 +2016,12 @@ void LoRaManager::task() {
     if (hopEnabled && !busy) {
       const uint32_t now = millis();
       if (now - hopLastSyncMs_ >= Config::HOP_DWELL_MS) {
+        if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return;
         if (legacyRxCounter_ >= Config::HOP_LEGACY_RX_EVERY) {
           legacyRxCounter_ = 0;
           const uint8_t idx = computeHopIndex(hopFrame_);
-          if (!retuneToHopChannel(idx)) {
+          if (!retuneToHopChannelLocked(idx)) {
+            xSemaphoreGive(mutex_);
             StateLock lock(gState);
             if (lock.ok()) gState.lastError = "hop retune failed";
             return;
@@ -1745,9 +2029,10 @@ void LoRaManager::task() {
           currentHopIndex_ = idx;
           ++hopFrame_;
         } else {
-          (void)retuneToChannel0();
+          (void)retuneToChannel0Locked();
           ++legacyRxCounter_;
         }
+        xSemaphoreGive(mutex_);
         hopLastSyncMs_ = now;
       }
     }
@@ -1817,6 +2102,7 @@ void LoRaManager::task() {
   if (!pending) {
     xSemaphoreGive(mutex_);
     if (!isPttOrRecording() &&
+        static_cast<int32_t>(millis() - forwardRetryNotBeforeMs_) >= 0 &&
         millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
       ForwardPacket forward{};
       if (forwardQueue_ && xQueueReceive(forwardQueue_, &forward, 0) == pdPASS) {
@@ -2096,6 +2382,7 @@ void LoRaManager::task() {
   // section. Voice/PTT keeps priority; one queued packet is attempted per task
   // iteration to bound airtime and CPU/RAM impact.
   if (!isPttOrRecording() && !pendingTx_.active && !forwardInFlightActive_ &&
+      static_cast<int32_t>(millis() - forwardRetryNotBeforeMs_) >= 0 &&
       millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
     ForwardPacket forward{};
     if (forwardQueue_ && xQueueReceive(forwardQueue_, &forward, 0) == pdPASS) {
@@ -2179,7 +2466,7 @@ bool LoRaManager::processPendingTx() {
       static_cast<uint8_t>(pendingTx_.packet[1]) == LORA_PROTOCOL_VERSION_HOP;
   const uint8_t pendingHopIndex = pendingHopped
       ? static_cast<uint8_t>(pendingTx_.packet[14]) : 0;
-  if (pendingHopped && !retuneToHopChannel(pendingHopIndex)) {
+  if (pendingHopped && !retuneToHopChannelLocked(pendingHopIndex)) {
     pendingTx_.active = false;
     pendingTx_.packet = String();
     done = true;
@@ -2244,10 +2531,7 @@ bool LoRaManager::processPendingTx() {
           done = true;
           txOk = st == RADIOLIB_ERR_NONE;
           if (!txOk && budgetConsumed)
-            dutyTokensUs_ = min(
-                (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
-                 Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL,
-                dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
+            refundDutyBudget(static_cast<uint32_t>(airtimeUs));
         }
       } else {
         pendingTx_.active = false;
@@ -2264,7 +2548,6 @@ bool LoRaManager::processPendingTx() {
       pendingError = "LBT SPI lock failed";
     }
   }
-  }
 
   if (!pendingError.isEmpty()) {
     StateLock lock(gState);
@@ -2274,12 +2557,20 @@ bool LoRaManager::processPendingTx() {
   if (!txOk && done && forwardInFlightActive_) {
     if (forwardInFlightNextHop_ != 0)
       recordNeighborTxResult(forwardInFlightNextHop_, false);
-    if (xQueueSend(forwardQueue_, &forwardInFlight_, 0) != pdPASS) {
+    const bool retryQueued =
+        xQueueSend(forwardQueue_, &forwardInFlight_, pdMS_TO_TICKS(2)) == pdPASS;
+    if (!retryQueued) {
+      ++forwardDrops_;
+      forwardLastDropMs_ = millis();
       StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "LoRa forward retry queue full";
+      if (lock.ok()) gState.lastError = "LoRa forward retry queue full; packet dropped";
+      forwardInFlightNextHop_ = 0;
+      forwardRetryPersistId_ = 0;
+    } else {
+      forwardRetryNotBeforeMs_ = millis() + forwardRetryBackoffMs_;
+      forwardRetryBackoffMs_ = min<uint32_t>(5000U, forwardRetryBackoffMs_ * 2U);
     }
     forwardInFlightActive_ = false;
-    forwardInFlightNextHop_ = 0;
     (void)persistForwardQueue();
   }
   if (txOk && forwardInFlightActive_) {
@@ -2287,6 +2578,9 @@ bool LoRaManager::processPendingTx() {
       recordNeighborTxResult(forwardInFlightNextHop_, true);
     forwardInFlightActive_ = false;
     forwardInFlightNextHop_ = 0;
+    forwardRetryPersistId_ = 0;
+    forwardRetryBackoffMs_ = 100;
+    forwardRetryNotBeforeMs_ = 0;
     (void)persistForwardQueue();
   }
 
@@ -2301,8 +2595,8 @@ bool LoRaManager::processPendingTx() {
     StateLock lock(gState);
     if (lock.ok()) ++gState.txPackets;
   }
+  if (pendingHopped) (void)retuneToChannel0Locked();
   xSemaphoreGive(mutex_);
-  if (pendingHopped) (void)retuneToChannel0();
   return done;
 }
 
@@ -2393,6 +2687,21 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
 
     const uint32_t txStartMs = millis();
     st = radio_.transmit(packet);
+    if (st == RADIOLIB_ERR_NONE) {
+      const int16_t txRssi = static_cast<int16_t>(radio_.getRSSI());
+      StateLock stateLock(gState);
+      if (stateLock.ok()) {
+        gState.txRssi = txRssi;
+        if (gState.antennaBaselineRssi <= -127) {
+          gState.antennaBaselineRssi = txRssi;
+          gState.antennaOk = true;
+        } else {
+          gState.antennaOk =
+              abs(static_cast<int>(txRssi) -
+                  static_cast<int>(gState.antennaBaselineRssi)) >= 3;
+        }
+      }
+    }
     const uint32_t txElapsedMs = millis() - txStartMs;
     if (txElapsedMs > Config::LORA_TX_TIMEOUT_MS) {
       ready_ = false;
@@ -2401,14 +2710,16 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     rxSt = radio_.startReceive();
 
     if (st != RADIOLIB_ERR_NONE && dutyTokensUs_ <= UINT32_MAX) {
-      dutyTokensUs_ = min(
-          (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
-           Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL,
-          dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
+      refundDutyBudget(static_cast<uint32_t>(airtimeUs));
     }
   }
 
-  const bool ok = (st == RADIOLIB_ERR_NONE);
+  bool ok = (st == RADIOLIB_ERR_NONE);
+  if (hoppedPacket && !retuneToChannel0Locked()) {
+    ok = false;
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "SX1262 channel-0 retune failed after TX";
+  }
   {
     StateLock lock(gState);
     if (lock.ok()) {
@@ -2422,14 +2733,40 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
   }
   if (ok) logPacket(true, txType, txSeq, sourceId_, 0, 0.0f, txTtl);
   xSemaphoreGive(mutex_);
-  if (hoppedPacket) (void)retuneToChannel0();
   return ok;
 }
 
+bool LoRaManager::prepareForFactoryReset() {
+  if (!mutex_) return false;
+  storageResetting_.store(true, std::memory_order_release);
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    storageResetting_.store(false, std::memory_order_release);
+    return false;
+  }
+  // Also take SPI once after freezing new persistence. If a persistForwardQueue()
+  // was already in progress, this waits for its file operation to finish before
+  // the caller deletes /LORA.
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(1000));
+    if (!spiLock.ok()) {
+      xSemaphoreGive(mutex_);
+      storageResetting_.store(false, std::memory_order_release);
+      return false;
+    }
+  }
+  xSemaphoreGive(mutex_);
+  return true;
+}
+
+void LoRaManager::cancelFactoryReset() {
+  storageResetting_.store(false, std::memory_order_release);
+}
+
 bool LoRaManager::prepareForDeepSleep() {
+  if (fragmentRxDirty_ && !persistFragmentRx()) return false;
   rtcRadioState.magic = RTC_RADIO_MAGIC;
   rtcRadioState.hopFrame = hopFrame_;
-  rtcRadioState.sosSeq = sosSeq_;
+  rtcRadioState.sosSeq = sosSeq_.load(std::memory_order_acquire);
   rtcRadioState.sosRetryCount = sosRetryCount_;
   rtcRadioState.sosAwaitingAck = sosAwaitingAck_;
   rtcRadioState.sosElapsedMs = sosAwaitingAck_ ? millis() - sosSentMs_ : 0;
@@ -2442,11 +2779,36 @@ bool LoRaManager::prepareForDeepSleep() {
   }
   rtcRadioState.crc = stateCrc(rtcRadioState);
 
-  if (!Config::LORA_RX_DUTY_CYCLE_ENABLED || !ready_ || !mutex_) return ready_;
+  if (!ready_ || !mutex_) return ready_;
 
-  // Keep the same lock order used by task(): mutex -> SPI. This prevents
-  // entering deep sleep while another task is using the SX1262.
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+  // textStateMutex_ participates in the text->mutex lock order used by
+  // transmitHopped()/serviceTextRetry(). Hold it while taking mutex_ so the
+  // deep-sleep check cannot race a text transaction or invert the lock order.
+  if (!textStateMutex_ ||
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+
+  bool txQueued = pendingTx_.active || forwardInFlightActive_ ||
+                  voiceTxOutstanding_ != 0 || textAwaitingAck_;
+  if (!txQueued) {
+    for (const auto& entry : txQueue_) {
+      if (entry.used) {
+        txQueued = true;
+        break;
+      }
+    }
+  }
+  if (txQueued) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "Deep sleep blocked: TX transaction pending";
+    xSemaphoreGive(mutex_);
+    xSemaphoreGive(textStateMutex_);
+    return false;
+  }
 
   bool armed = false;
   {
@@ -2460,12 +2822,428 @@ bool LoRaManager::prepareForDeepSleep() {
       armed = (st == RADIOLIB_ERR_NONE);
       if (armed) {
         ready_ = true;
+      } else {
+        StateLock lock(gState);
+        if (lock.ok()) gState.lastError = "SX1262 duty-cycle RX arm failed";
       }
+    } else {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Deep sleep blocked: SPI busy";
     }
   }
 
   xSemaphoreGive(mutex_);
+  xSemaphoreGive(textStateMutex_);
   return armed;
+}
+
+bool LoRaManager::persistMessageHistory() {
+  if (!storage.ready()) return false;
+
+  MessageHistoryEntry snapshot[Config::MESSAGE_HISTORY_SIZE] = {};
+  size_t count = 0;
+  size_t next = 0;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) return false;
+    count = min(gState.messageHistoryCount, Config::MESSAGE_HISTORY_SIZE);
+    next = gState.messageHistoryNext;
+    const size_t start = (next + Config::MESSAGE_HISTORY_SIZE - count) %
+                         Config::MESSAGE_HISTORY_SIZE;
+    for (size_t i = 0; i < count; ++i)
+      snapshot[i] = gState.messageHistory[(start + i) % Config::MESSAGE_HISTORY_SIZE];
+  }
+
+  SpiLock spiLock(pdMS_TO_TICKS(500));
+  if (!spiLock.ok()) return false;
+  if (!SD.exists("/LOG") && !SD.mkdir("/LOG")) return false;
+
+  const char* path = "/LOG/MSG.LOG";
+  File existing = SD.open(path, FILE_READ);
+  const uint32_t existingSize = existing ? static_cast<uint32_t>(existing.size()) : 0;
+  if (existing) existing.close();
+  if (existingSize >= Config::MESSAGE_HISTORY_ROTATE_BYTES) {
+    SD.remove("/LOG/MSG.LOG.2");
+    if (SD.exists("/LOG/MSG.LOG.1")) SD.rename("/LOG/MSG.LOG.1", "/LOG/MSG.LOG.2");
+    if (SD.exists(path)) SD.rename(path, "/LOG/MSG.LOG.1");
+  }
+  // MSG.LOG is a snapshot of the in-RAM ring, not an append-only event log.
+  // Rewriting it prevents every periodic persist from duplicating all messages.
+  SD.remove(path);
+  File f = SD.open(path, FILE_WRITE);
+  if (!f) return false;
+  f.println("epoch,source,read,text");
+  bool ok = true;
+  for (size_t i = 0; i < count && ok; ++i) {
+    String escaped;
+    escaped.reserve(snapshot[i].text.length() + 8);
+    for (size_t k = 0; k < snapshot[i].text.length(); ++k) {
+      const char c = snapshot[i].text[k];
+      if (c == '"') escaped += "\"\"";
+      else escaped += c;
+    }
+    ok = f.printf("%llu,%lu,%u,\"%s\"\n",
+                  static_cast<unsigned long long>(snapshot[i].timestamp),
+                  static_cast<unsigned long>(snapshot[i].sourceId),
+                  snapshot[i].read ? 1U : 0U, escaped.c_str()) > 0;
+  }
+  f.close();
+  return ok;
+}
+
+static bool parseMessageCsvLine(const String& line, MessageHistoryEntry& out) {
+  const int c1 = line.indexOf(',');
+  const int c2 = c1 >= 0 ? line.indexOf(',', c1 + 1) : -1;
+  const int c3 = c2 >= 0 ? line.indexOf(',', c2 + 1) : -1;
+  if (c1 <= 0 || c2 <= c1 || c3 <= c2) return false;
+  char* end = nullptr;
+  const unsigned long long epoch = strtoull(line.substring(0, c1).c_str(), &end, 10);
+  if (!end || *end != '\0') return false;
+  const unsigned long source = strtoul(line.substring(c1 + 1, c2).c_str(), &end, 10);
+  if (!end || *end != '\0') return false;
+  const int read = line.substring(c2 + 1, c3).toInt();
+  String text = line.substring(c3 + 1);
+  if (text.length() >= 2 && text[0] == '"' && text[text.length() - 1] == '"') {
+    text = text.substring(1, text.length() - 1);
+    String unescaped;
+    unescaped.reserve(text.length());
+    for (size_t i = 0; i < text.length(); ++i) {
+      if (text[i] == '"' && i + 1 < text.length() && text[i + 1] == '"') ++i;
+      unescaped += text[i];
+    }
+    text = unescaped;
+  }
+  out.timestamp = epoch;
+  out.sourceId = static_cast<uint32_t>(source);
+  out.read = read != 0;
+  out.text = text;
+  return true;
+}
+
+bool LoRaManager::loadMessageHistory() {
+  if (!storage.ready()) return false;
+  SpiLock spiLock(pdMS_TO_TICKS(500));
+  if (!spiLock.ok()) return false;
+  File f = SD.open("/LOG/MSG.LOG", FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return false;
+  }
+
+  MessageHistoryEntry loaded[Config::MESSAGE_HISTORY_SIZE] = {};
+  size_t count = 0;
+  size_t loadNext = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty() || line.startsWith("epoch,")) continue;
+    MessageHistoryEntry e{};
+    if (!parseMessageCsvLine(line, e)) continue;
+    loaded[loadNext] = e;
+    loadNext = (loadNext + 1) % Config::MESSAGE_HISTORY_SIZE;
+    if (count < Config::MESSAGE_HISTORY_SIZE) ++count;
+  }
+  f.close();
+
+  StateLock lock(gState);
+  if (!lock.ok()) return false;
+  for (auto& e : gState.messageHistory) e = MessageHistoryEntry{};
+  gState.messageHistoryNext = 0;
+  gState.messageHistoryCount = 0;
+  gState.messageUnreadCount = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const size_t loadStart = count == Config::MESSAGE_HISTORY_SIZE ? loadNext : 0;
+    const MessageHistoryEntry& e =
+        loaded[(loadStart + i) % Config::MESSAGE_HISTORY_SIZE];
+    gState.messageHistory[gState.messageHistoryNext] = e;
+    if (!e.read) ++gState.messageUnreadCount;
+    gState.messageHistoryNext =
+        (gState.messageHistoryNext + 1) % Config::MESSAGE_HISTORY_SIZE;
+    ++gState.messageHistoryCount;
+    gState.lastMessage = e.text;
+  }
+  return true;
+}
+
+String LoRaManager::neighborsJson() const {
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return "[]";
+  String out = "[";
+  const uint32_t now = millis();
+  bool first = true;
+  for (const auto& n : neighbors_) {
+    if (!n.sourceId || n.seenMs == 0) continue;
+    if (!first) out += ",";
+    first = false;
+    out += "{\"sourceId\":" + String(n.sourceId) +
+           ",\"rssi\":" + String(n.rssi) +
+           ",\"snr\":" + String(n.snr, 1) +
+           ",\"quality\":" + String(n.quality) +
+           ",\"txAttempts\":" + String(n.txAttempts) +
+           ",\"txSuccess\":" + String(n.txSuccess) +
+           ",\"ageMs\":" + String(now - n.seenMs) + "}";
+  }
+  out += "]";
+  if (mutex_) xSemaphoreGive(mutex_);
+  return out;
+}
+
+String LoRaManager::routesJson() const {
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return "[]";
+  String out = "[";
+  const uint32_t now = millis();
+  bool first = true;
+  for (const auto& r : routes_) {
+    if (!r.destination || !r.nextHop || r.seenMs == 0) continue;
+    if (!first) out += ",";
+    first = false;
+    out += "{\"destination\":" + String(r.destination) +
+           ",\"nextHop\":" + String(r.nextHop) +
+           ",\"etxQ8\":" + String(r.etxQ8) +
+           ",\"quality\":" + String(r.quality) +
+           ",\"ageMs\":" + String(now - r.seenMs) + "}";
+  }
+  out += "]";
+  if (mutex_) xSemaphoreGive(mutex_);
+  return out;
+}
+
+bool LoRaManager::capturePacket(const String& raw, int16_t rssi, float snr, bool decrypted) {
+  if (!captureMutex_ || !captureActive()) return false;
+  if (xSemaphoreTake(captureMutex_, pdMS_TO_TICKS(5)) != pdTRUE) return false;
+  if (!captureUntilMs_ || static_cast<int32_t>(millis() - captureUntilMs_) >= 0) {
+    xSemaphoreGive(captureMutex_);
+    return false;
+  }
+  CaptureEntry& e = capture_[captureNext_];
+  e.ts = millis();
+  e.rssi = rssi;
+  e.snr = snr;
+  e.decrypted = decrypted;
+  e.rawHex.reserve(raw.length() * 2);
+  e.rawHex = "";
+  static const char hex[] = "0123456789ABCDEF";
+  for (size_t i = 0; i < raw.length(); ++i) {
+    const uint8_t b = static_cast<uint8_t>(raw[i]);
+    e.rawHex += hex[b >> 4];
+    e.rawHex += hex[b & 0x0F];
+  }
+  captureNext_ = (captureNext_ + 1) % CAPTURE_SIZE;
+  if (captureCount_ < CAPTURE_SIZE) ++captureCount_;
+  xSemaphoreGive(captureMutex_);
+  return true;
+}
+
+bool LoRaManager::captureStart(uint32_t durationMs) {
+  if (!captureMutex_ || durationMs == 0 ||
+      durationMs > Config::CAPTURE_MAX_DURATION_MS) return false;
+  if (xSemaphoreTake(captureMutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  captureNext_ = 0;
+  captureCount_ = 0;
+  captureUntilMs_ = millis() + durationMs;
+  for (auto& e : capture_) e = CaptureEntry{};
+  xSemaphoreGive(captureMutex_);
+  return true;
+}
+
+bool LoRaManager::captureStop() {
+  if (!captureMutex_ || xSemaphoreTake(captureMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
+  captureUntilMs_ = 0;
+  xSemaphoreGive(captureMutex_);
+  return true;
+}
+
+bool LoRaManager::captureActive() const {
+  return captureUntilMs_ != 0 &&
+         static_cast<int32_t>(millis() - captureUntilMs_) < 0;
+}
+
+String LoRaManager::captureDumpJson() const {
+  if (!captureMutex_ || xSemaphoreTake(captureMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+    return "[]";
+  String out = "[";
+  const size_t count = captureCount_;
+  const size_t start = (captureNext_ + CAPTURE_SIZE - count) % CAPTURE_SIZE;
+  for (size_t i = 0; i < count; ++i) {
+    if (i) out += ",";
+    const auto& e = capture_[(start + i) % CAPTURE_SIZE];
+    out += "{\"ts\":" + String(e.ts) +
+           ",\"rssi\":" + String(e.rssi) +
+           ",\"snr\":" + String(e.snr, 1) +
+           ",\"rawHex\":\"" + e.rawHex +
+           "\",\"decrypted\":" + String(e.decrypted ? "true" : "false") + "}";
+  }
+  out += "]";
+  xSemaphoreGive(captureMutex_);
+  return out;
+}
+
+bool LoRaManager::setAdrEnabled(bool enabled) {
+  adrEnabled_ = enabled;
+  if (!enabled) {
+    currentAdrSf_ = gConfig.loraSf;
+    return true;
+  }
+  serviceAdr();
+  return true;
+}
+
+void LoRaManager::serviceAdr() {
+  if (!adrEnabled_ || !ready_) return;
+  const uint8_t quality = bestNeighborQuality();
+  const uint8_t target = quality > 70 ? 7 : (quality >= 40 ? 9 : 11);
+  if (target == currentAdrSf_) return;
+  if (!mutex_ || xSemaphoreTake(mutex_, 0) != pdTRUE) return;
+  const uint8_t oldSf = gConfig.loraSf;
+  gConfig.loraSf = target;
+  currentAdrSf_ = target;
+  bool ok = false;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (spiLock.ok()) {
+      const int16_t st = radio_.begin(
+          gConfig.loraFreqMHz, gConfig.loraBwKHz, target,
+          gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
+          Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
+      if (st == RADIOLIB_ERR_NONE) {
+        radio_.setPacketReceivedAction(onDio1);
+        ok = radio_.startReceive() == RADIOLIB_ERR_NONE;
+      }
+    }
+  }
+  if (!ok) {
+    gConfig.loraSf = oldSf;
+    currentAdrSf_ = oldSf;
+  }
+  xSemaphoreGive(mutex_);
+}
+
+uint8_t LoRaManager::lqi() const {
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return 0;
+  int best = 0;
+  for (const auto& n : neighbors_) {
+    if (!n.sourceId || n.seenMs == 0) continue;
+    const float rssiScore = constrain((static_cast<float>(n.rssi) + 120.0f) * 2.0f, 0.0f, 100.0f);
+    const float snrScore = constrain((n.snr + 20.0f) * 2.5f, 0.0f, 100.0f);
+    const float perScore = n.txAttempts
+        ? (100.0f * static_cast<float>(n.txSuccess) / n.txAttempts)
+        : 100.0f;
+    const int score = static_cast<int>(0.4f * rssiScore + 0.3f * snrScore + 0.3f * perScore);
+    best = max(best, score);
+  }
+  const uint8_t result = static_cast<uint8_t>(constrain(best, 0, 100));
+  if (mutex_) xSemaphoreGive(mutex_);
+  return result;
+}
+
+bool LoRaManager::setHopSyncSource(bool gps) {
+  hopSyncGps_ = gps;
+  return true;
+}
+
+bool LoRaManager::setSosFormats(uint8_t mask) {
+  if ((mask & 0x07U) == 0) return false;
+  sosFormatMask_ = mask & 0x07U;
+  return true;
+}
+
+bool LoRaManager::scheduleMessage(uint64_t atEpoch, const String& text) {
+  if (!atEpoch || text.isEmpty() ||
+      text.length() > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 -
+                       PACKET_TAG - ROUTE_EXT_BYTES || !mutex_)
+    return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  for (auto& entry : scheduledMessages_) {
+    if (!entry.used) {
+      entry.used = true;
+      entry.id = nextScheduledMessageId_++;
+      if (nextScheduledMessageId_ == 0) nextScheduledMessageId_ = 1;
+      entry.atEpoch = atEpoch;
+      entry.text = text;
+      xSemaphoreGive(mutex_);
+      return true;
+    }
+  }
+  xSemaphoreGive(mutex_);
+  return false;
+}
+
+bool LoRaManager::cancelScheduledMessage(uint32_t id) {
+  if (!id || !mutex_ || xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  for (auto& entry : scheduledMessages_) {
+    if (entry.used && entry.id == id) {
+      entry = ScheduledMessage{};
+      xSemaphoreGive(mutex_);
+      return true;
+    }
+  }
+  xSemaphoreGive(mutex_);
+  return false;
+}
+
+String LoRaManager::scheduledMessagesJson() const {
+  if (mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(50)) != pdTRUE) return "[]";
+  String out = "[";
+  bool first = true;
+  for (const auto& e : scheduledMessages_) {
+    if (!e.used) continue;
+    if (!first) out += ",";
+    first = false;
+    out += "{\"id\":" + String(e.id) +
+           ",\"at\":" + String(static_cast<unsigned long long>(e.atEpoch)) +
+           ",\"text\":\"" + e.text + "\"}";
+  }
+  out += "]";
+  if (mutex_) xSemaphoreGive(mutex_);
+  return out;
+}
+
+void LoRaManager::serviceScheduledMessages() {
+  if (!mutex_ || !ready_) return;
+  const uint32_t nowMs = millis();
+  static uint32_t lastRunMs = 0;
+  if (nowMs - lastRunMs < 250) return;
+  lastRunMs = nowMs;
+  uint64_t nowEpoch = 0;
+  {
+    StateLock lock(gState);
+    if (lock.ok() && gState.gps.timeValid) nowEpoch = gState.gps.utcEpoch;
+  }
+  if (!nowEpoch) return;
+
+  String text;
+  uint32_t id = 0;
+  if (xSemaphoreTake(mutex_, 0) != pdTRUE) return;
+  for (auto& e : scheduledMessages_) {
+    if (e.used && e.atEpoch <= nowEpoch) {
+      id = e.id;
+      text = e.text;
+      e = ScheduledMessage{};
+      break;
+    }
+  }
+  xSemaphoreGive(mutex_);
+  if (id && !text.isEmpty()) (void)transmitHopped(text, Config::LORA_TYPE_TEXT, 0);
+}
+
+
+void LoRaManager::updateSourceId() {
+  const uint32_t next = sourceIdFromCallsign(gConfig.callsign);
+  if (next == 0) return;
+  if (textStateMutex_ &&
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
+    // A callsign change changes the authenticated identity. Do not allow an
+    // ACK for the previous identity to complete the new text transaction.
+    textAwaitingAck_ = false;
+    textAcked_ = false;
+    textPendingPacket_.clear();
+    sourceId_ = next;
+    xSemaphoreGive(textStateMutex_);
+  } else {
+    // Never mutate sourceId_ outside the text-state transaction. An unlocked
+    // update could race packet construction and bind an ACK to a new identity.
+    return;
+  }
 }
 
 bool LoRaManager::applyConfig() {
@@ -2504,42 +3282,18 @@ bool LoRaManager::sendText(const String& text) {
 }
 
 bool LoRaManager::sendTextTo(uint32_t destination, const String& text) {
-  if (destination == sourceId_) return false;
+  if (text.isEmpty()) return false;
+  if (!textStateMutex_ ||
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
+    return false;
+  const bool self = destination == sourceId_;
+  xSemaphoreGive(textStateMutex_);
+  if (self) return false;
   if (text.length() > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 - PACKET_TAG - ROUTE_EXT_BYTES)
     return enqueueTextFragments(text, destination);
-  if (!transmitHopped(text, Config::LORA_TYPE_TEXT, destination)) return false;
-
-  const uint32_t retryWindow =
-      Config::SOS_REPEAT_MS * (static_cast<uint32_t>(Config::SOS_MAX_RETRIES) + 1U);
-  const uint32_t deadline = millis() + retryWindow + 500U;
-  while (static_cast<int32_t>(millis() - deadline) < 0) {
-    bool awaiting = false;
-    bool acked = false;
-    if (textStateMutex_ &&
-        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-      awaiting = textAwaitingAck_;
-      acked = textAcked_;
-      xSemaphoreGive(textStateMutex_);
-    }
-    if (!awaiting || acked) break;
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-
-  bool acked = false;
-  bool awaiting = false;
-  if (textStateMutex_ &&
-      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-    acked = textAcked_;
-    awaiting = textAwaitingAck_;
-    xSemaphoreGive(textStateMutex_);
-  }
-  if (!acked) {
-    StateLock lock(gState);
-    if (lock.ok()) gState.lastError = awaiting
-        ? "Text transmitted; ACK not received"
-        : "Text transmission failed or timed out";
-  }
-  return acked;
+  // Transmission is synchronous only for the radio airtime/LBT operation.
+  // ACK/retry processing is owned by serviceTextRetry() in the LoRa task.
+  return transmitHopped(text, Config::LORA_TYPE_TEXT, destination);
 }
 
 bool LoRaManager::sendVoiceFrame() {
@@ -2655,9 +3409,17 @@ void LoRaManager::updateNeighborMetric(uint32_t sourceId, int16_t rssi, float sn
 
 uint8_t LoRaManager::neighborQualityForPeer(uint32_t sourceId) const {
   if (sourceId == 0) return 0;
+  const uint32_t now = millis();
   for (const auto& entry : neighbors_) {
-    if (entry.sourceId == sourceId && millis() - entry.seenMs <= 120000UL)
-      return entry.quality;
+    if (entry.sourceId != sourceId || entry.seenMs == 0) continue;
+    const uint32_t age = now - entry.seenMs;
+    if (age > Config::NEIGHBOR_TTL_MS) return 0;
+    // Keep a stale-but-recent neighbor usable while degrading its quality
+    // smoothly instead of dropping it to zero as soon as one beacon is missed.
+    const uint8_t decay = static_cast<uint8_t>(
+        100U - min<uint32_t>(100U,
+            (age * 100U) / max<uint32_t>(1U, Config::NEIGHBOR_TTL_MS)));
+    return static_cast<uint8_t>((static_cast<uint16_t>(entry.quality) * decay) / 100U);
   }
   return 0;
 }
@@ -2666,7 +3428,7 @@ uint8_t LoRaManager::bestNeighborQuality() const {
   uint8_t best = 0;
   const uint32_t now = millis();
   for (const auto& entry : neighbors_) {
-    if (entry.sourceId != 0 && now - entry.seenMs <= ROUTE_CACHE_TTL_MS)
+    if (entry.sourceId != 0 && now - entry.seenMs <= Config::NEIGHBOR_TTL_MS)
       best = max(best, entry.quality);
   }
   return best;
@@ -2711,12 +3473,21 @@ void LoRaManager::handleVoiceAckPayload(uint32_t ackSenderSourceId,
     // The sender has at most LORA_VOICE_WINDOW_SIZE outstanding frames, so a
     // cumulative ACK is only authoritative within that bounded window. This
     // avoids treating an arbitrarily old sequence as ACKed after uint16 wrap.
-    const uint16_t behind = static_cast<uint16_t>(ackBase - slot.seq);
-    bool acked = behind >= 1U && behind <= Config::LORA_VOICE_WINDOW_SIZE;
+    const int16_t delta = static_cast<int16_t>(
+        static_cast<uint16_t>(slot.seq - ackBase));
+    // Unit-test boundary intent: delta=-WINDOW and +WINDOW are accepted;
+    // values outside the bounded signed window are never ACK-authoritative.
+    if (delta < -static_cast<int16_t>(Config::LORA_VOICE_WINDOW_SIZE) ||
+        delta > static_cast<int16_t>(Config::LORA_VOICE_WINDOW_SIZE))
+      continue;
+    const int16_t behind = static_cast<int16_t>(-delta);
+    bool acked = behind >= 1 &&
+                 behind <= static_cast<int16_t>(Config::LORA_VOICE_WINDOW_SIZE);
     if (!acked) {
-      const uint16_t ahead = static_cast<uint16_t>(slot.seq - ackBase);
-      acked = ahead >= 1U && ahead <= Config::LORA_VOICE_WINDOW_SIZE &&
-              (ackBitmap & (1U << (ahead - 1U)));
+      const int16_t ahead = delta;
+      acked = ahead >= 1 &&
+              ahead <= static_cast<int16_t>(Config::LORA_VOICE_WINDOW_SIZE) &&
+              (ackBitmap & (1U << static_cast<uint8_t>(ahead - 1)));
     }
     if (acked) {
       slot.acked = true;
@@ -2781,7 +3552,7 @@ void LoRaManager::serviceNeighborBeacon() {
       route = RouteEntry{};
   }
   for (auto& neighbor : neighbors_) {
-    if (neighbor.seenMs != 0 && now - neighbor.seenMs > ROUTE_CACHE_TTL_MS)
+    if (neighbor.seenMs != 0 && now - neighbor.seenMs > Config::NEIGHBOR_TTL_MS)
       neighbor = NeighborEntry{};
   }
   if (!ready_ || now - lastNeighborBeaconMs_ < Config::LORA_NEIGHBOR_BEACON_PERIOD_MS)
@@ -2822,39 +3593,49 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
   const uint32_t now = millis();
   FragmentRxState* state = nullptr;
   FragmentRxState* reusable = nullptr;
+  FragmentRxState* expired = nullptr;
+  // Locate an existing transaction before considering eviction. A duplicate
+  // fragment must never reset an active reassembly.
   for (auto& candidate : fragmentRx_) {
-    if (candidate.active &&
-        now - candidate.startedMs > Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS)
-      candidate = FragmentRxState{};
     if (candidate.active && candidate.sourceId == sourceId &&
         candidate.messageId == messageId) {
       state = &candidate;
       break;
     }
-    if (!candidate.active && !reusable) reusable = &candidate;
   }
   if (!state) {
-    state = reusable;
-    if (!state) {
-      // All slots are busy. Replace the oldest incomplete message rather than
-      // corrupting an arbitrary active reassembly.
-      state = &fragmentRx_[0];
-      for (auto& candidate : fragmentRx_) {
-        if (static_cast<int32_t>(candidate.startedMs - state->startedMs) < 0)
-          state = &candidate;
+    for (auto& candidate : fragmentRx_) {
+      if (candidate.active &&
+          now - candidate.startedMs > Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS) {
+        if (!expired) expired = &candidate;
+      } else if (!candidate.active && !reusable) {
+        reusable = &candidate;
       }
     }
-    *state = FragmentRxState{};
+    state = expired ? expired : reusable;
+    if (expired) {
+      ++fragmentEvictions_;
+      *expired = FragmentRxState{};
+    }
+    if (!state) {
+      ++fragmentDrops_;
+      // Never evict another sender's in-flight message.
+      return false;
+    }
+    if (state == reusable) *state = FragmentRxState{};
+  }
     state->active = true;
     state->sourceId = sourceId;
     state->messageId = messageId;
     state->count = count;
     state->totalLen = totalLen;
     state->startedMs = now;
+    fragmentRxDirty_ = true;
   } else if (state->count != count || state->totalLen != totalLen) {
     // Same (source,messageId) with conflicting authenticated metadata is not a
     // continuation of the current message; reject it instead of resetting a
     // valid in-flight reassembly.
+    ++fragmentDrops_;
     return false;
   }
 
@@ -2864,11 +3645,13 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
     state->lengths[index] = static_cast<uint16_t>(chunkLen);
     state->receivedMask |= bit;
     state->receivedBytes = static_cast<uint16_t>(state->receivedBytes + chunkLen);
+    fragmentRxDirty_ = true;
   } else if (state->lengths[index] != chunkLen ||
              memcmp(state->data + offset,
                     payload + Config::LORA_FRAGMENT_HEADER_BYTES, chunkLen) != 0) {
     // A duplicate fragment must be byte-identical. This catches conflicting
     // fragment variants without destroying the already authenticated state.
+    ++fragmentDrops_;
     return false;
   }
   const uint16_t completeMask = static_cast<uint16_t>((1UL << count) - 1UL);
@@ -2878,6 +3661,119 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
   text[totalLen] = '\0';
   addMessageHistory(sourceId, text);
   *state = FragmentRxState{};
+  fragmentRxDirty_ = true;
+  return true;
+}
+
+bool LoRaManager::persistFragmentRx() {
+  if (!storage.ready() || !fragmentRxDirty_) return true;
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) return false;
+  if (!SD.exists("/LORA") && !SD.mkdir("/LORA")) return false;
+  const char* tmp = "/LORA/FRAG.NEW";
+  const char* path = "/LORA/FRAG.Q";
+  if (SD.exists(tmp)) SD.remove(tmp);
+  File f = SD.open(tmp, FILE_WRITE);
+  if (!f) return false;
+
+  struct Header {
+    uint16_t magic;
+    uint8_t version;
+    uint8_t slot;
+    uint32_t sourceId;
+    uint16_t messageId;
+    uint8_t count;
+    uint16_t totalLen;
+    uint16_t receivedMask;
+    uint16_t receivedBytes;
+    uint32_t startedMs;
+    uint16_t lengths[Config::LORA_FRAGMENT_MAX_COUNT];
+  };
+
+  for (uint8_t i = 0; i < FRAGMENT_RX_SLOTS; ++i) {
+    const auto& st = fragmentRx_[i];
+    if (!st.active) continue;
+    Header hdr{};
+    hdr.magic = FRAG_STORE_MAGIC;
+    hdr.version = FRAG_STORE_VERSION;
+    hdr.slot = i;
+    hdr.sourceId = st.sourceId;
+    hdr.messageId = st.messageId;
+    hdr.count = st.count;
+    hdr.totalLen = st.totalLen;
+    hdr.receivedMask = st.receivedMask;
+    hdr.receivedBytes = st.receivedBytes;
+    hdr.startedMs = st.startedMs;
+    memcpy(hdr.lengths, st.lengths, sizeof(hdr.lengths));
+    if (f.write(reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)) != sizeof(hdr) ||
+        f.write(st.data, st.totalLen) != st.totalLen) {
+      f.close();
+      if (SD.exists(tmp)) SD.remove(tmp);
+      return false;
+    }
+  }
+  f.flush();
+  f.close();
+  if (SD.exists(path)) SD.remove(path);
+  if (!SD.rename(tmp, path)) {
+    if (SD.exists(tmp)) SD.remove(tmp);
+    return false;
+  }
+  fragmentRxDirty_ = false;
+  return true;
+}
+
+bool LoRaManager::loadFragmentRx() {
+  if (!storage.ready()) return false;
+  SpiLock spiLock(pdMS_TO_TICKS(500));
+  if (!spiLock.ok()) return false;
+  File f = SD.open("/LORA/FRAG.Q", FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return true;
+  }
+  struct Header {
+    uint16_t magic;
+    uint8_t version;
+    uint8_t slot;
+    uint32_t sourceId;
+    uint16_t messageId;
+    uint8_t count;
+    uint16_t totalLen;
+    uint16_t receivedMask;
+    uint16_t receivedBytes;
+    uint32_t startedMs;
+    uint16_t lengths[Config::LORA_FRAGMENT_MAX_COUNT];
+  };
+  while (f.available()) {
+    Header hdr{};
+    if (f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)) != sizeof(hdr) ||
+        hdr.magic != FRAG_STORE_MAGIC || hdr.version != FRAG_STORE_VERSION ||
+        hdr.slot >= FRAGMENT_RX_SLOTS || hdr.count == 0 ||
+        hdr.count > Config::LORA_FRAGMENT_MAX_COUNT ||
+        hdr.totalLen == 0 || hdr.totalLen > Config::LORA_FRAGMENT_MAX_BYTES ||
+        hdr.receivedBytes > hdr.totalLen) {
+      f.close();
+      return false;
+    }
+    FragmentRxState state{};
+    state.active = true;
+    state.sourceId = hdr.sourceId;
+    state.messageId = hdr.messageId;
+    state.count = hdr.count;
+    state.totalLen = hdr.totalLen;
+    state.receivedMask = hdr.receivedMask;
+    state.receivedBytes = hdr.receivedBytes;
+    state.startedMs = hdr.startedMs;
+    memcpy(state.lengths, hdr.lengths, sizeof(state.lengths));
+    if (f.read(state.data, state.totalLen) != state.totalLen) {
+      f.close();
+      return false;
+    }
+    fragmentRx_[hdr.slot] = state;
+  }
+  f.close();
+  fragmentRxDirty_ = false;
   return true;
 }
 
@@ -2932,26 +3828,6 @@ bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination)
       return false;
     }
 
-    const uint32_t retryWindow =
-        Config::SOS_REPEAT_MS * (static_cast<uint32_t>(Config::SOS_MAX_RETRIES) + 1U);
-    const uint32_t deadline = millis() + retryWindow + 500U;
-    while (static_cast<int32_t>(millis() - deadline) < 0) {
-      bool awaiting = false;
-      bool acked = false;
-      if (xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-        awaiting = textAwaitingAck_;
-        acked = textAcked_;
-        xSemaphoreGive(textStateMutex_);
-      }
-      if (!awaiting || acked) break;
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    bool acked = false;
-    if (xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-      acked = textAcked_;
-      xSemaphoreGive(textStateMutex_);
-    }
-    if (!acked) return false;
   }
   return true;
 }
@@ -2973,14 +3849,11 @@ bool LoRaManager::sendPosition() {
 }
 
 bool LoRaManager::sendSOS() {
-  // SOS retries are owned by the retry state machine. Reject a second manual
-  // trigger while an SOS is already active to avoid flooding the channel.
   if (sosAwaitingAck_ && millis() - sosSentMs_ < Config::SOS_REPEAT_MS)
     return false;
   {
     StateLock lock(gState);
-    if (lock.ok() && (gState.sos || gState.sosEscalated))
-      return false;
+    if (lock.ok() && (gState.sos || gState.sosEscalated)) return false;
   }
 
   bool valid;
@@ -2993,26 +3866,59 @@ bool LoRaManager::sendSOS() {
     lon = gState.gps.lon;
   }
 
-  String p = "SOS,";
-  p += valid ? String(lat, 6) + "," + String(lon, 6) : "NOFIX";
-  p += ",TS=" + String(millis());
-  uint8_t routed[Config::LORA_MAX_PACKET] = {};
-  const uint16_t seq = ++sosSeq_;
-  const size_t routedLen = addRouteExtension(
-      reinterpret_cast<const uint8_t*>(p.c_str()), p.length(), 0, 0,
-      routed, sizeof(routed));
-  String packet;
-  if (!routedLen ||
-      !encryptPacket(routed, routedLen, Config::LORA_TYPE_SOS, seq, packet))
-    return false;
-  sosPacket_ = packet;
+  String plainText = "SOS,";
+  plainText += valid ? String(lat, 6) + "," + String(lon, 6) : "NOFIX";
+  plainText += ",TS=" + String(millis());
+
+  struct FormatPayload { const uint8_t* data; size_t len; };
+  uint8_t binary[16] = {};
+  binary[0] = 'S'; binary[1] = 'O'; binary[2] = 'S'; binary[3] = 1;
+  int32_t latE6 = valid ? static_cast<int32_t>(lat * 1000000.0) : 0;
+  int32_t lonE6 = valid ? static_cast<int32_t>(lon * 1000000.0) : 0;
+  memcpy(binary + 4, &latE6, 4);
+  memcpy(binary + 8, &lonE6, 4);
+  const uint32_t epoch = currentEpochSec();
+  memcpy(binary + 12, &epoch, 4);
+
+  const String aprs = valid
+      ? ("!/" + String(lat, 4) + "," + String(lon, 4) + "/SOS")
+      : "!/NOFIX/SOS";
+
+  bool sentAny = false;
+  uint16_t lastSeq = 0;
+  String lastPacket;
+  const uint8_t formats[3] = {1, 2, 4};
+  for (uint8_t format : formats) {
+    if (!(sosFormatMask_ & format)) continue;
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+    if (format == 1) { data = reinterpret_cast<const uint8_t*>(plainText.c_str()); len = plainText.length(); }
+    else if (format == 2) { data = reinterpret_cast<const uint8_t*>(aprs.c_str()); len = aprs.length(); }
+    else { data = binary; len = sizeof(binary); }
+
+    uint8_t routed[Config::LORA_MAX_PACKET] = {};
+    const uint16_t seq = static_cast<uint16_t>(
+        sosSeq_.fetch_add(1, std::memory_order_acq_rel) + 1U);
+    const size_t routedLen = addRouteExtension(data, len, 0, 0, routed, sizeof(routed));
+    String packet;
+    if (!routedLen || !encryptPacket(routed, routedLen, Config::LORA_TYPE_SOS, seq, packet))
+      continue;
+    if (transmit(packet, true)) {
+      sentAny = true;
+      lastSeq = seq;
+      lastPacket = packet;
+    }
+  }
+  if (!sentAny) return false;
+
+  sosPacket_ = lastPacket;
   sosSentMs_ = millis();
   sosRetryCount_ = 0;
   sosAwaitingAck_ = true;
   {
     StateLock lock(gState);
     if (lock.ok()) {
-      gState.sosSeq = seq;
+      gState.sosSeq = lastSeq;
       gState.sosAcked = false;
       gState.sosEscalated = false;
       gState.sosRetries = 0;
@@ -3022,8 +3928,9 @@ bool LoRaManager::sendSOS() {
     }
   }
   addSosHistory(0);
-  return transmit(packet, true);
+  return true;
 }
+
 
 bool LoRaManager::cancelSOS() {
   sosAwaitingAck_ = false;

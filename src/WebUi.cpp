@@ -110,7 +110,7 @@ body.light{background:#f5f5f5;color:#111} body.light .card{border-color:#bbb} bo
 @media(max-width:600px){body{padding:8px}.card{padding:8px}button,input,select{width:100%;box-sizing:border-box;margin:3px 0}table{font-size:.8rem;display:block;overflow-x:auto}}
 button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:10px;overflow:auto}
 .battery-low{outline:3px solid orange}.battery-critical{outline:4px solid red}
-</style></head><body><h1>FieldRadio</h1>
+</style></head><body class="__THEME_CLASS__"><h1 id=title>FieldRadio</h1><label>Language <select id=lang onchange="setLang()"><option value="en">EN</option><option value="id">ID</option></select></label>
 <div class=card>
 <button onclick="ptt(1)">PTT ON</button><button onclick="ptt(0)">PTT OFF</button>
 <button onclick="sos(1)">SOS</button><button onclick="sos(0)">Cancel SOS</button><span id=sosBadge></span><button onclick="refreshSosHistory()">SOS history</button><button onclick="rec(1)">REC</button>
@@ -146,11 +146,11 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=bat value="1.0" placeholder="Battery calibration">
 <input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
 <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
-<button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button></div>
+<button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button><button onclick="factoryReset()">Factory reset</button></div>
 <div class=card><h3>Radio diagnostics</h3>
 <input id=tuneFreq type=number step="0.001" min="920" max="923" placeholder="Frequency MHz">
-<button onclick="tuneRadio()">Manual tune</button><button onclick="refreshRadioHistory()">Refresh RSSI/SNR history</button>
-<pre id=radioHistory></pre><div id=storageInfo></div></div>
+<button onclick="tuneRadio()">Manual tune</button><button onclick="refreshRadioHistory()">Refresh RSSI/SNR history</button><button onclick="refreshDiagnostics()">Refresh diagnostics</button><button onclick="captureStart()">Capture 10s</button><button onclick="captureStop()">Stop capture</button><button onclick="captureDump()">Dump capture</button><button onclick="toggleAdr()">ADR</button><button onclick="selfTest()">Self-test</button>
+<pre id=radioHistory></pre><pre id=radioStats></pre><div id=storageInfo></div><div id=diagnostics></div></div>
 <div class=card><h3>Channel Scanner</h3>
 <button onclick="scanStart(1)">Scan Once</button>
 <button onclick="scanStart(2)">Scan Continuous</button>
@@ -158,6 +158,8 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <button onclick="hopSuggest()">Suggest Hop Channels</button>
 <button onclick="hopEnable(1)">Enable Hop</button>
 <button onclick="hopEnable(0)">Disable Hop</button>
+<input id=hopList placeholder="0,2,5"><button onclick="hopSetChannels()">Set channels</button>
+<button onclick="rangeTest(1)">Range test ON</button><button onclick="rangeTest(0)">Range test OFF</button>
 <pre id=scanmsg></pre>
 <div id=scanresults><table><thead><tr>
 <th>Freq MHz</th><th>RSSI avg</th><th>RSSI peak</th><th>SNR</th>
@@ -165,17 +167,28 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 </tr></thead><tbody id=scantbody></tbody></table></div>
 <div id=hopsummary></div>
 </div>
-<div class=card><button onclick="toggleTheme()">Dark/light</button><span id=toast></span></div><div class=card><h3>Status</h3><pre id=s></pre></div>
+<div class=card><button onclick="toggleTheme()">Dark/light</button><button onclick="showTrack()">Track</button><span id=toast></span></div>
+<div class=card id=trackPanel style="display:none"><h3>Track</h3>
+<label>From epoch <input id=trackFrom type=number value="0"></label>
+<label>To epoch <input id=trackTo type=number value=""></label>
+<label>Limit <input id=trackLimit type=number min="1" max="5000" value="1000"></label>
+<button onclick="loadTrack()">Load track</button><div id=trackMap style="height:420px"></div></div>
+<div class=card><h3>Status</h3><pre id=s></pre></div>
 <div class=card><h3>Files</h3><input id=fileDir value="/REC/"><button onclick="refreshFiles()">Open folder</button><pre id=f></pre>
 <input id=upfile type=file accept=".wav,.WAV"><button onclick="uploadFile()">UPLOAD WAV</button>
 <input id=renameFrom placeholder="/REC/old.WAV"><input id=renameTo placeholder="/REC/new.WAV"><button onclick="renameFile()">RENAME</button>
 <a id=trackDownload href="/api/track/download">Download GPS track</a>
 </div>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const CSRF_TOKEN='__CSRF_TOKEN__';
+let trackMap=null,trackLayer=null;
 async function j(u,o={}){o.headers=Object.assign({},o.headers||{},o.method&&o.method.toUpperCase()!=='GET'?{'X-CSRF-Token':CSRF_TOKEN}:{});let r=await fetch(u,o);return await r.text()}
 function toast(t){document.getElementById('toast').textContent=t;setTimeout(()=>document.getElementById('toast').textContent='',2500)}
-function toggleTheme(){document.body.classList.toggle('light');localStorage.setItem('fieldradio-theme',document.body.classList.contains('light')?'light':'dark')}
+async function setLang(){const c=document.getElementById('lang').value;localStorage.setItem('fieldradio-lang',c);try{await fetch('/api/lang?set='+c)}catch(e){};document.getElementById('title').textContent=c==='id'?'FieldRadio':'FieldRadio'}
+if(localStorage.getItem('fieldradio-lang'))document.getElementById('lang').value=localStorage.getItem('fieldradio-lang');
+async function toggleTheme(){const m=document.body.classList.toggle('light')?'light':'dark';localStorage.setItem('fieldradio-theme',m);try{await fetch('/api/theme?mode='+m,{method:'POST',headers:{'X-CSRF-Token':'__CSRF_TOKEN__'}})}catch(e){}}
 if(localStorage.getItem('fieldradio-theme')==='light')document.body.classList.add('light');
 async function refreshMessages(){
  try{
@@ -190,16 +203,55 @@ async function clearMessages(){if(!confirm('Delete message history?'))return;awa
 async function replyMessage(){const r=await j('/api/messages/reply?source='+encodeURIComponent(replySource.value),{method:'POST',headers:{'Content-Type':'text/plain'},body:replyText.value});toast(r);refresh()}
 function exportMessages(f){window.location='/api/messages/export?format='+f}
 async function tuneRadio(){const r=await j('/api/radio/tune?freq='+encodeURIComponent(tuneFreq.value),{method:'POST'});toast(r)}
+async function refreshDiagnostics(){
+ try{
+  const n=await (await fetch('/api/neighbors')).json();
+  const r=await (await fetch('/api/routes')).json();
+  const d=await (await fetch('/api/dedup/stats')).json();
+  diagnostics.textContent=JSON.stringify({neighbors:n,routes:r,dedup:d},null,2);
+ }catch(e){toast('Diagnostics refresh failed')}
+}
+async function captureStart(){toast(await j('/api/capture/start?duration=10000',{method:'POST'}))}
+async function captureStop(){toast(await j('/api/capture/stop',{method:'POST'}))}
+async function captureDump(){try{diagnostics.textContent=JSON.stringify(await (await fetch('/api/capture/dump')).json(),null,2)}catch(e){toast('Capture dump failed')}}
+async function toggleAdr(){toast(await j('/api/adr?on=1',{method:'POST'}));refresh()}
+async function selfTest(){try{diagnostics.textContent=JSON.stringify(await (await fetch('/api/selftest',{method:'POST'})).json(),null,2)}catch(e){toast('Self-test failed')}}
 async function refreshRadioHistory(){
  try{const a=await (await fetch('/api/radio/history')).json();radioHistory.textContent=a.map(x=>`+${x.ms}ms RSSI=${x.rssi} SNR=${x.snr}`).join('\\n');
  const st=await (await fetch('/api/storage/info')).json();storageInfo.textContent=`SD used ${st.used} / ${st.total} bytes (${st.free} free)`;
+ const rs=await (await fetch('/api/radio/stats')).json(); radioStats.textContent=JSON.stringify(rs,null,2);
+ radioHistory.textContent+='\\nSTATS RSSI avg='+rs.rssiAvg+' range=['+rs.rssiMin+','+rs.rssiMax+'] SNR avg='+rs.snrAvg;
  }catch(e){toast('Radio/storage refresh failed')}
+}
+function showTrack(){
+  const p=document.getElementById('trackPanel'); p.style.display=p.style.display==='none'?'block':'none';
+  if(p.style.display==='block'){
+    if(!trackMap){trackMap=L.map('trackMap');L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(trackMap);}
+    setTimeout(()=>trackMap.invalidateSize(),50);
+  }
+}
+async function loadTrack(){
+  try{
+    const q=new URLSearchParams({from:trackFrom.value||'0',to:trackTo.value||'18446744073709551615',limit:String(Math.min(5000,Math.max(1,Number(trackLimit.value)||1000)))});
+    const a=await (await fetch('/api/track/points?'+q)).json();
+    if(!trackMap){showTrack();}
+    if(trackLayer)trackLayer.clearLayers(); else trackLayer=L.layerGroup().addTo(trackMap);
+    if(!a.length){toast('No track points');return;}
+    const latlng=a.map(x=>[x.lat,x.lon]);
+    L.polyline(latlng).addTo(trackLayer);
+    L.marker(latlng[0]).addTo(trackLayer).bindPopup('Start');
+    L.marker(latlng[latlng.length-1]).addTo(trackLayer).bindPopup('End');
+    trackMap.fitBounds(L.latLngBounds(latlng),{padding:[20,20]});
+  }catch(e){toast('Track load failed')}
 }
 async function refreshSosHistory(){try{const a=await (await fetch('/api/sos-history')).json();sosBadge.textContent=a.map(x=>`event=${x.event} seq=${x.seq} peer=${x.peer}`).join(' | ')}catch(e){}}
 async function refreshFiles(){try{f.textContent=await j('/api/files?dir='+encodeURIComponent(fileDir.value))}catch(e){toast('File list failed')}}
 async function refresh(){
   const raw=await j('/api/status');s.textContent=raw;await refreshFiles();
-  try{const x=JSON.parse(raw);document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical)}catch(e){}
+  try{const x=JSON.parse(raw);document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical);
+    document.getElementById('diagnostics').textContent =
+      `Antenna OK: ${x.diagnostics?.antennaOk ? 'YES':'NO'} | TX RSSI: ${x.diagnostics?.txRssi} dBm | Baseline: ${x.diagnostics?.antennaBaselineRssi} dBm | CPU: ${x.cpuTempC} C | Battery calibration drift: ${x.batteryCalibrationDrift ? 'YES':'NO'}`;
+  }catch(e){}
 }
 async function ptt(v){await j('/api/ptt?on='+v,{method:'POST'});refresh()}
 async function sos(v){await j('/api/sos?on='+v,{method:'POST'});refresh()}
@@ -253,6 +305,11 @@ async function calBattery(){
  const r=await j('/api/battery-calibrate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},
  body:new URLSearchParams({voltage:batActual.value})}); alert(r); refresh()
 }
+async function factoryReset(){
+ if(!confirm('Factory reset will erase NVS and SD data. Continue?'))return;
+ const r=await j('/api/factory-reset?confirm=RESET',{method:'POST'});
+ alert(r);
+}
 async function saveCfg(){
   const q=new URLSearchParams({freq:freq.value,bw:bw.value,sf:sf.value,cr:cr.value,
     power:pwr.value,sync:sw.value,callsign:cs.value,volume:vol.value,batcal:bat.value,
@@ -295,6 +352,14 @@ async function hopSuggest(){
 async function hopEnable(on){
   const r=await j('/api/hop/enable?on='+on,{method:'POST'});
   document.getElementById('scanmsg').textContent=r; refreshHop();
+}
+async function hopSetChannels(){
+  const r=await j('/api/hop/set-channels?list='+encodeURIComponent(hopList.value),{method:'POST'});
+  document.getElementById('scanmsg').textContent=r; refreshHop();
+}
+async function rangeTest(on){
+  const r=await j('/api/range-test?on='+on,{method:'POST'});
+  toast(r);refresh();
 }
 async function refreshScan(){
   try{
@@ -414,13 +479,27 @@ bool WebUi::sessionValid() {
 }
 
 bool WebUi::csrfValid() {
-  if (server_.method() != HTTP_POST || csrfTokenHex_.isEmpty()) return false;
+  if (server_.method() != HTTP_POST) return false;
+  if (csrfTokenHex_.isEmpty() || csrfTokenHex_.length() != 32) {
+    ++csrfFailures_;
+    auditAuth(false);
+    return false;
+  }
   const String supplied = server_.header("X-CSRF-Token");
-  if (supplied.length() != csrfTokenHex_.length()) return false;
+  if (supplied.length() != 32 || supplied.length() != csrfTokenHex_.length()) {
+    ++csrfFailures_;
+    (void)auditAuth(false);
+    return false;
+  }
   uint8_t diff = 0;
   for (size_t i = 0; i < supplied.length(); ++i)
     diff |= static_cast<uint8_t>(supplied[i] ^ csrfTokenHex_[i]);
-  return diff == 0;
+  if (diff != 0) {
+    ++csrfFailures_;
+    auditAuth(false);
+    return false;
+  }
+  return true;
 }
 
 bool WebUi::issueSession() {
@@ -523,6 +602,7 @@ bool WebUi::auth() {
         authFailures_ = 0;
       }
       ++authFailures_;
+      ++authFailureWindowCount_;
       auditAuth(false);
       if (authFailures_ >= 5) {
         authBlockedUntilMs_ = now + 30000;
@@ -532,6 +612,8 @@ bool WebUi::auth() {
       return false;
     }
     authFailures_ = 0;
+    authFailureWindowCount_ = 0;
+    authFailureWindowStartMs_ = now;
     if (!issueSession()) {
       auditAuth(false);
       server_.send(503, "text/plain", "session initialization failed");
@@ -580,11 +662,38 @@ void WebUi::begin() {
   server_.on("/api/messages/read", HTTP_POST, [this]{ if (auth()) handleMessageRead(); });
   server_.on("/api/messages/reply", HTTP_POST, [this]{ if (auth()) handleMessageReply(); });
   server_.on("/api/messages/export", HTTP_GET, [this]{ if (auth()) handleMessageExport(); });
+  server_.on("/api/messages/persist", HTTP_GET, [this]{ if (auth()) handleMessagePersist(); });
+  server_.on("/api/message/schedule", HTTP_POST, [this]{ if (auth()) handleMessageSchedule(); });
+  server_.on("/api/message/schedule", HTTP_GET, [this]{ if (auth()) handleMessageScheduleList(); });
+  server_.on("/api/message/schedule", HTTP_DELETE, [this]{ if (auth()) handleMessageScheduleDelete(); });
+  server_.on("/api/record/schedule", HTTP_POST, [this]{ if (auth()) handleRecordSchedule(); });
+  server_.on("/api/record/schedule", HTTP_GET, [this]{ if (auth()) handleRecordScheduleGet(); });
+  server_.on("/api/sos/format", HTTP_POST, [this]{ if (auth()) handleSosFormat(); });
+  server_.on("/api/selftest", HTTP_POST, [this]{ if (auth()) handleSelfTest(); });
+  server_.on("/api/selftest/result", HTTP_GET, [this]{ if (auth()) handleSelfTestResult(); });
+  server_.on("/api/lang", HTTP_GET, [this]{ if (auth()) handleLang(); });
+  server_.on("/api/neighbors", HTTP_GET, [this]{ if (auth()) handleNeighbors(); });
+  server_.on("/api/routes", HTTP_GET, [this]{ if (auth()) handleRoutes(); });
+  server_.on("/api/capture/start", HTTP_POST, [this]{ if (auth()) handleCaptureStart(); });
+  server_.on("/api/capture/stop", HTTP_POST, [this]{ if (auth()) handleCaptureStop(); });
+  server_.on("/api/capture/dump", HTTP_GET, [this]{ if (auth()) handleCaptureDump(); });
+  server_.on("/api/adr", HTTP_POST, [this]{ if (auth()) handleAdr(); });
+  server_.on("/api/hop/sync", HTTP_POST, [this]{ if (auth()) handleHopSync(); });
+  server_.on("/api/dedup/stats", HTTP_GET, [this]{ if (auth()) handleDedupStats(); });
+  server_.on("/api/forward/stats", HTTP_GET, [this]{ if (auth()) handleForwardStats(); });
+  server_.on("/api/auth/stats", HTTP_GET, [this]{ if (auth()) handleAuthStats(); });
+  server_.on("/api/theme", HTTP_POST, [this]{ if (auth()) handleTheme(); });
+  server_.on("/api/nvs", HTTP_GET, [this]{ if (auth()) handleNvs(); });
+  server_.on("/api/config/migrate", HTTP_POST, [this]{ if (auth()) handleConfigMigrate(); });
+  server_.on("/api/battery/history", HTTP_GET, [this]{ if (auth()) handleBatteryHistory(); });
   server_.on("/api/radio/history", HTTP_GET, [this]{ if (auth()) handleRadioHistory(); });
+  server_.on("/api/radio/stats", HTTP_GET, [this]{ if (auth()) handleRadioStats(); });
   server_.on("/api/radio/tune", HTTP_POST, [this]{ if (auth()) handleRadioTune(); });
+  server_.on("/api/range-test", HTTP_POST, [this]{ if (auth()) handleRangeTest(); });
   server_.on("/api/storage/info", HTTP_GET, [this]{ if (auth()) handleStorageInfo(); });
   server_.on("/api/storage/checksum", HTTP_GET, [this]{ if (auth()) handleChecksum(); });
   server_.on("/api/storage/checksum-sha256", HTTP_GET, [this]{ if (auth()) handleChecksumSha256(); });
+  server_.on("/api/log/export", HTTP_GET, [this]{ if (auth()) handleLogExport(); });
   server_.on("/api/sos-history", HTTP_GET, [this]{ if (auth()) handleSosHistory(); });
   server_.on("/api/lora-log", HTTP_GET, [this]{ if (auth()) handleLoraLog(); });
   server_.on("/api/health-log", HTTP_GET, [this]{ if (auth()) handleHealthLog(); });
@@ -599,6 +708,7 @@ void WebUi::begin() {
   server_.on("/api/hop/suggest", HTTP_POST, [this]{ if (auth()) handleHopSuggest(); });
   server_.on("/api/hop/status", HTTP_GET, [this]{ if (auth()) handleHopStatus(); });
   server_.on("/api/hop/enable", HTTP_POST, [this]{ if (auth()) handleHopEnable(); });
+  server_.on("/api/hop/set-channels", HTTP_POST, [this]{ if (auth()) handleHopSetChannels(); });
   server_.on("/api/ptt", HTTP_POST, [this]{ if (auth()) handlePtt(); });
   server_.on("/api/record", HTTP_POST, [this]{ if (auth()) handleRecord(); });
   server_.on("/api/play", HTTP_POST, [this]{ if (auth()) handlePlay(); });
@@ -610,10 +720,13 @@ void WebUi::begin() {
   server_.on("/api/record-pause", HTTP_POST, [this]{ if (auth()) handleRecordPause(); });
   server_.on("/api/record-split", HTTP_POST, [this]{ if (auth()) handleRecordSplit(); });
   server_.on("/api/vox", HTTP_POST, [this]{ if (auth()) handleVox(); });
+  server_.on("/api/vad", HTTP_POST, [this]{ if (auth()) handleVad(); });
   server_.on("/api/usb-transport", HTTP_POST, [this]{ if (auth()) handleUsbTransport(); });
   server_.on("/api/volume", HTTP_POST, [this]{ if (auth()) handleVolume(); });
   server_.on("/api/delete", HTTP_POST, [this]{ if (auth()) handleDelete(); });
   server_.on("/api/track", HTTP_GET, [this]{ if (auth()) handleTrack(); });
+  server_.on("/api/track/points", HTTP_GET, [this]{ if (auth()) handleTrackPoints(); });
+  server_.on("/api/track/simplified", HTTP_GET, [this]{ if (auth()) handleTrackSimplified(); });
   server_.on("/api/track/download", HTTP_GET, [this]{ if (auth()) handleTrackDownload(); });
   server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
@@ -657,7 +770,27 @@ void WebUi::begin() {
   server_.begin();
 }
 
-void WebUi::task() { server_.handleClient(); }
+void WebUi::task() {
+  server_.handleClient();
+  if (recordScheduleActive_ && recordScheduleStart_) {
+    bool recording = false;
+    uint64_t now = 0;
+    {
+      StateLock lock(gState);
+      if (lock.ok() && gState.gps.timeValid) {
+        now = gState.gps.utcEpoch;
+        recording = gState.recording;
+      }
+    }
+    if (now >= recordScheduleStart_) {
+      if (!recording) (void)audio.startRecording();
+      if (now >= recordScheduleStart_ + recordScheduleDurationSec_) {
+        (void)audio.stopRecording();
+        recordScheduleActive_ = false;
+      }
+    }
+  }
+}
 
 void WebUi::handleRoot() {
   server_.sendHeader("Cache-Control", "no-store");
@@ -665,11 +798,16 @@ void WebUi::handleRoot() {
   server_.sendHeader("X-Frame-Options", "DENY");
   server_.sendHeader("Referrer-Policy", "no-referrer");
   server_.sendHeader("Content-Security-Policy",
-                     "default-src 'self'; script-src 'unsafe-inline'; "
-                     "style-src 'unsafe-inline'; object-src 'none'; "
-                     "base-uri 'none'; frame-ancestors 'none'");
+                     "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; "
+                     "style-src 'self' 'unsafe-inline' https://unpkg.com; object-src 'none'; "
+                     "img-src 'self' data: https://*.tile.openstreetmap.org; "
+                     "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
   String page = FPSTR(INDEX_HTML);
   page.replace("__CSRF_TOKEN__", csrfTokenHex_);
+  Preferences themePrefs;
+  String persistedTheme = "dark";
+  if (themePrefs.begin("fieldradio", true)) { persistedTheme = themePrefs.getString("theme", "dark"); themePrefs.end(); }
+  page.replace("__THEME_CLASS__", persistedTheme == "light" ? "light" : "");
   server_.send(200, "text/html", page);
 }
 
@@ -697,9 +835,11 @@ void WebUi::handleStatus() {
   j += ",\"sat\":" + String(gState.gps.satellites);
   j += ",\"timeValid\":" + String(gState.gps.timeValid ? "true":"false");
   j += ",\"utcEpoch\":" + String(static_cast<unsigned long long>(gState.gps.utcEpoch)) + "},";
-  j += "\"lora\":" + String(gState.loraReady ? "true":"false") + ",";
-  j += "\"rssi\":" + String(gState.loraRssi) + ",";
-  j += "\"snr\":" + String(gState.loraSnr,1) + ",";
+  j += "\"lora\":{\"ready\":" + String(gState.loraReady ? "true":"false");
+  j += ",\"rssi\":" + String(gState.loraRssi) + ",\"snr\":" + String(gState.loraSnr,1);
+  j += ",\"lqi\":" + String(lora.lqi());
+  j += ",\"sf\":" + String(lora.currentDataRate());
+  j += ",\"adr\":" + String(lora.adrEnabled() ? "true" : "false") + "},";
   j += "\"codec\":" + String(gState.codecReady ? "true":"false") + ",";
   j += "\"sd\":" + String(gState.storageReady ? "true":"false") + ",";
   j += "\"battery\":{\"available\":" + String(gState.batteryAvailable ? "true":"false");
@@ -707,6 +847,7 @@ void WebUi::handleStatus() {
   j += gState.batteryAvailable ? String(gState.batteryV, 2) : "null";
   j += ",\"low\":" + String(gState.batteryLow ? "true":"false");
   j += ",\"percent\":" + String(gState.batteryPercent);
+  j += ",\"estimatedMinutes\":" + String(gState.batteryEstimatedMinutes);
   j += ",\"critical\":" + String(gState.batteryCritical ? "true":"false") + "},";
   j += "\"usbAudio\":" + String(gState.usbAudioReady ? "true":"false") + ",";
   j += "\"usbAudioActive\":" + String(gState.usbAudioActive ? "true":"false") + ",";
@@ -738,11 +879,26 @@ void WebUi::handleStatus() {
        ",\"heapLargestFree\":" + String(gState.heapLargestFree) +
        ",\"jammingDetected\":" + String(gState.jammingDetected ? "true" : "false") +
        ",\"noiseFloorDbm\":" + String(gState.noiseFloorDbm) +
-       ",\"channelOccupancy\":" + String(gState.channelOccupancy) + "},";
+       ",\"channelOccupancy\":" + String(gState.channelOccupancy) +
+       ",\"antennaOk\":" + String(gState.antennaOk ? "true" : "false") +
+       ",\"txRssi\":" + String(gState.txRssi) +
+       ",\"antennaBaselineRssi\":" + String(gState.antennaBaselineRssi) + "},";
+  j += "\"cpuTempC\":" + String(gState.cpuTempC, 1) +
+       ",\"rangeTest\":" + String(gState.rangeTest ? "true" : "false") +
+       ",\"batteryCalibrationDrift\":" +
+       String(gState.batteryCalibrationDrift ? "true" : "false") + ",";
   j += "\"tx\":" + String(gState.txPackets) + ",";
   j += "\"rx\":" + String(gState.rxPackets) + ",";
   j += "\"msg\":\"" + jsonEscape(gState.lastMessage) + "\",";
   j += "\"error\":\"" + jsonEscape(gState.lastError) + "\"";
+  j += ",\"radioStats\":{\"forwardQueued\":" + String(lora.forwardQueued()) +
+       ",\"forwardDrops\":" + String(lora.forwardDrops()) +
+       ",\"forwardLastDropMs\":" + String(lora.forwardLastDropMs()) +
+       ",\"fragmentEvictions\":" + String(lora.fragmentEvictions()) +
+       ",\"fragmentDrops\":" + String(lora.fragmentDrops()) +
+       ",\"dutyBudgetUs\":" + String(static_cast<unsigned long long>(lora.dutyBudgetUs())) +
+       ",\"dutyMaxBudgetUs\":" + String(static_cast<unsigned long long>(lora.dutyMaxBudgetUs())) +
+       ",\"gzipStalls\":" + String(storage.gzipStalls()) + "}";
   j += "}";
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", j);
@@ -856,12 +1012,15 @@ void WebUi::handleMessages() {
 }
 
 void WebUi::handleMessageClear() {
-  StateLock lock(gState);
-  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
-  for (auto& e : gState.messageHistory) e = MessageHistoryEntry{};
-  gState.messageHistoryNext = 0;
-  gState.messageHistoryCount = 0;
-  gState.messageUnreadCount = 0;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+    for (auto& e : gState.messageHistory) e = MessageHistoryEntry{};
+    gState.messageHistoryNext = 0;
+    gState.messageHistoryCount = 0;
+    gState.messageUnreadCount = 0;
+  }
+  (void)lora.persistMessageHistory();
   server_.send(200, "text/plain", "OK");
 }
 
@@ -872,14 +1031,17 @@ void WebUi::handleMessageRead() {
     server_.send(400, "text/plain", "invalid timestamp"); return;
   }
   uint64_t ts = all ? 0 : strtoull(raw.c_str(), nullptr, 10);
-  StateLock lock(gState);
-  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
-  for (auto& e : gState.messageHistory) {
-    if (e.timestamp != 0 && (all || e.timestamp == ts) && !e.read) {
-      e.read = true;
-      if (gState.messageUnreadCount) --gState.messageUnreadCount;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+    for (auto& e : gState.messageHistory) {
+      if (e.timestamp != 0 && (all || e.timestamp == ts) && !e.read) {
+        e.read = true;
+        if (gState.messageUnreadCount) --gState.messageUnreadCount;
+      }
     }
   }
+  (void)lora.persistMessageHistory();
   server_.send(200, "text/plain", "OK");
 }
 
@@ -888,7 +1050,7 @@ void WebUi::handleMessageReply() {
   const String target = server_.arg("source");
   const String text = server_.arg("plain");
   if (target.isEmpty() || target.length() > 10 || text.isEmpty() ||
-      text.length() > Config::LORA_MAX_PACKET - 16) {
+      text.length() > Config::LORA_FRAGMENT_MAX_BYTES) {
     server_.send(400, "text/plain", "invalid reply"); return;
   }
 
@@ -1162,6 +1324,7 @@ void WebUi::handleScanStatus() {
   String j = "{";
   j += "\"active\":" + String(gState.scannerActive ? "true" : "false");
   j += ",\"mode\":" + String(gState.scannerMode);
+  j += ",\"sweepInProgress\":" + String(gState.scannerSweepInProgress ? "true" : "false");
   j += ",\"sweep\":" + String(gState.scannerSweepCount);
   j += ",\"channels\":" + String(gState.scannerChannelCount);
   j += ",\"dwellMs\":" + String(gState.scannerDwellMs);
@@ -1403,6 +1566,28 @@ void WebUi::handleVox() {
   server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "FAIL");
 }
 
+void WebUi::handleVad() {
+  const String on = server_.arg("on");
+  if (on != "0" && on != "1") {
+    server_.send(400, "text/plain", "invalid vad"); return;
+  }
+  uint32_t adapt = 0;
+  if (server_.hasArg("adapt")) {
+    char* end = nullptr;
+    const unsigned long v = strtoul(server_.arg("adapt").c_str(), &end, 10);
+    if (!end || *end != '\0' || v > 60000UL) {
+      server_.send(400, "text/plain", "invalid adapt"); return;
+    }
+    adapt = static_cast<uint32_t>(v);
+  }
+  const bool ok = audio.setVox(on == "1", server_.hasArg("threshold")
+                                ? server_.arg("threshold").toFloat() : 0.08f,
+                                server_.hasArg("hang") ? server_.arg("hang").toInt() : 700);
+  if (ok && adapt) (void)audio.setVoxAdapt(adapt);
+  server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "invalid vox");
+}
+
+
 void WebUi::handleUsbTransport() {
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") { server_.send(400, "text/plain", "invalid transport"); return; }
@@ -1435,6 +1620,425 @@ void WebUi::handleDelete() {
   String p = server_.arg("path");
   bool ok = storage.removeFile(p);
   server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "FAIL");
+}
+
+
+void WebUi::handleMessagePersist() {
+  const bool ok = lora.persistMessageHistory();
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "persist failed");
+}
+
+void WebUi::handleForwardStats() {
+  String j = "{\"queued\":" + String(lora.forwardQueued()) +
+             ",\"dropped\":" + String(lora.forwardDrops()) +
+             ",\"lastDropMs\":" + String(lora.forwardLastDropMs()) +
+             ",\"fragmentEvictions\":" + String(lora.fragmentEvictions()) +
+             ",\"fragmentDrops\":" + String(lora.fragmentDrops()) +
+             ",\"dutyBudgetUs\":" + String(static_cast<unsigned long long>(lora.dutyBudgetUs())) +
+             ",\"dutyMaxBudgetUs\":" + String(static_cast<unsigned long long>(lora.dutyMaxBudgetUs())) +
+             ",\"gzipStalls\":" + String(storage.gzipStalls()) + "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleAuthStats() {
+  String j = "{\"failures\":" + String(authFailureWindowCount_) +
+             ",\"blockedUntilMs\":" + String(authBlockedUntilMs_) +
+             ",\"windowStartMs\":" + String(authFailureWindowStartMs_) +
+             ",\"csrfFailures\":" + String(csrfFailures_) + "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleNeighbors() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", lora.neighborsJson());
+}
+
+void WebUi::handleRoutes() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", lora.routesJson());
+}
+
+void WebUi::handleCaptureStart() {
+  const String raw = server_.arg("duration");
+  if (raw.isEmpty() || raw.length() > 8) {
+    server_.send(400, "text/plain", "invalid duration"); return;
+  }
+  char* end = nullptr;
+  const unsigned long ms = strtoul(raw.c_str(), &end, 10);
+  if (!end || *end != '\0' || ms == 0 || ms > Config::CAPTURE_MAX_DURATION_MS) {
+    server_.send(400, "text/plain", "invalid duration"); return;
+  }
+  const bool ok = lora.captureStart(static_cast<uint32_t>(ms));
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "capture unavailable");
+}
+
+void WebUi::handleCaptureStop() {
+  const bool ok = lora.captureStop();
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "capture unavailable");
+}
+
+void WebUi::handleCaptureDump() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", lora.captureDumpJson());
+}
+
+void WebUi::handleAdr() {
+  const String raw = server_.arg("on");
+  if (raw != "0" && raw != "1") {
+    server_.send(400, "text/plain", "invalid adr"); return;
+  }
+  const bool ok = lora.setAdrEnabled(raw == "1");
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "ADR unavailable");
+}
+
+void WebUi::handleHopSync() {
+  const String source = server_.arg("source");
+  if (source != "gps" && source != "internal") {
+    server_.send(400, "text/plain", "invalid source"); return;
+  }
+  lora.setHopSyncSource(source == "gps");
+  server_.send(200, "text/plain", "OK");
+}
+
+void WebUi::handleDedupStats() {
+  String j = "{\"hits\":" + String(lora.dedupHits()) +
+             ",\"misses\":" + String(lora.dedupMisses()) +
+             ",\"cacheSize\":" + String(Config::LORA_DEDUP_CACHE_SIZE) +
+             ",\"evictions\":" + String(lora.dedupEvictions()) + "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleTheme() {
+  const String mode = server_.arg("mode");
+  if (mode != "dark" && mode != "light") {
+    server_.send(400, "text/plain", "invalid theme"); return;
+  }
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", false)) {
+    server_.send(503, "text/plain", "NVS unavailable"); return;
+  }
+  const bool ok = prefs.putString("theme", mode) > 0;
+  prefs.end();
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "NVS save failed");
+}
+
+void WebUi::handleConfigMigrate() {
+  const bool ok = gConfig.migrate();
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "migration failed");
+}
+
+void WebUi::handleNvs() {
+  const String key = server_.arg("key");
+  static const char* const allowed[] = {
+    "cfgver", "freq", "bw", "sf", "cr", "sync", "power", "volume",
+    "audsrc", "batcal", "callsign", "theme", "bhealth_v", "bcycles", "bsamples"
+  };
+  bool allowedKey = false;
+  for (const char* k : allowed)
+    if (key == k) { allowedKey = true; break; }
+  if (!allowedKey || key.length() > 15) {
+    server_.send(400, "text/plain", "key not allowed"); return;
+  }
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", true)) {
+    server_.send(503, "text/plain", "NVS unavailable"); return;
+  }
+  String value;
+  if (key == "callsign" || key == "theme") value = prefs.getString(key.c_str(), "");
+  else if (key == "freq" || key == "bw" || key == "batcal")
+    value = String(prefs.getFloat(key.c_str(), 0.0f), 5);
+  else if (key == "power")
+    value = String(static_cast<int>(prefs.getChar(key.c_str(), 0)));
+  else
+    value = String(static_cast<unsigned long>(prefs.getUInt(key.c_str(), 0)));
+  prefs.end();
+  server_.send(200, "application/json",
+               "{\"key\":\"" + jsonEscape(key) + "\",\"value\":\"" + jsonEscape(value) + "\"}");
+}
+
+void WebUi::handleBatteryHistory() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "[";
+  const size_t n = gState.batteryHistoryCount;
+  const size_t start = (gState.batteryHistoryNext +
+                        RuntimeState::BATTERY_HISTORY_SIZE - n) %
+                       RuntimeState::BATTERY_HISTORY_SIZE;
+  for (size_t i = 0; i < n; ++i) {
+    if (i) j += ",";
+    const size_t k = (start + i) % RuntimeState::BATTERY_HISTORY_SIZE;
+    j += "{\"ms\":" + String(gState.batteryHistoryMs[k]) +
+         ",\"v\":" + String(gState.batteryHistoryV[k], 3) +
+         ",\"percent\":" + String(gState.batteryHistoryPercent[k]) + "}";
+  }
+  j += "]";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+
+
+void WebUi::handleMessageSchedule() {
+  if (!server_.hasArg("at") || !server_.hasArg("text")) {
+    server_.send(400, "text/plain", "at and text required"); return;
+  }
+  const String a = server_.arg("at");
+  char* end = nullptr;
+  const unsigned long long at = strtoull(a.c_str(), &end, 10);
+  const String text = server_.arg("text");
+  if (!end || *end != '\0' || at == 0 || text.isEmpty()) {
+    server_.send(400, "text/plain", "invalid schedule"); return;
+  }
+  const bool ok = lora.scheduleMessage(static_cast<uint64_t>(at), text);
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "schedule full");
+}
+
+void WebUi::handleMessageScheduleList() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", lora.scheduledMessagesJson());
+}
+
+void WebUi::handleMessageScheduleDelete() {
+  const uint32_t id = static_cast<uint32_t>(server_.arg("id").toInt());
+  if (!id) { server_.send(400, "text/plain", "invalid id"); return; }
+  server_.send(lora.cancelScheduledMessage(id) ? 200 : 404,
+               "text/plain", "OK");
+}
+
+void WebUi::handleRecordSchedule() {
+  if (!server_.hasArg("start") || !server_.hasArg("duration")) {
+    server_.send(400, "text/plain", "start and duration required"); return;
+  }
+  char* end = nullptr;
+  const unsigned long long start = strtoull(server_.arg("start").c_str(), &end, 10);
+  const unsigned long duration = strtoul(server_.arg("duration").c_str(), &end, 10);
+  if (!end || start == 0 || duration == 0 || duration > Config::RECORD_MAX_SECONDS) {
+    server_.send(400, "text/plain", "invalid schedule"); return;
+  }
+  recordScheduleStart_ = static_cast<uint64_t>(start);
+  recordScheduleDurationSec_ = static_cast<uint32_t>(duration);
+  recordScheduleActive_ = true;
+  server_.send(200, "text/plain", "OK");
+}
+
+void WebUi::handleRecordScheduleGet() {
+  String j = "{\"active\":" + String(recordScheduleActive_ ? "true" : "false") +
+             ",\"start\":" + String(static_cast<unsigned long long>(recordScheduleStart_)) +
+             ",\"duration\":" + String(recordScheduleDurationSec_) + "}";
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleSosFormat() {
+  const String raw = server_.arg("list");
+  if (raw.isEmpty() || raw.length() > 32) {
+    server_.send(400, "text/plain", "invalid format list"); return;
+  }
+  uint8_t mask = 0;
+  int start = 0;
+  while (start < static_cast<int>(raw.length())) {
+    int comma = raw.indexOf(',', start);
+    if (comma < 0) comma = raw.length();
+    String item = raw.substring(start, comma);
+    item.trim();
+    if (item == "text") mask |= 1;
+    else if (item == "aprs") mask |= 2;
+    else if (item == "binary") mask |= 4;
+    else { server_.send(400, "text/plain", "unknown format"); return; }
+    start = comma + 1;
+  }
+  server_.send(lora.setSosFormats(mask) ? 200 : 400, "text/plain", "OK");
+}
+
+void WebUi::handleSelfTest() {
+  bool loraOk = false, codecOk = false, sdOk = false, gpsOk = false, batOk = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      loraOk = gState.loraReady;
+      codecOk = gState.codecReady;
+      sdOk = gState.storageReady;
+      gpsOk = gState.gps.valid;
+      batOk = gState.batteryAvailable;
+    }
+  }
+  const bool pass = loraOk && codecOk && sdOk;
+  selfTestMs_ = millis();
+  selfTestResult_ = "{\"pass\":" + String(pass ? "true" : "false") +
+    ",\"lora\":" + String(loraOk ? "true" : "false") +
+    ",\"audio\":" + String(codecOk ? "true" : "false") +
+    ",\"sd\":" + String(sdOk ? "true" : "false") +
+    ",\"gps\":" + String(gpsOk ? "true" : "false") +
+    ",\"battery\":" + String(batOk ? "true" : "false") + "}";
+  server_.send(200, "application/json", selfTestResult_);
+}
+
+void WebUi::handleSelfTestResult() {
+  server_.send(200, "application/json",
+               selfTestResult_.isEmpty() ? "{\"pass\":false,\"error\":\"not run\"}" : selfTestResult_);
+}
+
+void WebUi::handleLang() {
+  const String code = server_.arg("set");
+  if (code != "en" && code != "id") {
+    server_.send(400, "text/plain", "invalid language"); return;
+  }
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", false)) {
+    server_.send(503, "text/plain", "NVS unavailable"); return;
+  }
+  const bool ok = prefs.putString("lang", code) > 0;
+  prefs.end();
+  server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "NVS save failed");
+}
+
+void WebUi::handleRadioStats() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  const size_t n = gState.radioHistoryCount;
+  if (n == 0) {
+    server_.send(200, "application/json",
+                 "{\"count\":0,\"rssiAvg\":null,\"rssiMin\":null,\"rssiMax\":null,\"snrAvg\":null,\"snrMin\":null,\"snrMax\":null}");
+    return;
+  }
+  int32_t rssiSum = 0, rssiMin = 127, rssiMax = -127;
+  double snrSum = 0.0, snrMin = 1000.0, snrMax = -1000.0;
+  const size_t start = (gState.radioHistoryNext +
+                        RuntimeState::RADIO_HISTORY_SIZE - n) %
+                       RuntimeState::RADIO_HISTORY_SIZE;
+  for (size_t i = 0; i < n; ++i) {
+    const size_t k = (start + i) % RuntimeState::RADIO_HISTORY_SIZE;
+    const int r = gState.rssiHistory[k];
+    const double snr = gState.snrHistory[k];
+    rssiSum += r; rssiMin = min(rssiMin, r); rssiMax = max(rssiMax, r);
+    snrSum += snr; snrMin = min(snrMin, snr); snrMax = max(snrMax, snr);
+  }
+  String j = "{\"count\":" + String(n) +
+             ",\"rssiAvg\":" + String(static_cast<float>(rssiSum) / n, 1) +
+             ",\"rssiMin\":" + String(rssiMin) +
+             ",\"rssiMax\":" + String(rssiMax) +
+             ",\"snrAvg\":" + String(static_cast<float>(snrSum / n), 1) +
+             ",\"snrMin\":" + String(static_cast<float>(snrMin), 1) +
+             ",\"snrMax\":" + String(static_cast<float>(snrMax), 1) + "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleRangeTest() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String raw = server_.arg("on");
+  if (raw != "0" && raw != "1") {
+    server_.send(400, "text/plain", "invalid range-test");
+    return;
+  }
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  gState.rangeTest = raw == "1";
+  server_.send(200, "text/plain", gState.rangeTest ? "RANGE TEST ON" : "RANGE TEST OFF");
+}
+
+void WebUi::handleHopSetChannels() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String raw = server_.arg("list");
+  if (raw.isEmpty() || raw.length() > 32) {
+    server_.send(400, "text/plain", "invalid channel list"); return;
+  }
+  uint8_t channels[Config::HOP_CHANNEL_MAX] = {};
+  size_t count = 0;
+  size_t start = 0;
+  while (start <= raw.length()) {
+    size_t comma = raw.indexOf(',', start);
+    if (comma < 0) comma = raw.length();
+    String token = raw.substring(start, comma);
+    token.trim();
+    if (token.isEmpty() || token.length() > 2) {
+      server_.send(400, "text/plain", "invalid channel"); return;
+    }
+    const int value = token.toInt();
+    if (value < 0 || value >= Config::HOP_CHANNEL_MAX) {
+      server_.send(400, "text/plain", "channel out of range"); return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+      if (channels[i] == static_cast<uint8_t>(value)) {
+        server_.send(400, "text/plain", "duplicate channel"); return;
+      }
+    }
+    if (count >= Config::HOP_CHANNEL_MAX) {
+      server_.send(400, "text/plain", "too many channels"); return;
+    }
+    channels[count++] = static_cast<uint8_t>(value);
+    if (comma == raw.length()) break;
+    start = comma + 1;
+  }
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  for (size_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
+    gState.hopChannelList[i] = i < count ? channels[i] : 0;
+  gState.hopChannelCount = static_cast<uint8_t>(count);
+  server_.send(200, "text/plain", "OK");
+}
+
+void WebUi::handleTrackPoints() {
+  uint64_t from = 0, to = UINT64_MAX;
+  if (server_.hasArg("from")) {
+    const String raw = server_.arg("from");
+    if (raw.isEmpty() || raw.length() > 20) {
+      server_.send(400, "text/plain", "invalid from"); return;
+    }
+    char* end = nullptr;
+    from = strtoull(raw.c_str(), &end, 10);
+    if (!end || *end != '\0') {
+      server_.send(400, "text/plain", "invalid from"); return;
+    }
+  }
+  if (server_.hasArg("to")) {
+    const String raw = server_.arg("to");
+    if (raw.isEmpty() || raw.length() > 20) {
+      server_.send(400, "text/plain", "invalid to"); return;
+    }
+    char* end = nullptr;
+    to = strtoull(raw.c_str(), &end, 10);
+    if (!end || *end != '\0') {
+      server_.send(400, "text/plain", "invalid to"); return;
+    }
+  }
+  size_t limit = 1000;
+  if (server_.hasArg("limit")) {
+    const String raw = server_.arg("limit");
+    if (raw.isEmpty() || raw.length() > 4) {
+      server_.send(400, "text/plain", "invalid limit"); return;
+    }
+    char* end = nullptr;
+    const unsigned long v = strtoul(raw.c_str(), &end, 10);
+    if (!end || *end != '\0' || v == 0) {
+      server_.send(400, "text/plain", "invalid limit"); return;
+    }
+    limit = min<unsigned long>(v, 5000UL);
+  }
+  const String j = storage.readTrackCsv(from, to, limit);
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+
+void WebUi::handleTrackSimplified() {
+  double epsilon = 10.0;
+  if (server_.hasArg("epsilon")) {
+    const String raw = server_.arg("epsilon");
+    if (raw.isEmpty() || raw.length() > 12) {
+      server_.send(400, "text/plain", "invalid epsilon"); return;
+    }
+    char* end = nullptr;
+    epsilon = strtod(raw.c_str(), &end);
+    if (!end || *end != '\0' || !isfinite(epsilon) || epsilon <= 0.0 || epsilon > 10000.0) {
+      server_.send(400, "text/plain", "invalid epsilon"); return;
+    }
+  }
+  const String j = storage.readTrackCsvSimplified(0, UINT64_MAX, 5000, epsilon);
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
 }
 
 void WebUi::handleTrackDownload() {
@@ -1621,6 +2225,7 @@ void WebUi::handleConfig() {
     return;
   }
 
+  lora.updateSourceId();
   auditConfigChange(previous, gConfig, "web");
   server_.send(200, "text/plain",
                "Configuration saved; audio source updated; WiFi credential changes apply after reboot");
@@ -1657,11 +2262,42 @@ void WebUi::handleChecksumSha256() {
                ",\"sha256\":\"" + digest + "\"}");
 }
 
+
+void WebUi::handleLogExport() {
+  const String path = server_.arg("file");
+  if (!storage.isSafePath(path) || !path.startsWith("/LOG/")) {
+    server_.send(400, "text/plain", "invalid log path"); return;
+  }
+  if (server_.arg("format") != "gz") {
+    server_.send(400, "text/plain", "only gz supported"); return;
+  }
+  const String outPath = "/LOG/.web-export.gz";
+  if (!storage.exportGzip(path, outPath)) {
+    server_.send(404, "text/plain", "compression failed"); return;
+  }
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) { server_.send(503, "text/plain", "storage busy"); return; }
+  File f = SD.open(outPath, FILE_READ);
+  if (!f) { server_.send(404, "text/plain", "export missing"); return; }
+  server_.sendHeader("Content-Disposition", "attachment; filename=\"fieldradio-log.gz\"");
+  server_.streamFile(f, "application/gzip");
+  f.close();
+  SD.remove(outPath);
+}
+
 void WebUi::handleFactoryReset() {
   if (server_.arg("confirm") != "RESET") {
     server_.send(400, "text/plain", "confirmation required");
     return;
   }
+  // Freeze forward-queue persistence and wait for any in-flight LoRa operation
+  // before touching /LORA. This prevents SD.remove()/rename() from racing a
+  // concurrent FWD.Q rewrite.
+  if (!lora.prepareForFactoryReset()) {
+    server_.send(503, "text/plain", "LoRa storage busy");
+    return;
+  }
+
   // Erase the complete default NVS partition rather than only the application
   // namespace. With flash encryption/NVS encryption enabled this also removes
   // encrypted records at the storage layer; without encryption, physical
@@ -1677,6 +2313,7 @@ void WebUi::handleFactoryReset() {
     static const char* const managedDirs[] = {"/REC", "/LOG", "/TRACK", "/LORA"};
     for (const char* dir : managedDirs) {
       if (SD.exists(dir) && !eraseStorageTree(dir)) {
+        lora.cancelFactoryReset();
         server_.send(503, "text/plain", "SD data erase failed");
         return;
       }
@@ -1685,6 +2322,7 @@ void WebUi::handleFactoryReset() {
 
   const esp_err_t err = nvs_flash_erase();
   if (err != ESP_OK) {
+    lora.cancelFactoryReset();
     server_.send(503, "text/plain", "NVS secure erase failed");
     return;
   }

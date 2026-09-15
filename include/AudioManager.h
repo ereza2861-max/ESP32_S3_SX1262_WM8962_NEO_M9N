@@ -24,6 +24,7 @@ public:
   bool enqueueFile(const String& path);
   void clearQueue();
   bool setVox(bool enabled, float threshold = 0.08f, uint32_t hangMs = 700);
+  bool setVoxAdapt(uint32_t adaptMs);
   void setVolume(uint8_t percent);
   bool usbStart();
   bool setRecordSource(uint8_t source);
@@ -34,6 +35,7 @@ public:
   bool aecEnabled() const { return aecEnabled_; }
   uint32_t usbSampleRate() const { return usbSampleRate_; }
   bool playTone(uint16_t frequencyHz, uint16_t durationMs, uint8_t percent = 35);
+  void logEvent(const char* event, const String& detail = String());
   bool captureVoiceFrame(uint8_t* out, size_t capacity, size_t& written);
   bool playVoiceFrame(const uint8_t* data, size_t len);
   bool usbMonitor() const { return usbMonitor_; }
@@ -99,6 +101,9 @@ private:
   float voxThreshold_ = 0.08f;
   uint32_t voxHangMs_ = 700;
   uint32_t voxLastVoiceMs_ = 0;
+  uint32_t voxAdaptMs_ = 0;
+  uint32_t voxAdaptStartedMs_ = 0;
+  float voxNoiseFloor_ = 0.0f;
   bool recordingPaused_ = false;
   uint16_t recordingPart_ = 0;
   SemaphoreHandle_t mutex_ = nullptr;

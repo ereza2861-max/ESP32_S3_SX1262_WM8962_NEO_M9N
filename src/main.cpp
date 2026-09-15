@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <cstring>
+#include <cmath>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <SPI.h>
@@ -8,6 +9,8 @@
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 #include <Preferences.h>
+#include <SD.h>
+#include <nvs_flash.h>
 #include <esp32-hal-cpu.h>
 #include <freertos/task.h>
 #include "BoardConfig.h"
@@ -41,6 +44,8 @@ static uint32_t pttDebounceMs = 0;
 static uint32_t sosDebounceMs = 0;
 static uint32_t sosPressedSinceMs = 0;
 static bool sosLongPressCancelled = false;
+static uint32_t sosCancelCount_ = 0;
+static uint32_t sosSendCount_ = 0;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
@@ -53,6 +58,15 @@ static uint32_t lastBatteryHealthPersist = 0;
 static float previousBatteryV = NAN;
 static bool batteryWasFull = false;
 static bool batteryWasLow = false;
+static bool sosBuzzerActive = false;
+static bool sosBuzzerOn = false;
+static uint8_t sosBuzzerSymbol = 0;
+static uint32_t sosBuzzerDeadline = 0;
+static uint16_t lastBuzzerSosSeq = 0;
+static uint32_t lastLogPersistMs = 0;
+static size_t lastPersistedLoraLogCount = 0;
+static size_t lastPersistedHealthLogCount = 0;
+static uint32_t lastRangeReportMs = 0;
 
 static void pulseAuxiliary(uint16_t ms) {
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, HIGH);
@@ -181,6 +195,183 @@ static void watchdogInit() {
   }
 }
 
+
+static uint16_t sosBuzzerDuration(uint8_t symbol) {
+  return symbol < 3 || symbol >= 6 ? 180U : 540U;
+}
+
+static void serviceSosBuzzer(uint32_t now) {
+  uint16_t seq = 0;
+  bool sos = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      seq = gState.sosSeq;
+      sos = gState.sos;
+    }
+  }
+  if (!sosBuzzerActive && sos && seq != 0 && seq != lastBuzzerSosSeq) {
+    lastBuzzerSosSeq = seq;
+    sosBuzzerActive = true;
+    sosBuzzerOn = true;
+    sosBuzzerSymbol = 0;
+    sosBuzzerDeadline = now + sosBuzzerDuration(0);
+    if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
+    return;
+  }
+  if (!sosBuzzerActive || static_cast<int32_t>(now - sosBuzzerDeadline) < 0) return;
+
+  if (sosBuzzerOn) {
+    sosBuzzerOn = false;
+    if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
+    sosBuzzerDeadline = now + (sosBuzzerSymbol == 8 ? 1000U : 180U);
+    return;
+  }
+  if (sosBuzzerSymbol == 8) {
+    sosBuzzerActive = false;
+    return;
+  }
+  ++sosBuzzerSymbol;
+  sosBuzzerOn = true;
+  sosBuzzerDeadline = now + sosBuzzerDuration(sosBuzzerSymbol);
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
+}
+
+static bool eraseStorageTreeBoot(const char* path) {
+  File dir = SD.open(path);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return SD.remove(path);
+  }
+  bool ok = true;
+  for (File child = dir.openNextFile(); child; child = dir.openNextFile()) {
+    const String name = child.name();
+    const bool isDir = child.isDirectory();
+    child.close();
+    if (isDir) ok = eraseStorageTreeBoot(name.c_str()) && ok;
+    else ok = SD.remove(name) && ok;
+  }
+  dir.close();
+  return SD.rmdir(path) && ok;
+}
+
+static bool detectEmergencyWipeAtBoot() {
+#if defined(ARDUINO_ARCH_ESP32)
+  if (Board::BTN_SOS < 0 || Board::BTN_PTT < 0) return false;
+  pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
+  pinMode(Board::BTN_PTT, INPUT_PULLDOWN);
+  if (digitalRead(Board::BTN_SOS) != HIGH || digitalRead(Board::BTN_PTT) != HIGH)
+    return false;
+  const uint32_t started = millis();
+  while (millis() - started < 10000U) {
+    if (digitalRead(Board::BTN_SOS) != HIGH || digitalRead(Board::BTN_PTT) != HIGH)
+      return false;
+    delay(20);
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+static void executeEmergencyWipe() {
+  (void)nvs_flash_erase();
+  SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
+  if (SD.begin(Board::SD_CS, SPI, 20000000U)) {
+    (void)eraseStorageTreeBoot("/REC");
+    (void)eraseStorageTreeBoot("/LOG");
+    (void)eraseStorageTreeBoot("/TRACK");
+  }
+  if (Board::BUZZER >= 0) {
+    for (uint8_t i = 0; i < 3; ++i) {
+      digitalWrite(Board::BUZZER, HIGH);
+      delay(600);
+      digitalWrite(Board::BUZZER, LOW);
+      delay(250);
+    }
+  }
+}
+
+static void persistRuntimeLogs(uint32_t now) {
+  if (!storage.ready() || now - lastLogPersistMs < Config::LOG_PERSIST_PERIOD_MS) return;
+  lastLogPersistMs = now;
+
+  LoraPacketLogEntry le{};
+  HealthLogEntry he{};
+  size_t loraNext = 0, healthNext = 0;
+  bool haveLora = false, haveHealth = false;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) return;
+    haveLora = gState.loraPacketLogCount > 0 &&
+               gState.loraPacketLogNext != lastPersistedLoraLogCount;
+    haveHealth = gState.healthLogCount > 0 &&
+                 gState.healthLogNext != lastPersistedHealthLogCount;
+    if (haveLora) {
+      const size_t k = (gState.loraPacketLogNext + Config::LORA_PACKET_LOG_SIZE - 1) %
+                       Config::LORA_PACKET_LOG_SIZE;
+      le = gState.loraPacketLog[k];
+      loraNext = gState.loraPacketLogNext;
+    }
+    if (haveHealth) {
+      const size_t k = (gState.healthLogNext + Config::HEALTH_LOG_SIZE - 1) %
+                       Config::HEALTH_LOG_SIZE;
+      he = gState.healthLog[k];
+      healthNext = gState.healthLogNext;
+    }
+  }
+
+  bool loraSaved = !haveLora;
+  bool healthSaved = !haveHealth;
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  if (!spiLock.ok()) return;
+  if (!SD.exists("/LOG")) (void)SD.mkdir("/LOG");
+  if (haveLora) {
+    const char* const loraPath = "/LOG/LORA.LOG";
+    const char* const loraOldPath = "/LOG/LORA.1.LOG";
+    File f = SD.open(loraPath, FILE_APPEND);
+    if (f && f.size() >= Config::LORA_LOG_ROTATE_BYTES) {
+      f.close();
+      if (SD.exists(loraOldPath)) SD.remove(loraOldPath);
+      if (SD.exists(loraPath)) SD.rename(loraPath, loraOldPath);
+      f = SD.open(loraPath, FILE_APPEND);
+    }
+    if (f) {
+      if (f.size() == 0) f.println("epoch,tx,type,seq,source,rssi,snr,ttl");
+      loraSaved = f.printf("%llu,%d,%u,%u,%lu,%d,%.1f,%u\n",
+                           static_cast<unsigned long long>(le.timestamp), le.tx,
+                           le.type, le.seq, static_cast<unsigned long>(le.sourceId),
+                           le.rssi, le.snr, le.ttl) > 0;
+      f.close();
+    }
+  }
+  if (haveHealth) {
+    const char* const healthPath = "/LOG/HEALTH.LOG";
+    const char* const healthOldPath = "/LOG/HEALTH.1.LOG";
+    File f = SD.open(healthPath, FILE_APPEND);
+    if (f && f.size() >= Config::HEALTH_LOG_ROTATE_BYTES) {
+      f.close();
+      if (SD.exists(healthOldPath)) SD.remove(healthOldPath);
+      if (SD.exists(healthPath)) SD.rename(healthPath, healthOldPath);
+      f = SD.open(healthPath, FILE_APPEND);
+    }
+    if (f) {
+      if (f.size() == 0) f.println("epoch,stalled,heap,gnssStack,loraStack,audioStack,webStack,largest,boot,wakeup,reset,brownout,jamming,noise,occupancy");
+      healthSaved = f.printf("%llu,%u,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%d,%d,%d,%u\n",
+                             static_cast<unsigned long long>(he.timestamp), he.stalledMask,
+                             (unsigned long)he.heapFree, (unsigned long)he.gnssStackMin,
+                             (unsigned long)he.loraStackMin, (unsigned long)he.audioStackMin,
+                             (unsigned long)he.webStackMin, (unsigned long)he.heapLargestFree,
+                             (unsigned long)he.bootCount, (unsigned long)he.wakeupCause,
+                             (unsigned long)he.resetReason, he.brownoutReset,
+                             he.jammingDetected, he.noiseFloorDbm, he.channelOccupancy) > 0;
+      f.close();
+    }
+  }
+  if (loraSaved) lastPersistedLoraLogCount = loraNext;
+  if (healthSaved) lastPersistedHealthLogCount = healthNext;
+}
+
 static void watchdogSubscribe() {
   const esp_err_t err = esp_task_wdt_add(nullptr);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
@@ -198,13 +389,19 @@ static void updateBattery(uint32_t now) {
   lastBatterySample = now;
 
   const uint32_t mv = analogReadMilliVolts(Board::BATTERY_ADC);
-  const float voltage =
-      (static_cast<float>(mv) / 1000.0f) * Config::BATTERY_DIVIDER_RATIO *
-      gConfig.batteryCalibration;
+  const float rawVoltage =
+      (static_cast<float>(mv) / 1000.0f) * Config::BATTERY_DIVIDER_RATIO;
+  const float voltage = rawVoltage * gConfig.batteryCalibration;
 
   StateLock lock(gState);
   if (!lock.ok()) return;
   gState.batteryAvailable = mv > 0;
+  gState.batteryCalibrationDrift =
+      gState.batteryAvailable &&
+      voltage >= Config::BATTERY_RECHARGE_START_V &&
+      isfinite(rawVoltage) &&
+      fabsf(Config::BATTERY_FULL_V / max(rawVoltage, 0.01f) -
+            gConfig.batteryCalibration) > 0.05f;
   gState.batteryV = gState.batteryAvailable ? voltage : NAN;
   gState.batteryLow = gState.batteryAvailable &&
                       voltage <= Config::BATTERY_LOW_THRESHOLD;
@@ -216,6 +413,32 @@ static void updateBattery(uint32_t now) {
                       (Config::BATTERY_PERCENT_FULL_V -
                        Config::BATTERY_PERCENT_EMPTY_V);
     gState.batteryPercent = static_cast<int8_t>(constrain(pct, 0.0f, 100.0f));
+    const size_t bh = gState.batteryHistoryNext;
+    gState.batteryHistoryMs[bh] = now;
+    gState.batteryHistoryV[bh] = voltage;
+    gState.batteryHistoryPercent[bh] = gState.batteryPercent;
+    gState.batteryHistoryNext = (bh + 1) % RuntimeState::BATTERY_HISTORY_SIZE;
+    if (gState.batteryHistoryCount < RuntimeState::BATTERY_HISTORY_SIZE)
+      ++gState.batteryHistoryCount;
+    if (gState.batteryHistoryCount >= 2) {
+      const size_t last = (gState.batteryHistoryNext +
+                           RuntimeState::BATTERY_HISTORY_SIZE - 1) %
+                          RuntimeState::BATTERY_HISTORY_SIZE;
+      const size_t first = (gState.batteryHistoryNext +
+                            RuntimeState::BATTERY_HISTORY_SIZE -
+                            min<size_t>(gState.batteryHistoryCount, 24)) %
+                           RuntimeState::BATTERY_HISTORY_SIZE;
+      const uint32_t dt = gState.batteryHistoryMs[last] - gState.batteryHistoryMs[first];
+      const float dv = gState.batteryHistoryV[last] - gState.batteryHistoryV[first];
+      if (dt >= 60000U && dv < -0.001f) {
+        const float rateVPerMin = (-dv) / (static_cast<float>(dt) / 60000.0f);
+        const float remainingV = max(0.0f, voltage - Config::BATTERY_CRITICAL);
+        gState.batteryEstimatedMinutes = static_cast<int32_t>(
+            constrain(remainingV / rateVPerMin, 0.0f, 100000.0f));
+      } else {
+        gState.batteryEstimatedMinutes = -1;
+      }
+    }
     ++gState.batterySampleCount;
     if (!isfinite(gState.batteryMinV) || voltage < gState.batteryMinV) gState.batteryMinV = voltage;
     if (!isfinite(gState.batteryMaxV) || voltage > gState.batteryMaxV) gState.batteryMaxV = voltage;
@@ -318,11 +541,13 @@ static void enterDeepSleep() {
 
 
 static bool credentialsConfigured() {
-  // Web password may be represented only by a salted hash after provisioning.
-  return gConfig.apPassword.length() >= 8 &&
-         gConfig.webUser.length() > 0 &&
-         gConfig.webPasswordConfigured() &&
-         !gConfig.verifyWebPassword(gConfig.apPassword);
+  // Keep AP and web credentials independent. The AP password is plaintext
+  // configuration for the access point; the web password is represented by
+  // its salted hash after provisioning and must never be cross-verified.
+  const bool apCredentialsConfigured_ = gConfig.apPassword.length() >= 8;
+  const bool webCredentialsConfigured_ =
+      gConfig.webUser.length() > 0 && gConfig.webPasswordConfigured();
+  return apCredentialsConfigured_ && webCredentialsConfigured_;
 }
 
 static void setupWifi() {
@@ -414,6 +639,7 @@ static void handlePhysicalControls(uint32_t now) {
     sosPressedSinceMs = now;
     sosLongPressCancelled = false;
     if (lora.sendSOS()) {
+      ++sosSendCount_;
       StateLock lock(gState);
       if (lock.ok()) gState.sos = true;
     }
@@ -423,6 +649,7 @@ static void handlePhysicalControls(uint32_t now) {
              !sosLongPressCancelled && sosPressedSinceMs != 0 &&
              now - sosPressedSinceMs >= SOS_CANCEL_LONG_PRESS_MS) {
     if (lora.cancelSOS()) {
+      ++sosCancelCount_;
       sosLongPressCancelled = true;
       pulseAuxiliary(120);
       (void)audio.playTone(700, 120);
@@ -521,10 +748,62 @@ static void taskHealth(void*) {
   }
 }
 
+
+static void serviceSerialConsole() {
+  static String line;
+  while (Serial.available()) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\r') continue;
+    if (c != '\n') {
+      if (line.length() < 128) line += c;
+      continue;
+    }
+    line.trim();
+    if (line == "status") {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        Serial.printf("LoRa=%d TX=%lu RX=%lu BAT=%.2f %d%% SF=%u LQI=%u\n",
+                      gState.loraReady, (unsigned long)gState.txPackets,
+                      (unsigned long)gState.rxPackets, gState.batteryV,
+                      gState.batteryPercent, lora.currentDataRate(), lora.lqi());
+      }
+    } else if (line == "config") {
+      Serial.printf("freq=%.3f bw=%.1f sf=%u cr=%u pwr=%d callsign=%s\n",
+                    gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
+                    gConfig.loraCr, gConfig.loraPowerDbm, gConfig.callsign.c_str());
+    } else if (line == "reboot") {
+      ESP.restart();
+    } else if (line == "wipe") {
+      nvs_flash_erase();
+      Serial.println("NVS erased; reboot required");
+    } else if (line == "log") {
+      StateLock lock(gState);
+      if (lock.ok()) Serial.printf("messages=%u loraLog=%u health=%u\n",
+          (unsigned)gState.messageHistoryCount, (unsigned)gState.loraPacketLogCount,
+          (unsigned)gState.healthLogCount);
+    } else if (line == "help" || line.isEmpty()) {
+      Serial.println("commands: status config reboot wipe log help");
+    } else {
+      Serial.println("unknown command; type help");
+    }
+    line = "";
+  }
+}
+
 void setup() {
   Serial.begin(Config::SERIAL_BAUD);
   delay(300);
   Serial.println("\nFieldRadio ESP32-S3-WROOM-1 boot");
+#if defined(ARDUINO_ARCH_ESP32)
+  if (Board::BUZZER >= 0) pinMode(Board::BUZZER, OUTPUT);
+  if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLDOWN);
+  if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
+#endif
+  if (detectEmergencyWipeAtBoot()) {
+    Serial.println("EMERGENCY WIPE: SOS+PTT held for 10s");
+    executeEmergencyWipe();
+  }
   gConfig.load();
   watchdogInit();
 
@@ -601,8 +880,18 @@ void loop() {
     wdtSubscribed = true;
   }
   esp_task_wdt_reset();
+  serviceSerialConsole();
   const uint32_t now = millis();
   updateBattery(now);
+#if defined(ARDUINO_ARCH_ESP32)
+  {
+    const float tempC = temperatureRead();
+    StateLock lock(gState);
+    if (lock.ok() && isfinite(tempC)) gState.cpuTempC = tempC;
+  }
+#endif
+  serviceSosBuzzer(now);
+  persistRuntimeLogs(now);
   handlePhysicalControls(now);
   bool activePower = false;
   {
@@ -637,8 +926,15 @@ void loop() {
     }
   }
 
-  if (now - lastReport >= Config::GPS_REPORT_PERIOD_MS) {
+  bool rangeTest = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) rangeTest = gState.rangeTest;
+  }
+  if (now - lastReport >= Config::GPS_REPORT_PERIOD_MS ||
+      (rangeTest && now - lastRangeReportMs >= Config::RANGE_TEST_PERIOD_MS)) {
     lastReport = now;
+    lastRangeReportMs = now;
     lora.sendPosition();
   }
 

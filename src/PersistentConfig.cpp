@@ -214,6 +214,11 @@ void RuntimeConfig::load() {
   }
 }
 
+bool RuntimeConfig::migrate() {
+  load();
+  return save();
+}
+
 bool RuntimeConfig::save() const {
   if (!validRadio() || volume > 100 || audioRecordSource > Config::AUDIO_SOURCE_USB ||
       !isfinite(batteryCalibration) ||

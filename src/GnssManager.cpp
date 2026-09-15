@@ -86,8 +86,26 @@ void GnssManager::task() {
   }
 
   if (syncSystemTime) {
-    struct timeval tv{static_cast<time_t>(epoch), 0};
-    (void)settimeofday(&tv, nullptr);
+    const uint32_t now = millis();
+    if (epoch == lastSyncEpoch_ && now - lastSyncMs_ < 2000U) {
+      syncSystemTime = false;
+    } else {
+      // Keep the state snapshot and system-clock update in one StateLock
+      // critical section. This prevents a concurrent GPS update from making
+      // the computed epoch stale between validation and settimeofday().
+      StateLock lock(gState);
+      if (lock.ok() && gState.gps.timeValid && gState.gps.utcEpoch == epoch) {
+        struct timeval tv{static_cast<time_t>(epoch), 0};
+        const int rc = settimeofday(&tv, nullptr);
+        if (rc == 0) {
+          lastSyncEpoch_ = epoch;
+          lastSyncMs_ = now;
+          gState.lastError = "";
+        } else {
+          gState.lastError = "GNSS system time sync failed";
+        }
+      }
+    }
   }
 
   if (logFix && storage.ready()) {

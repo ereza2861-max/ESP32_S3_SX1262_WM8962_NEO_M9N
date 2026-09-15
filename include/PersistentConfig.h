@@ -21,6 +21,7 @@ struct RuntimeConfig {
   String webPasswordHashHex;           // persisted credential hash
 
   void load();
+  bool migrate();
   bool save() const;
   bool setRadio(float freqMHz, float bwKHz, uint8_t sf, uint8_t cr,
                 uint8_t syncWord, int8_t powerDbm);

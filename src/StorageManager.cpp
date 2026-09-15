@@ -5,6 +5,9 @@
 #include <SD.h>
 #include <SPI.h>
 #include <mbedtls/sha256.h>
+#include <cstdio>
+#include <cmath>
+#include <zlib.h>
 
 bool StorageManager::begin() {
   if (!SD.begin(Board::SD_CS, SPI, 20000000U)) {
@@ -121,6 +124,12 @@ bool StorageManager::removeFile(const String& path) {
 
 bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
   if (!ready_) return false;
+  String protectedRecordingFile;
+  {
+    StateLock stateLock(gState);
+    if (!stateLock.ok()) return false;
+    protectedRecordingFile = gState.lastAudioFile;
+  }
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return false;
   if (!SD.exists("/REC") && !SD.mkdir("/REC")) return false;
@@ -148,9 +157,11 @@ bool StorageManager::prepareRecordingSpace(uint32_t requiredBytes) {
         // every candidate and recording fails exactly when storage is low.
         if (!name.startsWith("/")) name = "/REC/" + name;
         if (name.startsWith("/REC/") && name.substring(name.lastIndexOf(".")).equalsIgnoreCase(".WAV") &&
-            name.length() > 5 &&
-            (oldest.isEmpty() || name.compareTo(oldest) < 0)) {
-          oldest = name;
+            name.length() > 5) {
+          const bool protectedFile = !protectedRecordingFile.isEmpty() &&
+                                      name == protectedRecordingFile;
+          if (!protectedFile && (oldest.isEmpty() || name.compareTo(oldest) < 0))
+            oldest = name;
         }
       }
       f.close();
@@ -238,4 +249,214 @@ bool StorageManager::sha256File(const String& path, String& digest, uint64_t& si
   digest.reserve(64);
   for (uint8_t b : hash) { digest += digits[b >> 4]; digest += digits[b & 0x0F]; }
   return true;
+}
+
+
+bool StorageManager::exportGzip(const String& path, const String& outPath) {
+  if (!isSafePath(path) || !isSafePath(outPath) || !ready_ || path == outPath)
+    return false;
+  SpiLock spiLock(pdMS_TO_TICKS(500));
+  if (!spiLock.ok()) return false;
+  File in = SD.open(path, FILE_READ);
+  if (!in || in.isDirectory()) {
+    if (in) in.close();
+    return false;
+  }
+  if (SD.exists(outPath)) SD.remove(outPath);
+  File out = SD.open(outPath, FILE_WRITE);
+  if (!out) { in.close(); return false; }
+
+  z_stream zs{};
+  if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    in.close(); out.close(); return false;
+  }
+  uint8_t inBuf[1024], outBuf[2048];
+  bool ok = true;
+  int flush = Z_NO_FLUSH;
+  uint8_t zeroReads = 0;
+  while (ok) {
+    const size_t got = in.read(inBuf, sizeof(inBuf));
+    if (!got) {
+      ++zeroReads;
+      if (in.available() == 0) flush = Z_FINISH;
+      else if (zeroReads >= 2) {
+        ++gzipStalls_;
+        StateLock lock(gState);
+        if (lock.ok()) gState.lastError = "Gzip export stalled";
+        ok = false;
+        break;
+      }
+    } else {
+      zeroReads = 0;
+    }
+    zs.next_in = inBuf;
+    zs.avail_in = static_cast<uInt>(got);
+    if (got) flush = in.available() ? Z_NO_FLUSH : Z_FINISH;
+    do {
+      zs.next_out = outBuf;
+      zs.avail_out = sizeof(outBuf);
+      const int rc = deflate(&zs, flush);
+      if (rc != Z_OK && rc != Z_STREAM_END) { ok = false; break; }
+      const size_t produced = sizeof(outBuf) - zs.avail_out;
+      if (produced && out.write(outBuf, produced) != produced) { ok = false; break; }
+      if (rc == Z_STREAM_END) break;
+    } while (zs.avail_in || flush == Z_FINISH);
+    if (!got && flush == Z_FINISH) break;
+  }
+  deflateEnd(&zs);
+  in.close();
+  out.close();
+  if (!ok) SD.remove(outPath);
+  return ok;
+}
+
+String StorageManager::readTrackCsv(uint64_t fromEpoch, uint64_t toEpoch, size_t limit) {
+  if (!ready_ || limit == 0 || toEpoch < fromEpoch) return "[]";
+  limit = min<size_t>(limit, 5000);
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) return "[]";
+  File f = SD.open("/TRACK/TRACK.CSV", FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return "[]";
+  }
+
+  String out = "[";
+  bool first = true;
+  size_t emitted = 0;
+  while (f.available() && emitted < limit) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty() || line.startsWith("epoch_s")) continue;
+
+    unsigned long long epoch = 0;
+    unsigned long ms = 0, sat = 0;
+    double lat = 0.0, lon = 0.0, alt = 0.0;
+    if (sscanf(line.c_str(), "%llu,%lu,%lf,%lf,%lf,%lu",
+               &epoch, &ms, &lat, &lon, &alt, &sat) != 6)
+      continue;
+    if (epoch < fromEpoch || epoch > toEpoch) continue;
+    if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) ||
+        lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0)
+      continue;
+
+    if (!first) out += ",";
+    first = false;
+    out += "{\"epoch\":" + String(epoch) +
+           ",\"millis\":" + String(ms) +
+           ",\"lat\":" + String(lat, 6) +
+           ",\"lon\":" + String(lon, 6) +
+           ",\"alt\":" + String(alt, 1) +
+           ",\"sat\":" + String(sat) + "}";
+    ++emitted;
+  }
+  f.close();
+  out += "]";
+  return out;
+}
+
+
+String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpoch,
+                                              size_t limit, double epsilonMeters) {
+  if (!ready_ || limit == 0 || toEpoch < fromEpoch || !isfinite(epsilonMeters) ||
+      epsilonMeters <= 0.0) return "[]";
+  struct Point { uint64_t epoch; uint32_t ms; double lat; double lon; double alt; uint32_t sat; };
+  static constexpr size_t MAX_POINTS = 5000;
+  Point points[MAX_POINTS] = {};
+  size_t n = 0;
+
+  SpiLock spiLock(pdMS_TO_TICKS(200));
+  if (!spiLock.ok()) return "[]";
+  File f = SD.open("/TRACK/TRACK.CSV", FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return "[]";
+  }
+  while (f.available() && n < min(limit, MAX_POINTS)) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty() || line.startsWith("epoch_s")) continue;
+    unsigned long long epoch = 0;
+    unsigned long ms = 0, sat = 0;
+    double lat = 0.0, lon = 0.0, alt = 0.0;
+    if (sscanf(line.c_str(), "%llu,%lu,%lf,%lf,%lf,%lu",
+               &epoch, &ms, &lat, &lon, &alt, &sat) != 6) continue;
+    if (epoch < fromEpoch || epoch > toEpoch ||
+        !isfinite(lat) || !isfinite(lon) ||
+        lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) continue;
+    points[n++] = {static_cast<uint64_t>(epoch), static_cast<uint32_t>(ms),
+                   lat, lon, alt, static_cast<uint32_t>(sat)};
+  }
+  f.close();
+  if (n <= 2) {
+    String out = "[";
+    for (size_t i = 0; i < n; ++i) {
+      if (i) out += ",";
+      out += "{\"epoch\":" + String(points[i].epoch) +
+             ",\"millis\":" + String(points[i].ms) +
+             ",\"lat\":" + String(points[i].lat, 6) +
+             ",\"lon\":" + String(points[i].lon, 6) +
+             ",\"alt\":" + String(points[i].alt, 1) +
+             ",\"sat\":" + String(points[i].sat) + "}";
+    }
+    out += "]";
+    return out;
+  }
+
+  bool keep[MAX_POINTS] = {};
+  keep[0] = keep[n - 1] = true;
+  struct Range { size_t a, b; };
+  Range stack[MAX_POINTS];
+  size_t sp = 0;
+  stack[sp++] = {0, n - 1};
+  const double rad = 0.017453292519943295;
+  auto xy = [&](const Point& p, double refLat, double& x, double& y) {
+    x = p.lon * cos(refLat * rad) * 111320.0;
+    y = p.lat * 110540.0;
+  };
+  while (sp) {
+    const Range r = stack[--sp];
+    if (r.b <= r.a + 1) continue;
+    const double refLat = points[r.a].lat * rad;
+    double ax, ay, bx, by;
+    xy(points[r.a], points[r.a].lat, ax, ay);
+    xy(points[r.b], points[r.a].lat, bx, by);
+    const double dx = bx - ax, dy = by - ay;
+    double maxDist = -1.0;
+    size_t index = r.a;
+    for (size_t i = r.a + 1; i < r.b; ++i) {
+      double px, py;
+      xy(points[i], points[r.a].lat, px, py);
+      double dist;
+      const double denom = dx * dx + dy * dy;
+      if (denom < 1e-9) {
+        dist = hypot(px - ax, py - ay);
+      } else {
+        const double t = constrain((px - ax) * dx + (py - ay) * dy, 0.0, 1.0);
+        dist = hypot(px - (ax + t * dx), py - (ay + t * dy));
+      }
+      if (dist > maxDist) { maxDist = dist; index = i; }
+    }
+    if (maxDist > epsilonMeters) {
+      keep[index] = true;
+      if (index > r.a + 1) stack[sp++] = {r.a, index};
+      if (r.b > index + 1) stack[sp++] = {index, r.b};
+    }
+  }
+
+  String out = "[";
+  bool first = true;
+  for (size_t i = 0; i < n; ++i) {
+    if (!keep[i]) continue;
+    if (!first) out += ",";
+    first = false;
+    out += "{\"epoch\":" + String(points[i].epoch) +
+           ",\"millis\":" + String(points[i].ms) +
+           ",\"lat\":" + String(points[i].lat, 6) +
+           ",\"lon\":" + String(points[i].lon, 6) +
+           ",\"alt\":" + String(points[i].alt, 1) +
+           ",\"sat\":" + String(points[i].sat) + "}";
+  }
+  out += "]";
+  return out;
 }

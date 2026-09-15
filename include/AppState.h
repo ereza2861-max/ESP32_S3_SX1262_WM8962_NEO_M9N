@@ -50,6 +50,12 @@ struct HealthLogEntry {
   bool jammingDetected = false;
   int16_t noiseFloorDbm = -127;
   uint8_t channelOccupancy = 0;
+  bool rangeTest = false;
+  float cpuTempC = NAN;
+  bool batteryCalibrationDrift = false;
+  bool antennaOk = true;
+  int16_t txRssi = -127;
+  int16_t antennaBaselineRssi = -127;
 };
 
 extern SemaphoreHandle_t gSpiMutex;
@@ -101,6 +107,13 @@ struct RuntimeState {
   int8_t batteryPercent = -1;
   uint32_t batteryCycleCount = 0;
   uint32_t batterySampleCount = 0;
+  static constexpr size_t BATTERY_HISTORY_SIZE = 128;
+  uint32_t batteryHistoryMs[BATTERY_HISTORY_SIZE] = {};
+  float batteryHistoryV[BATTERY_HISTORY_SIZE] = {};
+  int8_t batteryHistoryPercent[BATTERY_HISTORY_SIZE] = {};
+  size_t batteryHistoryNext = 0;
+  size_t batteryHistoryCount = 0;
+  int32_t batteryEstimatedMinutes = -1;
   float batteryMinV = NAN;
   float batteryMaxV = NAN;
   bool batteryChargeProbable = false;
@@ -150,6 +163,7 @@ struct RuntimeState {
   bool scannerActive = false;
   uint8_t scannerMode = 0;
   uint16_t scannerSweepCount = 0;
+  bool scannerSweepInProgress = false;
   uint8_t scannerChannelCount = 0;
   uint16_t scannerDwellMs = 0;
   uint32_t scannerLastSweepMs = 0;

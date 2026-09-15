@@ -88,6 +88,7 @@ constexpr uint8_t LORA_REPLAY_WINDOW_BITS = 32;
 constexpr uint32_t LORA_TX_SEQUENCE_RESERVATION = 256;
 constexpr uint32_t LORA_DEDUP_TTL_MS = 300000UL;
 constexpr uint32_t LORA_FORWARD_RATE_LIMIT_MS = 1000UL;
+constexpr uint32_t NEIGHBOR_TTL_MS = 240000UL;
 constexpr uint32_t LORA_NEIGHBOR_BEACON_PERIOD_MS = 30000UL;
 constexpr uint8_t LORA_VOICE_WINDOW_SIZE = 8;
 constexpr uint32_t LORA_VOICE_ACK_TIMEOUT_MS = 140UL;
@@ -139,11 +140,19 @@ constexpr uint32_t CPU_IDLE_MHZ = 80;
 constexpr uint32_t WEB_SESSION_TIMEOUT_MS = 15UL * 60UL * 1000UL;
 constexpr uint32_t WEB_AUTH_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t CONFIG_AUDIT_LOG_ROTATE_BYTES = 64UL * 1024UL;
+constexpr uint32_t AUDIO_LOG_ROTATE_BYTES = 64UL * 1024UL;
+constexpr uint32_t LORA_LOG_ROTATE_BYTES = 64UL * 1024UL;
+constexpr uint32_t HEALTH_LOG_ROTATE_BYTES = 64UL * 1024UL;
+constexpr uint32_t LOG_PERSIST_PERIOD_MS = 5000UL;
+constexpr uint32_t RANGE_TEST_PERIOD_MS = 5000UL;
 constexpr uint8_t CONFIG_VERSION = 3;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
 constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;
 constexpr uint32_t SOS_BEACON_PERIOD_MS = 15000UL;
+constexpr uint32_t MESSAGE_HISTORY_ROTATE_BYTES = 64UL * 1024UL;
+constexpr uint32_t CAPTURE_MAX_DURATION_MS = 10UL * 60UL * 1000UL;
+constexpr uint32_t ADR_REEVALUATE_MS = 10000UL;
 
 // WM8962/ESP32-S3 I2S audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;
