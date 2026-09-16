@@ -197,6 +197,7 @@ void AudioManager::logEvent(const char* event, const String& detail) {
 
 bool AudioManager::begin() {
   instance_ = this;
+  recordQuality_ = gConfig.audioRecordQuality;
   mutex_ = xSemaphoreCreateMutex();
   i2sMutex_ = xSemaphoreCreateMutex();
   usbRecordBuffer_ = xStreamBufferCreate(Config::USB_RECORD_BUFFER_BYTES, 1);
@@ -281,25 +282,24 @@ bool AudioManager::begin() {
 bool AudioManager::writeWavHeader(File& f, uint32_t dataBytes) {
   if (!f) return false;
 
-  const uint32_t byteRate = Config::AUDIO_SAMPLE_RATE * 4;
-  const uint16_t blockAlign = 4;
-  const uint16_t bits = 16;
-
+  const uint32_t sampleRate =
+      recordQuality_ == 0 ? 8000U : (recordQuality_ == 1 ? 16000U : 44100U);
+  const uint16_t channels = recordQuality_ == 2 ? 2U : 1U;
+  const uint16_t blockAlign = static_cast<uint16_t>(channels * 2U);
+  const uint32_t byteRate = sampleRate * blockAlign;
   uint8_t h[44] = {
     'R','I','F','F',0,0,0,0,'W','A','V','E',
-    'f','m','t',' ',16,0,0,0,1,0,2,0,
-    0,0,0,0,0,0,0,0,4,0,16,0,
+    'f','m','t',' ',16,0,0,0,1,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,16,0,
     'd','a','t','a',0,0,0,0
   };
-
   uint32_t riff = 36 + dataBytes;
   memcpy(h + 4, &riff, 4);
-  uint32_t sr = Config::AUDIO_SAMPLE_RATE;
-  memcpy(h + 24, &sr, 4);
+  memcpy(h + 22, &channels, 2);
+  memcpy(h + 24, &sampleRate, 4);
   memcpy(h + 28, &byteRate, 4);
   memcpy(h + 32, &blockAlign, 2);
   memcpy(h + 40, &dataBytes, 4);
-
   if (!f.seek(0)) return false;
   return f.write(h, sizeof(h)) == sizeof(h);
 }
@@ -719,7 +719,7 @@ bool AudioManager::playTone(uint16_t frequencyHz, uint16_t durationMs, uint8_t p
 }
 
 bool AudioManager::writeRecordingData(const uint8_t* data, size_t len) {
-  if (!data || !len || !recordFile_) return false;
+  if (!data || !len || !recordFile_ || (len & 3U)) return false;
 
   SpiLock spiLock(pdMS_TO_TICKS(20));
   if (!spiLock.ok()) {
@@ -728,16 +728,49 @@ bool AudioManager::writeRecordingData(const uint8_t* data, size_t len) {
     return false;
   }
 
-  const size_t written = recordFile_.write(data, len);
-  recordedBytes_ += static_cast<uint32_t>(written);
-  if (written != len) {
-    StateLock lock(gState);
-    if (lock.ok()) {
-      gState.audioDrops++;
-      gState.lastError = "WAV write failed";
+  if (recordQuality_ == 2) {
+    const size_t written = recordFile_.write(data, len);
+    recordedBytes_ += static_cast<uint32_t>(written);
+    if (written != len) {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        gState.audioDrops++;
+        gState.lastError = "WAV write failed";
+      }
+      return false;
     }
-    return false;
+    return true;
   }
+
+  const uint32_t inRate = recordSource_ == Config::AUDIO_SOURCE_USB
+      ? max<uint32_t>(8000U, usbSampleRate_) : Config::AUDIO_SAMPLE_RATE;
+  const uint32_t outRate = recordQuality_ == 0 ? 8000U : 16000U;
+  uint8_t mono[2];
+  size_t produced = 0;
+  for (size_t i = 0; i < len; i += 4) {
+    // I2S/USB PCM is signed 16-bit stereo, little-endian.
+    const int16_t l = static_cast<int16_t>(
+        static_cast<uint16_t>(data[i]) | (static_cast<uint16_t>(data[i + 1]) << 8));
+    const int16_t r = static_cast<int16_t>(
+        static_cast<uint16_t>(data[i + 2]) | (static_cast<uint16_t>(data[i + 3]) << 8));
+    recordResamplePhase_ += outRate;
+    if (recordResamplePhase_ >= inRate) {
+      recordResamplePhase_ -= inRate;
+      const int32_t m = (static_cast<int32_t>(l) + static_cast<int32_t>(r)) / 2;
+      mono[0] = static_cast<uint8_t>(m & 0xff);
+      mono[1] = static_cast<uint8_t>((m >> 8) & 0xff);
+      if (recordFile_.write(mono, sizeof(mono)) != sizeof(mono)) {
+        StateLock lock(gState);
+        if (lock.ok()) {
+          gState.audioDrops++;
+          gState.lastError = "WAV resampled write failed";
+        }
+        return false;
+      }
+      produced += sizeof(mono);
+    }
+  }
+  recordedBytes_ += static_cast<uint32_t>(produced);
   return true;
 }
 
@@ -920,6 +953,7 @@ bool AudioManager::openRecordingPart() {
   }
   recordPath_ = path;
   recordedBytes_ = 0;
+  recordResamplePhase_ = 0;
   recordStartedMs_ = millis();
   if (usbRecordBuffer_) (void)xStreamBufferReset(usbRecordBuffer_);
   if (usbMicBuffer_) (void)xStreamBufferReset(usbMicBuffer_);
@@ -965,6 +999,28 @@ bool AudioManager::splitRecording() {
   }
   xSemaphoreGive(mutex_);
   return true;
+}
+
+bool AudioManager::setRecordQuality(uint8_t level) {
+  if (level > 2 || !initialized_ || !mutex_) return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+  bool recording = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) recording = gState.recording;
+  }
+  if (recording) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+  recordQuality_ = level;
+  RuntimeConfig candidate = gConfig;
+  candidate.audioRecordQuality = level;
+  const bool ok = candidate.save();
+  if (ok) gConfig.audioRecordQuality = level;
+  else recordQuality_ = gConfig.audioRecordQuality;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
 
 bool AudioManager::setAec(bool enabled) {

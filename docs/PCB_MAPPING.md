@@ -2,6 +2,8 @@
 
 Mapping berikut adalah target mapping firmware ESP32-S3-WROOM-1-N16R8 dan harus tetap identik dengan `include/BoardConfig.h`. Ini membutuhkan rerouting PCB dari mapping ESP32-WROOM-32E lama.
 
+Rev-C pin correction: I2C SDA is moved from GPIO8 to GPIO38; the microSD CS net is moved from GPIO38 to GPIO16; MAX2016 reflected detector is moved from GPIO16 to GPIO8. GPIO16 is digital-only in firmware and is never used as an ADC input.
+
 - GPIO12/13/11: shared SPI (SCK/MISO/MOSI)
 - GPIO10: SX1262 NSS
 - GPIO17: SX1262 RESET
@@ -9,8 +11,9 @@ Mapping berikut adalah target mapping firmware ESP32-S3-WROOM-1-N16R8 dan harus 
 - GPIO18: SOS button, active-high RTC wake input
 - GPIO21: PTT button, active-high RTC wake input
 - GPIO15: SX1262 BUSY (mandatory)
-- GPIO38: microSD CS
-- GPIO8/9: WM8962 I2C
+- GPIO16: microSD CS (secondary SPI chip-select; digital only)
+- GPIO38: WM8962 I2C SDA
+- GPIO9: WM8962 I2C SCL
 - GPIO4: WM8962 BCLK
 - GPIO5: WM8962 LRCLK
 - GPIO6: ESP32-S3 -> WM8962 DACDAT
@@ -18,6 +21,9 @@ Mapping berikut adalah target mapping firmware ESP32-S3-WROOM-1-N16R8 dan harus 
 - GPIO19/20: native USB D-/D+
 - GPIO43/44: NEO-M9N UART TX/RX (moved off RTC GPIO18 to free SOS wake)
 - external 24 MHz oscillator: WM8962 MCLK
+- GPIO1: battery ADC (ADC1)
+- GPIO2: MAX2016 forward detector ADC (ADC1)
+- GPIO8: MAX2016 reflected detector ADC (ADC1)
 
 Mapping Rev-B sekarang menetapkan pin fisik untuk PTT/SOS, tetapi net tersebut tetap
 harus benar-benar dirutekan pada PCB. Kontrol web/API tetap dapat digunakan sebagai

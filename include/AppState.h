@@ -139,6 +139,7 @@ struct RuntimeState {
   uint32_t voiceDrops = 0;
   uint32_t voiceRxLost = 0;
   uint32_t healthAlerts = 0;
+  uint32_t wdtResetCounts[4] = {}; // GNSS, LoRa, Audio, Web watchdog-feed counts
   uint16_t sosSeq = 0;
   bool sosAcked = false;
   uint8_t sosRetries = 0;

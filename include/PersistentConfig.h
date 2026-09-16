@@ -19,6 +19,7 @@ struct RuntimeConfig {
   String webPassword;                 // runtime-only plaintext; never persisted
   String webPasswordSaltHex;           // persisted credential salt
   String webPasswordHashHex;           // persisted credential hash
+  uint8_t audioRecordQuality = 2;      // 0=low 8k mono, 1=medium 16k mono, 2=high 44.1k stereo
 
   void load();
   bool migrate();

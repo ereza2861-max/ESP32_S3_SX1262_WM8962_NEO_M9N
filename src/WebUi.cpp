@@ -11,6 +11,7 @@
 #include <Preferences.h>
 #include <mbedtls/md.h>
 #include <mbedtls/base64.h>
+#include <mbedtls/aes.h>
 #ifndef CONFIG_SECURE_BOOT_V2_ENABLED
 #define CONFIG_SECURE_BOOT_V2_ENABLED 0
 #endif
@@ -46,6 +47,166 @@ static String jsonEscape(const String& input) {
     }
   }
   return out;
+}
+
+static String configBackupPlaintext() {
+  const RuntimeConfig& c = gConfig;
+  String p;
+  p.reserve(512);
+  p += "freq=" + String(c.loraFreqMHz, 6) + "\n";
+  p += "bw=" + String(c.loraBwKHz, 6) + "\n";
+  p += "sf=" + String(c.loraSf) + "\n";
+  p += "cr=" + String(c.loraCr) + "\n";
+  p += "sync=" + String(c.loraSyncWord) + "\n";
+  p += "power=" + String(c.loraPowerDbm) + "\n";
+  p += "volume=" + String(c.volume) + "\n";
+  p += "audsrc=" + String(c.audioRecordSource) + "\n";
+  p += "recqual=" + String(c.audioRecordQuality) + "\n";
+  p += "batcal=" + String(c.batteryCalibration, 6) + "\n";
+  p += "callsign=" + c.callsign + "\n";
+  p += "lorakey=" + c.loraKeyHex + "\n";
+  p += "apssid=" + c.apSsid + "\n";
+  p += "apppass=" + c.apPassword + "\n";
+  p += "webuser=" + c.webUser + "\n";
+  p += "websalt=" + c.webPasswordSaltHex + "\n";
+  p += "webph=" + c.webPasswordHashHex + "\n";
+  return p;
+}
+
+static bool backupKey(uint8_t key[32]) {
+  if (!key || gConfig.webPasswordHashHex.length() != 64) return false;
+  for (size_t i = 0; i < 32; ++i) {
+    const char a = gConfig.webPasswordHashHex[i * 2];
+    const char b = gConfig.webPasswordHashHex[i * 2 + 1];
+    auto n = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    const int hi = n(a), lo = n(b);
+    if (hi < 0 || lo < 0) return false;
+    key[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
+}
+
+static String hexEncodeUi(const uint8_t* data, size_t len) {
+  static const char h[] = "0123456789abcdef";
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    out += h[data[i] >> 4];
+    out += h[data[i] & 0x0f];
+  }
+  return out;
+}
+
+static bool hexDecodeUi(const String& in, uint8_t* out, size_t len) {
+  if (!out || in.length() != len * 2) return false;
+  auto n = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < len; ++i) {
+    const int hi = n(in[i * 2]), lo = n(in[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
+}
+
+static String encryptConfigBackup() {
+  uint8_t key[32] = {};
+  if (!backupKey(key)) return String();
+  uint8_t iv[16] = {};
+  for (size_t i = 0; i < sizeof(iv); i += 4) {
+    const uint32_t r = esp_random();
+    memcpy(iv + i, &r, min<size_t>(4, sizeof(iv) - i));
+  }
+  const String plain = configBackupPlaintext();
+  String cipherHex;
+  cipherHex.reserve(plain.length() * 2);
+  uint8_t* cipher = static_cast<uint8_t*>(malloc(plain.length()));
+  if (!cipher) return String();
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  size_t ncOff = 0;
+  uint8_t stream[16] = {};
+  uint8_t ctr[16] = {};
+  memcpy(ctr, iv, sizeof(iv));
+  const bool ok = mbedtls_aes_setkey_enc(&aes, key, 256) == 0 &&
+                  mbedtls_aes_crypt_ctr(&aes, plain.length(), &ncOff, ctr, stream,
+                                        reinterpret_cast<const unsigned char*>(plain.c_str()), cipher) == 0;
+  mbedtls_aes_free(&aes);
+  if (!ok) { free(cipher); return String(); }
+  cipherHex = hexEncodeUi(cipher, plain.length());
+  free(cipher);
+
+  String envelope = "FRB1|" + hexEncodeUi(iv, sizeof(iv)) + "|" + cipherHex;
+  uint8_t mac[32] = {};
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md || mbedtls_md_hmac(md, key, sizeof(key),
+                             reinterpret_cast<const uint8_t*>(envelope.c_str()),
+                             envelope.length(), mac) != 0)
+    return String();
+  return envelope + "|" + hexEncodeUi(mac, sizeof(mac));
+}
+
+static bool decryptConfigBackup(const String& envelope, String& plain) {
+  uint8_t key[32] = {};
+  if (!backupKey(key)) return false;
+  const int p1 = envelope.indexOf('|');
+  const int p2 = p1 >= 0 ? envelope.indexOf('|', p1 + 1) : -1;
+  const int p3 = p2 >= 0 ? envelope.indexOf('|', p2 + 1) : -1;
+  if (p1 != 4 || p2 <= p1 || p3 <= p2) return false;
+  const String tag = envelope.substring(p3 + 1);
+  uint8_t iv[16] = {}, mac[32] = {};
+  if (!hexDecodeUi(envelope.substring(p1 + 1, p2), iv, sizeof(iv)) ||
+      !hexDecodeUi(tag, mac, sizeof(mac)))
+    return false;
+  const String signedPart = envelope.substring(0, p3);
+  uint8_t expected[32] = {};
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md || mbedtls_md_hmac(md, key, sizeof(key),
+                             reinterpret_cast<const uint8_t*>(signedPart.c_str()),
+                             signedPart.length(), expected) != 0)
+    return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < sizeof(mac); ++i) diff |= mac[i] ^ expected[i];
+  if (diff) return false;
+  const String cipherHex = envelope.substring(p2 + 1, p3);
+  if (cipherHex.length() == 0 || (cipherHex.length() & 1U)) return false;
+  const size_t len = cipherHex.length() / 2;
+  uint8_t* cipher = static_cast<uint8_t*>(malloc(len));
+  uint8_t* out = static_cast<uint8_t*>(malloc(len + 1));
+  if (!cipher || !out || !hexDecodeUi(cipherHex, cipher, len)) {
+    free(cipher); free(out); return false;
+  }
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  size_t ncOff = 0;
+  uint8_t stream[16] = {}, ctr[16] = {};
+  memcpy(ctr, iv, sizeof(iv));
+  const bool ok = mbedtls_aes_setkey_enc(&aes, key, 256) == 0 &&
+                  mbedtls_aes_crypt_ctr(&aes, len, &ncOff, ctr, stream,
+                                        cipher, out) == 0;
+  mbedtls_aes_free(&aes);
+  if (!ok) { free(cipher); free(out); return false; }
+  out[len] = '\0';
+  plain = String(reinterpret_cast<char*>(out));
+  free(cipher); free(out);
+  return true;
+}
+
+static bool parseBackupLine(const String& line, String& key, String& value) {
+  const int eq = line.indexOf('=');
+  if (eq <= 0) return false;
+  key = line.substring(0, eq);
+  value = line.substring(eq + 1);
+  return true;
 }
 
 
@@ -125,7 +286,7 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <button onclick="play()">PLAY</button><button onclick="pausePlay(1)">PAUSE</button><button onclick="pausePlay(0)">RESUME</button><button onclick="stopPlay()">STOP</button><input id=seekms type=number value="0" min="0"><button onclick="seekPlay()">SEEK ms</button><button onclick="queue()">QUEUE</button><button onclick="clearQueue()">CLEAR QUEUE</button>
 <button onclick="tone(880,120)">BEEP</button>
 <label>USB monitor <input id=usbmon type=checkbox onchange="setUsbMonitor()"></label><label>SD→USB <input id=usbtransport type=checkbox onchange="setUsbTransport()"></label>
-<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX threshold <input id=voxThreshold type=number step="0.01" min="0.01" max="1" value="0.08"></label><label>hang ms <input id=voxHang type=number min="50" max="5000" value="700"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label>
+<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX threshold <input id=voxThreshold type=number step="0.01" min="0.01" max="1" value="0.08"></label><label>hang ms <input id=voxHang type=number min="50" max="5000" value="700"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label><label>Record quality <select id=recordQuality onchange="setRecordQuality()"><option value="low">8k mono</option><option value="medium">16k mono</option><option value="high" selected>44.1k stereo</option></select></label>
 </div>
 <div class=card><input id=msg placeholder="LoRa message">
 <button onclick="send()">Send</button></div><div class=card><h3>Messages <span id=unreadBadge>0 unread</span></h3>
@@ -328,6 +489,7 @@ async function clearQueue(){await j('/api/queue-clear',{method:'POST'});refresh(
 async function recordPause(v){await j('/api/record-pause?on='+v,{method:'POST'});refresh()}
 async function recordSplit(){await j('/api/record-split',{method:'POST'});refresh()}
 async function setVox(){await j('/api/vox?on='+(vox.checked?'1':'0')+'&threshold='+encodeURIComponent(voxThreshold.value)+'&hang='+encodeURIComponent(voxHang.value),{method:'POST'});refresh()}
+async function setRecordQuality(){await j('/api/record/quality?level='+encodeURIComponent(recordQuality.value),{method:'POST'});refresh()}
 async function syncSource(){
   try {
     const x=await (await fetch('/api/status')).json();
@@ -479,7 +641,7 @@ bool WebUi::sessionValid() {
 }
 
 bool WebUi::csrfValid() {
-  if (server_.method() != HTTP_POST) return false;
+  if (server_.method() != HTTP_POST && server_.method() != HTTP_DELETE) return false;
   if (csrfTokenHex_.isEmpty() || csrfTokenHex_.length() != 32) {
     ++csrfFailures_;
     auditAuth(false);
@@ -621,7 +783,7 @@ bool WebUi::auth() {
     }
     auditAuth(true);
   }
-  if (server_.method() == HTTP_POST) {
+  if (server_.method() == HTTP_POST || server_.method() == HTTP_DELETE) {
     if (!sameOrigin()) {
       server_.send(403, "text/plain", "forbidden origin");
       return false;
@@ -688,6 +850,7 @@ void WebUi::begin() {
   server_.on("/api/battery/history", HTTP_GET, [this]{ if (auth()) handleBatteryHistory(); });
   server_.on("/api/radio/history", HTTP_GET, [this]{ if (auth()) handleRadioHistory(); });
   server_.on("/api/radio/stats", HTTP_GET, [this]{ if (auth()) handleRadioStats(); });
+  server_.on("/api/rf/detector", HTTP_GET, [this]{ if (auth()) handleRfDetector(); });
   server_.on("/api/radio/tune", HTTP_POST, [this]{ if (auth()) handleRadioTune(); });
   server_.on("/api/range-test", HTTP_POST, [this]{ if (auth()) handleRangeTest(); });
   server_.on("/api/storage/info", HTTP_GET, [this]{ if (auth()) handleStorageInfo(); });
@@ -711,6 +874,7 @@ void WebUi::begin() {
   server_.on("/api/hop/set-channels", HTTP_POST, [this]{ if (auth()) handleHopSetChannels(); });
   server_.on("/api/ptt", HTTP_POST, [this]{ if (auth()) handlePtt(); });
   server_.on("/api/record", HTTP_POST, [this]{ if (auth()) handleRecord(); });
+  server_.on("/api/record/quality", HTTP_POST, [this]{ if (auth()) handleRecordQuality(); });
   server_.on("/api/play", HTTP_POST, [this]{ if (auth()) handlePlay(); });
   server_.on("/api/stop", HTTP_POST, [this]{ if (auth()) handleStop(); });
   server_.on("/api/pause", HTTP_POST, [this]{ if (auth()) handlePause(); });
@@ -731,6 +895,8 @@ void WebUi::begin() {
   server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
   server_.on("/api/config/export", HTTP_GET, [this]{ if (auth()) handleConfigExport(); });
+  server_.on("/api/config/backup", HTTP_GET, [this]{ if (auth()) handleConfigBackup(); });
+  server_.on("/api/config/restore", HTTP_POST, [this]{ if (auth()) handleConfigRestore(); });
   server_.on("/api/factory-reset", HTTP_POST, [this]{ if (auth()) handleFactoryReset(); });
   server_.on("/api/audio-source", HTTP_POST, [this]{ if (auth()) handleAudioSource(); });
   server_.on("/api/audio-monitor", HTTP_POST, [this]{
@@ -1225,7 +1391,10 @@ void WebUi::handleHealthLog() {
          ",\"gnssStack\":" + String(e.gnssStackMin) +
          ",\"loraStack\":" + String(e.loraStackMin) +
          ",\"audioStack\":" + String(e.audioStackMin) +
-         ",\"webStack\":" + String(e.webStackMin) + "}";
+         ",\"webStack\":" + String(e.webStackMin) +
+         ",\"wdtResetCounts\":[" + String(gState.wdtResetCounts[0]) + "," +
+         String(gState.wdtResetCounts[1]) + "," + String(gState.wdtResetCounts[2]) + "," +
+         String(gState.wdtResetCounts[3]) + "]}";
   }
   j += "]";
   server_.send(200, "application/json", j);
@@ -1566,6 +1735,20 @@ void WebUi::handleVox() {
   server_.send(ok ? 200 : 400, "text/plain", ok ? "OK" : "FAIL");
 }
 
+void WebUi::handleRecordQuality() {
+  const String level = server_.arg("level");
+  uint8_t value = 2;
+  if (level == "low") value = 0;
+  else if (level == "medium") value = 1;
+  else if (level == "high") value = 2;
+  else {
+    server_.send(400, "text/plain", "invalid record quality");
+    return;
+  }
+  const bool ok = audio.setRecordQuality(value);
+  server_.send(ok ? 200 : 409, "text/plain", ok ? "OK" : "recording active or save failed");
+}
+
 void WebUi::handleVad() {
   const String on = server_.arg("on");
   if (on != "0" && on != "1") {
@@ -1734,7 +1917,7 @@ void WebUi::handleNvs() {
   const String key = server_.arg("key");
   static const char* const allowed[] = {
     "cfgver", "freq", "bw", "sf", "cr", "sync", "power", "volume",
-    "audsrc", "batcal", "callsign", "theme", "bhealth_v", "bcycles", "bsamples"
+    "audsrc", "recqual", "batcal", "callsign", "theme", "bhealth_v", "bcycles", "bsamples"
   };
   bool allowedKey = false;
   for (const char* k : allowed)
@@ -1802,8 +1985,16 @@ void WebUi::handleMessageScheduleList() {
 }
 
 void WebUi::handleMessageScheduleDelete() {
-  const uint32_t id = static_cast<uint32_t>(server_.arg("id").toInt());
-  if (!id) { server_.send(400, "text/plain", "invalid id"); return; }
+  const String raw = server_.arg("id");
+  if (raw.isEmpty() || raw.length() > 10) {
+    server_.send(400, "text/plain", "invalid id"); return;
+  }
+  char* end = nullptr;
+  const unsigned long value = strtoul(raw.c_str(), &end, 10);
+  if (!end || *end != '\0' || value == 0 || value > UINT32_MAX) {
+    server_.send(400, "text/plain", "invalid id"); return;
+  }
+  const uint32_t id = static_cast<uint32_t>(value);
   server_.send(lora.cancelScheduledMessage(id) ? 200 : 404,
                "text/plain", "OK");
 }
@@ -1812,10 +2003,19 @@ void WebUi::handleRecordSchedule() {
   if (!server_.hasArg("start") || !server_.hasArg("duration")) {
     server_.send(400, "text/plain", "start and duration required"); return;
   }
-  char* end = nullptr;
-  const unsigned long long start = strtoull(server_.arg("start").c_str(), &end, 10);
-  const unsigned long duration = strtoul(server_.arg("duration").c_str(), &end, 10);
-  if (!end || start == 0 || duration == 0 || duration > Config::RECORD_MAX_SECONDS) {
+  char* startEnd = nullptr;
+  char* durationEnd = nullptr;
+  const String rawStart = server_.arg("start");
+  const String rawDuration = server_.arg("duration");
+  if (rawStart.isEmpty() || rawStart.length() > 20 ||
+      rawDuration.isEmpty() || rawDuration.length() > 10) {
+    server_.send(400, "text/plain", "invalid schedule"); return;
+  }
+  const unsigned long long start = strtoull(rawStart.c_str(), &startEnd, 10);
+  const unsigned long duration = strtoul(rawDuration.c_str(), &durationEnd, 10);
+  if (!startEnd || *startEnd != '\0' ||
+      !durationEnd || *durationEnd != '\0' ||
+      start == 0 || duration == 0 || duration > Config::RECORD_MAX_SECONDS) {
     server_.send(400, "text/plain", "invalid schedule"); return;
   }
   recordScheduleStart_ = static_cast<uint64_t>(start);
@@ -1894,6 +2094,16 @@ void WebUi::handleLang() {
   server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "NVS save failed");
 }
 
+void WebUi::handleRfDetector() {
+  const RfDetector& detector = lora.rfDetector();
+  String j = "{\"forwardDbm\":" + String(detector.lastForwardDbm(), 2) +
+             ",\"reflectedDbm\":" + String(detector.lastReflectedDbm(), 2) +
+             ",\"vswr\":" + String(detector.lastVswr(), 2) +
+             ",\"healthy\":" + String(detector.healthy() ? "true" : "false") + "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
 void WebUi::handleRadioStats() {
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
@@ -1956,7 +2166,13 @@ void WebUi::handleHopSetChannels() {
     if (token.isEmpty() || token.length() > 2) {
       server_.send(400, "text/plain", "invalid channel"); return;
     }
-    const int value = token.toInt();
+    int value = 0;
+    for (size_t i = 0; i < token.length(); ++i) {
+      if (token[i] < '0' || token[i] > '9') {
+        server_.send(400, "text/plain", "invalid channel"); return;
+      }
+      value = value * 10 + (token[i] - '0');
+    }
     if (value < 0 || value >= Config::HOP_CHANNEL_MAX) {
       server_.send(400, "text/plain", "channel out of range"); return;
     }
@@ -2239,6 +2455,7 @@ void WebUi::handleConfigExport() {
   j += ",\"sf\":" + String(c.loraSf) + ",\"cr\":" + String(c.loraCr);
   j += ",\"sync\":" + String(c.loraSyncWord) + ",\"power\":" + String(c.loraPowerDbm);
   j += ",\"volume\":" + String(c.volume) + ",\"audio_source\":" + String(c.audioRecordSource);
+  j += ",\"record_quality\":" + String(c.audioRecordQuality);
   j += ",\"battery_calibration\":" + String(c.batteryCalibration, 5);
   j += ",\"callsign\":\"" + jsonEscape(c.callsign) + "\"";
   // Secrets are deliberately omitted; exporting them into browser downloads is
@@ -2246,6 +2463,110 @@ void WebUi::handleConfigExport() {
   j += "}";
   server_.sendHeader("Content-Disposition", "attachment; filename=\"fieldradio-config.json\"");
   server_.send(200, "application/json", j);
+}
+
+void WebUi::handleConfigBackup() {
+  const String envelope = encryptConfigBackup();
+  if (envelope.isEmpty()) {
+    server_.send(503, "text/plain", "backup unavailable");
+    return;
+  }
+  server_.sendHeader("Content-Disposition", "attachment; filename=\"fieldradio-config.frb\"");
+  server_.send(200, "text/plain", envelope);
+}
+
+void WebUi::handleConfigRestore() {
+  const String body = server_.arg("plain");
+  if (body.length() < 16 || body.length() > 4096) {
+    server_.send(400, "text/plain", "invalid backup");
+    return;
+  }
+  String plain;
+  if (!decryptConfigBackup(body, plain)) {
+    server_.send(400, "text/plain", "backup authentication failed");
+    return;
+  }
+
+  RuntimeConfig candidate = gConfig;
+  bool seenFreq = false, seenBw = false, seenSf = false, seenCr = false;
+  int pos = 0;
+  while (pos <= static_cast<int>(plain.length())) {
+    const int nl = plain.indexOf('\n', pos);
+    const int end = nl < 0 ? plain.length() : nl;
+    const String line = plain.substring(pos, end);
+    String key, value;
+    if (!line.isEmpty()) {
+      if (!parseBackupLine(line, key, value)) {
+        server_.send(400, "text/plain", "malformed backup");
+        return;
+      }
+      if (key == "freq") { candidate.loraFreqMHz = value.toFloat(); seenFreq = true; }
+      else if (key == "bw") { candidate.loraBwKHz = value.toFloat(); seenBw = true; }
+      else if (key == "sf") { candidate.loraSf = static_cast<uint8_t>(value.toInt()); seenSf = true; }
+      else if (key == "cr") { candidate.loraCr = static_cast<uint8_t>(value.toInt()); seenCr = true; }
+      else if (key == "sync") candidate.loraSyncWord = static_cast<uint8_t>(value.toInt());
+      else if (key == "power") candidate.loraPowerDbm = static_cast<int8_t>(value.toInt());
+      else if (key == "volume") candidate.volume = static_cast<uint8_t>(value.toInt());
+      else if (key == "audsrc") candidate.audioRecordSource = static_cast<uint8_t>(value.toInt());
+      else if (key == "recqual") candidate.audioRecordQuality = static_cast<uint8_t>(value.toInt());
+      else if (key == "batcal") candidate.batteryCalibration = value.toFloat();
+      else if (key == "callsign") candidate.callsign = value;
+      else if (key == "lorakey") candidate.loraKeyHex = value;
+      else if (key == "apssid") candidate.apSsid = value;
+      else if (key == "apppass") candidate.apPassword = value;
+      else if (key == "webuser") candidate.webUser = value;
+      else if (key == "websalt") candidate.webPasswordSaltHex = value;
+      else if (key == "webph") candidate.webPasswordHashHex = value;
+      else { server_.send(400, "text/plain", "unknown backup key"); return; }
+    }
+    if (nl < 0) break;
+    pos = nl + 1;
+  }
+  if (!seenFreq || !seenBw || !seenSf || !seenCr || !candidate.validRadio() ||
+      candidate.volume > 100 || candidate.audioRecordQuality > 2 ||
+      candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
+      !candidate.webPasswordConfigured()) {
+    server_.send(400, "text/plain", "backup config invalid");
+    return;
+  }
+
+  // Apply runtime state first. Persist only after every hardware-dependent
+  // change succeeds, so a failed restore cannot leave NVS ahead of RAM.
+  const RuntimeConfig previous = gConfig;
+  const uint8_t previousSource = audio.recordSource();
+  gConfig = candidate;
+  if (!lora.applyConfig()) {
+    gConfig = previous;
+    (void)lora.applyConfig();
+    server_.send(503, "text/plain", "radio restore failed");
+    return;
+  }
+  if (!audio.setRecordQuality(gConfig.audioRecordQuality) ||
+      !audio.setRecordSource(gConfig.audioRecordSource)) {
+    gConfig = previous;
+    (void)lora.applyConfig();
+    (void)audio.setRecordQuality(previous.audioRecordQuality);
+    (void)audio.setRecordSource(previousSource);
+    audio.setVolume(previous.volume);
+    (void)previous.save();
+    server_.send(503, "text/plain", "audio restore failed");
+    return;
+  }
+  audio.setVolume(gConfig.volume);
+
+  if (!gConfig.save()) {
+    gConfig = previous;
+    (void)lora.applyConfig();
+    (void)audio.setRecordQuality(previous.audioRecordQuality);
+    (void)audio.setRecordSource(previousSource);
+    audio.setVolume(previous.volume);
+    (void)previous.save();
+    server_.send(503, "text/plain", "NVS restore failed");
+    return;
+  }
+
+  lora.updateSourceId();
+  server_.send(200, "text/plain", "OK; reboot recommended");
 }
 
 void WebUi::handleChecksumSha256() {

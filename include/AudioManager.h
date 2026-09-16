@@ -41,6 +41,8 @@ public:
   bool usbMonitor() const { return usbMonitor_; }
   bool loopback() const { return loopback_; }
   uint8_t recordSource() const { return recordSource_; }
+  bool setRecordQuality(uint8_t level);
+  uint8_t recordQuality() const { return recordQuality_; }
 
 private:
   File recordFile_;
@@ -56,6 +58,8 @@ private:
   uint8_t preMuteVolume_ = 70;
   volatile uint32_t lastUsbAudioMs_ = 0;
   volatile uint8_t recordSource_ = Config::AUDIO_SOURCE_WM8962_MIC;
+  volatile uint8_t recordQuality_ = 2;
+  uint32_t recordResamplePhase_ = 0;
   volatile bool captureUsbRecord_ = false;
   volatile bool captureWm8962Mic_ = false;
   volatile bool usbMonitor_ = false;

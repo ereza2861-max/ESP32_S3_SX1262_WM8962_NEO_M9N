@@ -6,6 +6,8 @@
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
 #include "Config.h"
+#include "ReplayStore.h"
+#include "RfDetector.h"
 
 struct ChannelScanResult {
   float freqMHz = 0.0f;
@@ -74,6 +76,7 @@ public:
   uint32_t dedupMisses() const { return dedupMisses_; }
   uint32_t dedupEvictions() const { return dedupEvictions_; }
   uint8_t lqi() const;
+  const RfDetector& rfDetector() const { return rfDetector_; }
 private:
   Module module_;
   SX1262 radio_;
@@ -153,6 +156,7 @@ private:
   void refundDutyBudget(uint32_t airtimeUs);
   void refillDutyBudget();
   uint64_t dutyTokensUs_ = 0;
+  portMUX_TYPE dutyMux_ = portMUX_INITIALIZER_UNLOCKED;
   uint32_t lastDutyRefillMs_ = 0;
   uint32_t lastVoiceTxMs_ = 0;
   uint32_t lastForwardTxMs_ = 0;
@@ -285,16 +289,11 @@ private:
   };
   DedupEntry dedupCache_[DEDUP_CACHE_SIZE] = {};
   size_t dedupNext_ = 0;
-  struct ReplayEntry {
-    uint32_t sourceId = 0;
-    uint16_t highestSeq = 0;
-    uint8_t type = 0;
-    uint32_t bitmap = 0;
-    uint32_t highestPayloadHash = 0;
-    uint32_t seenMs = 0;
-    uint32_t lastEpochSec = 0;
-  };
   ReplayEntry replayCache_[Config::LORA_REPLAY_SOURCE_CACHE_SIZE] = {};
+  ReplayStore replayStore_;
+  RfDetector rfDetector_;
+  bool replayStateLoaded_ = false;
+  uint32_t radioRecoveryAttempts_ = 0;
   size_t replayNext_ = 0;
   struct ScannerState {
     bool active = false;
@@ -365,9 +364,13 @@ private:
                      uint32_t& sourceId, uint8_t& ttl, uint8_t* plain,
                      size_t capacity, size_t& len);
   bool loadKey(uint8_t key[16]) const;
+  bool loadReplayState();
+  bool persistReplayEntry(const ReplayEntry& entry);
+  void hardResetRadio() const;
   bool reserveTxSequenceBlock();
   bool nextTxSequence(uint16_t& seq);
   bool acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec = 0);
+  void updateAntennaHealthAfterTx();
   int8_t effectiveTxPowerDbm() const;
   static uint16_t crc16(const uint8_t* data, size_t len);
   void logPacket(bool tx, uint8_t type, uint16_t seq, uint32_t sourceId,

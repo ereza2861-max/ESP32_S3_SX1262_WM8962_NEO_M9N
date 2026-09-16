@@ -570,6 +570,7 @@ static void taskGnss(void*) {
   watchdogSubscribe();
   for (;;) {
     esp_task_wdt_reset();
+    { StateLock lock(gState); if (lock.ok()) ++gState.wdtResetCounts[0]; }
     gnss.task();
     ++hbGnss;
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -580,6 +581,7 @@ static void taskLoRa(void*) {
   watchdogSubscribe();
   for (;;) {
     esp_task_wdt_reset();
+    { StateLock lock(gState); if (lock.ok()) ++gState.wdtResetCounts[1]; }
     lora.task();
     ++hbLoRa;
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -590,6 +592,7 @@ static void taskAudio(void*) {
   watchdogSubscribe();
   for (;;) {
     esp_task_wdt_reset();
+    { StateLock lock(gState); if (lock.ok()) ++gState.wdtResetCounts[2]; }
     audio.task();
     ++hbAudio;
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -600,6 +603,7 @@ static void taskWeb(void*) {
   watchdogSubscribe();
   for (;;) {
     esp_task_wdt_reset();
+    { StateLock lock(gState); if (lock.ok()) ++gState.wdtResetCounts[3]; }
     web.task();
     ++hbWeb;
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -782,6 +786,7 @@ static void serviceSerialConsole() {
           (unsigned)gState.messageHistoryCount, (unsigned)gState.loraPacketLogCount,
           (unsigned)gState.healthLogCount);
     } else if (line == "help" || line.isEmpty()) {
+      Serial.printf("wdt=%lu,%lu,%lu,%lu\n", (unsigned long)gState.wdtResetCounts[0], (unsigned long)gState.wdtResetCounts[1], (unsigned long)gState.wdtResetCounts[2], (unsigned long)gState.wdtResetCounts[3]);
       Serial.println("commands: status config reboot wipe log help");
     } else {
       Serial.println("unknown command; type help");

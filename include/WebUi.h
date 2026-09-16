@@ -100,6 +100,7 @@ private:
   void handleRecordSplit();
   void handleVox();
   void handleVad();
+  void handleRecordQuality();
   void handleUsbTransport();
   void handleVolume();
   void handleDelete();
@@ -108,6 +109,7 @@ private:
   void handleTrackSimplified();
   void handleTrackDownload();
   void handleRadioStats();
+  void handleRfDetector();
   void handleRangeTest();
   void handleHopSetChannels();
   void handleReboot();
@@ -118,6 +120,8 @@ private:
   void auditAuth(bool success);
   void handleConfig();
   void handleConfigExport();
+  void handleConfigBackup();
+  void handleConfigRestore();
   void handleFactoryReset();
   void handleAudioSource();
   void handleChecksumSha256();

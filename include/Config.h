@@ -135,6 +135,42 @@ constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
 constexpr uint32_t WEB_POST_CSRF_TOKEN_BYTES = 16;
 constexpr uint32_t LORA_REKEY_PERIOD_SEC = 86400UL;
 constexpr uint32_t LORA_REPLAY_TIME_WINDOW_SEC = 300UL;
+
+// Replay persistence backend. FRAM is the production backend; the NVS
+// journal is retained as an automatic fallback when FRAM is absent.
+#ifndef FIELDRADIO_REPLAY_BACKEND
+#define FIELDRADIO_REPLAY_BACKEND 0
+#endif
+enum class ReplayStoreBackend : uint8_t {
+  BACKEND_FRAM = 0,
+  BACKEND_NVS_JOURNAL = 1,
+};
+constexpr ReplayStoreBackend REPLAY_STORE_BACKEND =
+    static_cast<ReplayStoreBackend>(FIELDRADIO_REPLAY_BACKEND);
+static_assert(FIELDRADIO_REPLAY_BACKEND == 0 || FIELDRADIO_REPLAY_BACKEND == 1,
+              "FIELDRADIO_REPLAY_BACKEND must be 0 (FRAM) or 1 (NVS journal)");
+constexpr uint8_t REPLAY_STORE_VERSION = 1;
+constexpr uint16_t REPLAY_FRAM_I2C_ADDR = 0x50;
+constexpr uint32_t REPLAY_FRAM_SIZE_BYTES = 32768UL;
+constexpr uint16_t REPLAY_FRAM_HEADER_BYTES = 16;
+constexpr uint16_t REPLAY_FRAM_SLOT_BYTES = 32;
+constexpr uint16_t REPLAY_FRAM_WRITE_CHUNK_BYTES = 16;
+constexpr uint32_t REPLAY_FRAM_WRITE_DELAY_MS = 1;
+constexpr size_t REPLAY_NVS_JOURNAL_RECORDS = 64;
+constexpr uint8_t REPLAY_NVS_COMPACT_PERCENT = 75;
+
+// MAX2016 RSSI-mode transfer characteristics at 0.9 GHz. These are typical
+// datasheet values for R1=R2=0 ohm; verify against the assembled RF path in
+// the lab and replace with measured slope/intercept if needed.
+constexpr float MAX2016_SLOPE_MV_PER_DB = 18.1f;
+constexpr float MAX2016_INTERCEPT_DBM = -97.0f;
+constexpr float MAX2016_MIN_DBM = -70.0f;
+constexpr float MAX2016_MAX_DBM = 10.0f;
+constexpr adc_attenuation_t MAX2016_ADC_ATTENUATION = ADC_11db;
+constexpr float MAX2016_EMA_ALPHA = 0.25f;
+constexpr float MAX2016_VSWR_MAX = 99.0f;
+constexpr float MAX2016_ANTENNA_OK_VSWR = 3.0f;
+constexpr uint32_t MAX2016_READ_DELAY_US = 0;
 constexpr uint32_t CPU_ACTIVE_MHZ = 240;
 constexpr uint32_t CPU_IDLE_MHZ = 80;
 constexpr uint32_t WEB_SESSION_TIMEOUT_MS = 15UL * 60UL * 1000UL;

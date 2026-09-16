@@ -20,7 +20,7 @@
  * GPIO19/20 are reserved for the ESP32-S3 native USB D-/D+.
  */
 namespace Board {
-constexpr int I2C_SDA = 8;
+constexpr int I2C_SDA = 38;
 constexpr int I2C_SCL = 9;
 
 // WM8962 I2S
@@ -41,7 +41,7 @@ constexpr int LORA_RST  = 17; // SX1262 RESET; moved off GPIO14
 constexpr int LORA_DIO1 = 14; // SX1262 DIO1 IRQ; RTC-capable, non-strapping
 constexpr int LORA_BUSY = 15; // SX1262 BUSY (mandatory for SX126x)
 
-constexpr int SD_CS = 38; // microSD CS; secondary SPI chip-select
+constexpr int SD_CS = 16; // microSD CS; secondary SPI chip-select
 
 // NEO-M9N UART
 constexpr int GNSS_RX = 44; // ESP32-S3 RX <- NEO-M9N TX
@@ -57,6 +57,15 @@ constexpr uint32_t GNSS_BAUD = 38400;
 constexpr int BTN_PTT = 21;       // active-high, RTC wake, external pulldown
 constexpr int BTN_SOS = 18;       // active-high, RTC wake, external pulldown
 constexpr int BATTERY_ADC = 1;    // battery divider ADC input
+
+// MAX2016 detector outputs. Keep both analogue measurements on ADC1 so
+// they remain usable while Wi-Fi is active. GPIO8 is repurposed from I2C SDA.
+constexpr int MAX2016_OUT_FWD = 2;
+constexpr int MAX2016_OUT_REF = 8;
+
+// External 32-KB I2C FRAM (MB85RC256V), sharing the codec I2C bus.
+constexpr int FRAM_SDA = I2C_SDA;
+constexpr int FRAM_SCL = I2C_SCL;
 constexpr int BUZZER = 47;        // active-high buzzer; passive buzzer needs PWM hardware
 constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
 constexpr int HAPTIC = 40;        // active-high haptic driver enable
@@ -81,7 +90,7 @@ constexpr bool pinsUnique() {
       SPI_SCK, SPI_MISO, SPI_MOSI, LORA_CS, LORA_RST, LORA_DIO1,
       LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, BTN_PTT, BTN_SOS, BATTERY_ADC,
       BUZZER, LED_RGB, HAPTIC, LED_CHARGING, LED_TX, LED_RX,
-      USB_D_MINUS, USB_D_PLUS
+      USB_D_MINUS, USB_D_PLUS, MAX2016_OUT_FWD, MAX2016_OUT_REF
   };
   for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
     if (pins[i] < 0) continue;

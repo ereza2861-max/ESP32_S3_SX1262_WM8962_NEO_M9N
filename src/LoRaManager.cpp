@@ -13,6 +13,7 @@
 #include <time.h>
 #include <esp_attr.h>
 #include <SD.h>
+#include <math.h>
 
 extern AudioManager audio;
 extern StorageManager storage;
@@ -28,7 +29,7 @@ constexpr uint8_t ROUTE_EXT_FLAG_BROADCAST = 0x01;
 constexpr uint8_t ROUTE_EXT_MAX_HOPS = Config::LORA_INITIAL_TTL;
 constexpr uint32_t ROUTE_CACHE_TTL_MS = 120000UL;
 constexpr uint16_t FRAG_STORE_MAGIC = 0x4651;
-constexpr uint8_t FRAG_STORE_VERSION = 1;
+constexpr uint8_t FRAG_STORE_VERSION = 2;
 constexpr uint16_t ROUTE_ETX_MAX_Q8 = 0x7FFF;
 constexpr uint8_t LORA_PROTOCOL_VERSION_HOP = 3;
 constexpr size_t PACKET_TAG = Config::LORA_TAG_BYTES;
@@ -45,6 +46,7 @@ constexpr uint8_t TX_PRIORITY_TEXT = 60;
 constexpr uint8_t TX_PRIORITY_BEACON = 20;
 constexpr uint8_t TX_PRIORITY_FORWARD = 10;
 constexpr char FORWARD_QUEUE_FILE[] = "/LORA/FWD.Q";
+constexpr char FORWARD_QUEUE_BACKUP_FILE[] = "/LORA/FWD.BAK";
 constexpr uint16_t FORWARD_RECORD_MAGIC = 0x4C51;
 constexpr size_t FORWARD_RECORD_FIXED_V1 = 2 + 1 + 1 + 1 + 1 + 2 + 4 + 2 + 4;
 constexpr size_t FORWARD_RECORD_FIXED = FORWARD_RECORD_FIXED_V1 + 1;
@@ -121,16 +123,21 @@ void LoRaManager::onDio1() {
 }
 
 void LoRaManager::refillDutyBudget() {
+  portENTER_CRITICAL(&dutyMux_);
   const uint32_t now = millis();
   if (lastDutyRefillMs_ == 0) {
     lastDutyRefillMs_ = now;
     dutyTokensUs_ = (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
                      Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL;
+    portEXIT_CRITICAL(&dutyMux_);
     return;
   }
 
   const uint32_t elapsedMs = now - lastDutyRefillMs_;
-  if (!elapsedMs) return;
+  if (!elapsedMs) {
+    portEXIT_CRITICAL(&dutyMux_);
+    return;
+  }
 
   const uint64_t maxBudget = dutyMaxBudgetUs();
   const uint64_t refill =
@@ -138,22 +145,42 @@ void LoRaManager::refillDutyBudget() {
        1000ULL) / 100ULL;
   dutyTokensUs_ = min(maxBudget, dutyTokensUs_ + refill);
   lastDutyRefillMs_ = now;
+  portEXIT_CRITICAL(&dutyMux_);
 }
 
 bool LoRaManager::consumeDutyBudget(uint32_t airtimeUs) {
-  refillDutyBudget();
-  if (airtimeUs == 0 || dutyTokensUs_ < airtimeUs) return false;
-  dutyTokensUs_ -= airtimeUs;
-  return true;
+  if (airtimeUs == 0) return false;
+  portENTER_CRITICAL(&dutyMux_);
+  const uint32_t now = millis();
+  if (lastDutyRefillMs_ == 0) {
+    lastDutyRefillMs_ = now;
+    dutyTokensUs_ = dutyMaxBudgetUs();
+  } else {
+    const uint32_t elapsedMs = now - lastDutyRefillMs_;
+    if (elapsedMs) {
+      const uint64_t maxBudget = dutyMaxBudgetUs();
+      const uint64_t refill =
+          (static_cast<uint64_t>(elapsedMs) * Config::LORA_DUTY_CYCLE_PERCENT *
+           1000ULL) / 100ULL;
+      dutyTokensUs_ = min(maxBudget, dutyTokensUs_ + refill);
+      lastDutyRefillMs_ = now;
+    }
+  }
+  const bool ok = dutyTokensUs_ >= airtimeUs;
+  if (ok) dutyTokensUs_ -= airtimeUs;
+  portEXIT_CRITICAL(&dutyMux_);
+  return ok;
 }
 
 void LoRaManager::refundDutyBudget(uint32_t airtimeUs) {
   if (airtimeUs == 0) return;
+  portENTER_CRITICAL(&dutyMux_);
   const uint64_t maxBudget = dutyMaxBudgetUs();
   const uint64_t before = dutyTokensUs_;
   dutyTokensUs_ = min(maxBudget, dutyTokensUs_ + static_cast<uint64_t>(airtimeUs));
-  if (before + static_cast<uint64_t>(airtimeUs) > maxBudget)
-    Serial.println("WARN: LoRa duty budget refund clamped");
+  const bool clamped = before + static_cast<uint64_t>(airtimeUs) > maxBudget;
+  portEXIT_CRITICAL(&dutyMux_);
+  if (clamped) Serial.println("WARN: LoRa duty budget refund clamped");
 }
 
 uint64_t LoRaManager::dutyMaxBudgetUs() const {
@@ -171,6 +198,15 @@ bool LoRaManager::loadKey(uint8_t key[16]) const {
     if (!hexByte(gConfig.loraKeyHex.c_str() + i * 2, key[i])) return false;
   }
   return true;
+}
+
+void LoRaManager::hardResetRadio() const {
+  if (Board::LORA_RST < 0) return;
+  pinMode(Board::LORA_RST, OUTPUT);
+  digitalWrite(Board::LORA_RST, LOW);
+  delay(10);
+  digitalWrite(Board::LORA_RST, HIGH);
+  delay(20);
 }
 
 bool LoRaManager::reserveTxSequenceBlock() {
@@ -241,8 +277,13 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   const uint32_t now = millis();
   const uint32_t currentEpoch = currentEpochSec();
   if (packetEpochSec != 0 && currentEpoch != 0) {
-    const uint32_t age = currentEpoch >= packetEpochSec ? currentEpoch - packetEpochSec : packetEpochSec - currentEpoch;
-    if (age > Config::LORA_REPLAY_TIME_WINDOW_SEC) return true;
+    // Reject both stale and implausibly future frames. An absolute-difference
+    // check alone would allow a forged future timestamp within the window.
+    if (packetEpochSec > currentEpoch) {
+      if (packetEpochSec - currentEpoch > Config::LORA_REPLAY_TIME_WINDOW_SEC) return true;
+    } else if (currentEpoch - packetEpochSec > Config::LORA_REPLAY_TIME_WINDOW_SEC) {
+      return true;
+    }
   }
   ReplayEntry* slot = nullptr;
   for (auto& entry : replayCache_) {
@@ -261,12 +302,16 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     slot->highestPayloadHash = payloadHash;
     slot->seenMs = now;
     slot->lastEpochSec = packetEpochSec;
+    (void)persistReplayEntry(*slot);
     return false;
   }
 
-  const int16_t delta = static_cast<int16_t>(seq - slot->highestSeq);
-  if (delta > 0) {
-    const uint8_t shift = static_cast<uint8_t>(min<int16_t>(delta, Config::LORA_REPLAY_WINDOW_BITS));
+  // RFC1982-style serial-number arithmetic: valid forward movement is less
+  // than half the 16-bit sequence space, including across 0xFFFF -> 0x0000.
+  const uint16_t delta = static_cast<uint16_t>(seq - slot->highestSeq);
+  if (delta != 0 && delta < 0x8000U) {
+    const uint8_t shift = static_cast<uint8_t>(
+        min<uint16_t>(delta, Config::LORA_REPLAY_WINDOW_BITS));
     slot->bitmap = shift >= 32 ? 1U : (slot->bitmap << shift) | 1U;
     slot->highestSeq = seq;
     slot->highestPayloadHash = payloadHash;
@@ -281,17 +326,92 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   // changed; doing so permits replaying alternate authenticated route variants.
   if (delta == 0) return true;
 
-  const int16_t age = static_cast<int16_t>(slot->highestSeq - seq);
-  if (age < 0 || age >= static_cast<int16_t>(Config::LORA_REPLAY_WINDOW_BITS)) return true;
+  const uint16_t age = static_cast<uint16_t>(slot->highestSeq - seq);
+  if (age >= Config::LORA_REPLAY_WINDOW_BITS &&
+      age < 0x8000U) return true;
+  if (age >= 0x8000U) return true;
   const uint8_t clampedAge = static_cast<uint8_t>(
-      min<int16_t>(age, static_cast<int16_t>(Config::LORA_REPLAY_WINDOW_BITS - 1U)));
+      min<uint16_t>(age, Config::LORA_REPLAY_WINDOW_BITS - 1U));
   const uint32_t bit = 1UL << clampedAge;
   if (slot->bitmap & bit) return true;
   slot->bitmap |= bit;
   slot->highestPayloadHash = payloadHash;
   slot->seenMs = now;
   slot->lastEpochSec = packetEpochSec;
+  (void)persistReplayEntry(*slot);
   return false;
+}
+
+bool LoRaManager::persistReplayEntry(const ReplayEntry& entry) {
+  size_t index = Config::LORA_REPLAY_SOURCE_CACHE_SIZE;
+  for (size_t i = 0; i < Config::LORA_REPLAY_SOURCE_CACHE_SIZE; ++i) {
+    if (&replayCache_[i] == &entry) { index = i; break; }
+  }
+  if (index == Config::LORA_REPLAY_SOURCE_CACHE_SIZE) {
+    for (size_t i = 0; i < Config::LORA_REPLAY_SOURCE_CACHE_SIZE; ++i) {
+      if (replayCache_[i].sourceId == entry.sourceId &&
+          replayCache_[i].type == entry.type) {
+        index = i; break;
+      }
+    }
+  }
+  if (index == Config::LORA_REPLAY_SOURCE_CACHE_SIZE) return false;
+
+  if (replayStore_.persist(entry, index)) return true;
+  // The NVS fallback deliberately compacts before its 64-record journal is
+  // exhausted. This snapshot is infrequent and preserves all replay slots.
+  if (Config::REPLAY_STORE_BACKEND == Config::ReplayStoreBackend::BACKEND_NVS_JOURNAL)
+    return replayStore_.flushAll(replayCache_, Config::LORA_REPLAY_SOURCE_CACHE_SIZE);
+  return false;
+}
+
+bool LoRaManager::loadReplayState() {
+  memset(replayCache_, 0, sizeof(replayCache_));
+  replayNext_ = 0;
+  replayStateLoaded_ = false;
+  if (!replayStore_.healthy() ||
+      !replayStore_.load(replayCache_, Config::LORA_REPLAY_SOURCE_CACHE_SIZE))
+    return false;
+  for (size_t i = 0; i < Config::LORA_REPLAY_SOURCE_CACHE_SIZE; ++i) {
+    if (replayCache_[i].sourceId != 0) {
+      replayNext_ = (i + 1U) % Config::LORA_REPLAY_SOURCE_CACHE_SIZE;
+    }
+  }
+  replayStateLoaded_ = true;
+  return true;
+}
+
+void LoRaManager::updateAntennaHealthAfterTx() {
+  float forwardDbm = 0.0f;
+  float reflectedDbm = 0.0f;
+  float vswr = Config::MAX2016_VSWR_MAX;
+  const int16_t fallbackRssi = static_cast<int16_t>(radio_.getRSSI());
+  if (rfDetector_.healthy() &&
+      rfDetector_.read(forwardDbm, reflectedDbm, vswr)) {
+    const int16_t txPower = static_cast<int16_t>(lroundf(forwardDbm));
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.txRssi = txPower;
+      if (gState.antennaBaselineRssi <= -127)
+        gState.antennaBaselineRssi = txPower;
+      gState.antennaOk = isfinite(vswr) && vswr < Config::MAX2016_ANTENNA_OK_VSWR;
+    }
+    (void)reflectedDbm;
+    return;
+  }
+
+  StateLock lock(gState);
+  if (!lock.ok()) return;
+  gState.lastError = "MAX2016 detector unhealthy; using LoRa RSSI fallback";
+  gState.txRssi = fallbackRssi;
+  if (gState.antennaBaselineRssi <= -127) {
+    gState.antennaBaselineRssi = fallbackRssi;
+    gState.antennaOk = true;
+  } else {
+    gState.antennaOk =
+        abs(static_cast<int>(fallbackRssi) -
+            static_cast<int>(gState.antennaBaselineRssi)) >= 3;
+  }
 }
 
 uint16_t LoRaManager::crc16(const uint8_t* data, size_t len) {
@@ -629,19 +749,7 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
           st = radio_.transmit(packet);
           txOk = st == RADIOLIB_ERR_NONE;
           if (txOk) {
-            const int16_t txRssi = static_cast<int16_t>(radio_.getRSSI());
-            StateLock stateLock(gState);
-            if (stateLock.ok()) {
-              gState.txRssi = txRssi;
-              if (gState.antennaBaselineRssi <= -127) {
-                gState.antennaBaselineRssi = txRssi;
-                gState.antennaOk = true;
-              } else {
-                gState.antennaOk =
-                    abs(static_cast<int>(txRssi) -
-                        static_cast<int>(gState.antennaBaselineRssi)) >= 3;
-              }
-            }
+            updateAntennaHealthAfterTx();
           }
           (void)radio_.startReceive();
         } else st = RADIOLIB_ERR_UNKNOWN;
@@ -862,6 +970,7 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                                             previousHop, hopCount, routeOffset);
   if (hasRoute) {
     if (!routeAllowsForward(destination, nextHop, previousHop) ||
+        nextHop == sourceId ||
         hopCount >= ROUTE_EXT_MAX_HOPS) return false;
   }
 
@@ -992,12 +1101,24 @@ bool LoRaManager::persistForwardQueue() {
   }
   f.flush();
   f.close();
-  if (SD.exists(FORWARD_QUEUE_FILE)) SD.remove(FORWARD_QUEUE_FILE);
-  if (!SD.rename(tmpPath, FORWARD_QUEUE_FILE)) {
+
+  // Never delete the last known-good queue before the replacement is safely
+  // renamed. Keep a backup so a reset between rename steps can be recovered.
+  if (SD.exists(FORWARD_QUEUE_BACKUP_FILE)) SD.remove(FORWARD_QUEUE_BACKUP_FILE);
+  if (SD.exists(FORWARD_QUEUE_FILE) &&
+      !SD.rename(FORWARD_QUEUE_FILE, FORWARD_QUEUE_BACKUP_FILE)) {
     if (SD.exists(tmpPath)) SD.remove(tmpPath);
     restoreQueue();
     return false;
   }
+  if (!SD.rename(tmpPath, FORWARD_QUEUE_FILE)) {
+    if (SD.exists(FORWARD_QUEUE_BACKUP_FILE))
+      (void)SD.rename(FORWARD_QUEUE_BACKUP_FILE, FORWARD_QUEUE_FILE);
+    if (SD.exists(tmpPath)) SD.remove(tmpPath);
+    restoreQueue();
+    return false;
+  }
+  if (SD.exists(FORWARD_QUEUE_BACKUP_FILE)) SD.remove(FORWARD_QUEUE_BACKUP_FILE);
   restoreQueue();
   return true;
 }
@@ -1006,7 +1127,10 @@ bool LoRaManager::loadForwardQueue() {
   if (!storage.ready() || !forwardQueue_ || !SD.exists(FORWARD_QUEUE_FILE)) return true;
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return false;
-  File f = SD.open(FORWARD_QUEUE_FILE, FILE_READ);
+  const char* queuePath = FORWARD_QUEUE_FILE;
+  File f = SD.open(queuePath, FILE_READ);
+  if (!f && SD.exists(FORWARD_QUEUE_BACKUP_FILE))
+    f = SD.open(FORWARD_QUEUE_BACKUP_FILE, FILE_READ);
   if (!f) return false;
   uint8_t header[FORWARD_RECORD_FIXED] = {};
   uint8_t key[16] = {};
@@ -1309,7 +1433,8 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
     if (forwardRetryPersistId_ == forward.persistId && forwardRetryPersistId_ != 0) {
       selectedNextHop = forwardInFlightNextHop_;
     }
-    if (selectedNextHop == 0 || selectedNextHop == previousHop) return false;
+    if (selectedNextHop == 0 || selectedNextHop == previousHop ||
+        selectedNextHop == forward.sourceId) return false;
     txNextHop = selectedNextHop;
     routed[0] = ROUTE_EXT_MAGIC;
     routed[1] = ROUTE_EXT_VERSION;
@@ -1400,6 +1525,7 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   }
 
   bool txOk = budgetConsumed && st == RADIOLIB_ERR_NONE;
+  if (txOk) updateAntennaHealthAfterTx();
   if (hasRoute) recordNeighborTxResult(txNextHop, txOk);
   {
     StateLock lock(gState);
@@ -1416,9 +1542,14 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   }
   if (txOk) logPacket(true, forward.type, forward.seq, forward.sourceId, 0, 0.0f, forward.ttl);
   if (txOk && useV3 && !retuneToChannel0Locked()) {
-    txOk = false;
+    // The frame is already on-air. Do not report failure and requeue it,
+    // otherwise a successful TX would be retransmitted after a retune error.
+    ready_ = false;
     StateLock lock(gState);
-    if (lock.ok()) gState.lastError = "SX1262 channel-0 retune failed after forward";
+    if (lock.ok()) {
+      gState.loraReady = false;
+      gState.lastError = "SX1262 channel-0 retune failed after forward";
+    }
   }
   xSemaphoreGive(mutex_);
   return txOk;
@@ -1817,9 +1948,20 @@ bool LoRaManager::begin() {
   }
   if (!mutex_ || !seqMutex_ || !textStateMutex_ || !captureMutex_ ||
       !forwardQueue_ || !reserveTxSequenceBlock()) return false;
+  const bool replayStoreOk = replayStore_.begin();
+  if (!replayStoreOk) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "Replay persistence unavailable";
+  }
+  const bool rfDetectorOk = rfDetector_.begin();
+  if (!rfDetectorOk) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "MAX2016 detector init failed; using LoRa RSSI fallback";
+  }
   (void)loadForwardQueue();
   (void)loadMessageHistory();
   (void)loadFragmentRx();
+  (void)loadReplayState();
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
@@ -1830,6 +1972,7 @@ bool LoRaManager::begin() {
       Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
 
   if (st != RADIOLIB_ERR_NONE) {
+    hardResetRadio();
     ready_ = false;
     StateLock lock(gState);
     if (lock.ok()) {
@@ -2064,6 +2207,8 @@ void LoRaManager::task() {
 
     int16_t beginSt = RADIOLIB_ERR_NONE;
     int16_t rxSt = RADIOLIB_ERR_NONE;
+    ++radioRecoveryAttempts_;
+    hardResetRadio();
     {
       SpiLock spiLock(pdMS_TO_TICKS(1000));
       if (spiLock.ok()) {
@@ -2081,6 +2226,7 @@ void LoRaManager::task() {
     }
 
     if (beginSt == RADIOLIB_ERR_NONE && rxSt == RADIOLIB_ERR_NONE) {
+      radioRecoveryAttempts_ = 0;
       ready_ = true;
       StateLock lock(gState);
       if (lock.ok()) {
@@ -2106,7 +2252,17 @@ void LoRaManager::task() {
         millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
       ForwardPacket forward{};
       if (forwardQueue_ && xQueueReceive(forwardQueue_, &forward, 0) == pdPASS) {
-        if (transmitForward(forward)) lastForwardTxMs_ = millis();
+        if (transmitForward(forward)) {
+          lastForwardTxMs_ = millis();
+        } else if (forward.ttl > 0 && forwardQueue_) {
+          // A failed non-LBT attempt used to silently discard the dequeued
+          // frame. Requeue it so transient radio recovery does not lose data.
+          if (xQueueSend(forwardQueue_, &forward, 0) != pdPASS) {
+            ++forwardDrops_;
+            forwardLastDropMs_ = millis();
+          }
+          (void)persistForwardQueue();
+        }
       }
     }
     return;
@@ -2136,6 +2292,7 @@ void LoRaManager::task() {
   // managers update state after releasing SPI, so this lock ordering avoids
   // a cross-task deadlock.
   if (spiOk && readSt == RADIOLIB_ERR_NONE) {
+
     uint8_t plain[220] = {};
     uint8_t type = 0;
     uint16_t seq = 0;
@@ -2153,10 +2310,24 @@ void LoRaManager::task() {
                                         sizeof(plain), plainLen);
       if (authenticatedV3) {
         currentHopIndex_ = hopIndex;
+        if (!hopSyncGps_) {
+          StateLock hopLock(gState);
+          if (hopLock.ok() && gState.hopChannelCount > 0 &&
+              hopIndex < gState.hopChannelCount) {
+            // V3 carries the authoritative channel index. Seed the frame
+            // counter so the next dwell advances from the channel actually
+            // observed instead of drifting from a stale local counter.
+            hopFrame_ = hopIndex;
+          }
+        }
         hopLastSyncMs_ = millis();
       }
     }
-    const bool rxAuthenticated = authenticated || authenticatedV3;
+    const bool rxAuthenticated = (authenticated || authenticatedV3) &&
+        rxTtl > 0 && rxTtl <= Config::LORA_INITIAL_TTL;
+    // Capture the exact over-the-air frame after authentication has been
+    // attempted, but before any routing/decryption buffer is mutated.
+    (void)capturePacket(msg, rssi, snr, rxAuthenticated);
     const bool isV2 = authenticated &&
                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION;
     const bool isV3 = authenticatedV3;
@@ -2386,7 +2557,15 @@ void LoRaManager::task() {
       millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
     ForwardPacket forward{};
     if (forwardQueue_ && xQueueReceive(forwardQueue_, &forward, 0) == pdPASS) {
-      if (transmitForward(forward)) lastForwardTxMs_ = millis();
+      if (transmitForward(forward)) {
+        lastForwardTxMs_ = millis();
+      } else if (forward.ttl > 0 && forwardQueue_) {
+        if (xQueueSend(forwardQueue_, &forward, 0) != pdPASS) {
+          ++forwardDrops_;
+          forwardLastDropMs_ = millis();
+        }
+        (void)persistForwardQueue();
+      }
     }
   }
 }
@@ -2530,8 +2709,7 @@ bool LoRaManager::processPendingTx() {
           pendingTx_.packet = String();
           done = true;
           txOk = st == RADIOLIB_ERR_NONE;
-          if (!txOk && budgetConsumed)
-            refundDutyBudget(static_cast<uint32_t>(airtimeUs));
+          if (txOk) updateAntennaHealthAfterTx();
         }
       } else {
         pendingTx_.active = false;
@@ -2663,7 +2841,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       static_cast<uint8_t>(packet[1]) == LORA_PROTOCOL_VERSION_HOP;
   const uint8_t packetHopIndex = hoppedPacket
       ? static_cast<uint8_t>(packet[14]) : 0;
-  if (hoppedPacket && !retuneToHopChannel(packetHopIndex)) {
+  if (hoppedPacket && !retuneToHopChannelLocked(packetHopIndex)) {
     xSemaphoreGive(mutex_);
     return false;
   }
@@ -2688,19 +2866,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     const uint32_t txStartMs = millis();
     st = radio_.transmit(packet);
     if (st == RADIOLIB_ERR_NONE) {
-      const int16_t txRssi = static_cast<int16_t>(radio_.getRSSI());
-      StateLock stateLock(gState);
-      if (stateLock.ok()) {
-        gState.txRssi = txRssi;
-        if (gState.antennaBaselineRssi <= -127) {
-          gState.antennaBaselineRssi = txRssi;
-          gState.antennaOk = true;
-        } else {
-          gState.antennaOk =
-              abs(static_cast<int>(txRssi) -
-                  static_cast<int>(gState.antennaBaselineRssi)) >= 3;
-        }
-      }
+      updateAntennaHealthAfterTx();
     }
     const uint32_t txElapsedMs = millis() - txStartMs;
     if (txElapsedMs > Config::LORA_TX_TIMEOUT_MS) {
@@ -2709,9 +2875,6 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     }
     rxSt = radio_.startReceive();
 
-    if (st != RADIOLIB_ERR_NONE && dutyTokensUs_ <= UINT32_MAX) {
-      refundDutyBudget(static_cast<uint32_t>(airtimeUs));
-    }
   }
 
   bool ok = (st == RADIOLIB_ERR_NONE);
@@ -2763,7 +2926,6 @@ void LoRaManager::cancelFactoryReset() {
 }
 
 bool LoRaManager::prepareForDeepSleep() {
-  if (fragmentRxDirty_ && !persistFragmentRx()) return false;
   rtcRadioState.magic = RTC_RADIO_MAGIC;
   rtcRadioState.hopFrame = hopFrame_;
   rtcRadioState.sosSeq = sosSeq_.load(std::memory_order_acquire);
@@ -2788,6 +2950,12 @@ bool LoRaManager::prepareForDeepSleep() {
       xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
     return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+
+  if (fragmentRxDirty_ && !persistFragmentRx()) {
+    xSemaphoreGive(mutex_);
     xSemaphoreGive(textStateMutex_);
     return false;
   }
@@ -3607,7 +3775,9 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
     for (auto& candidate : fragmentRx_) {
       if (candidate.active &&
           now - candidate.startedMs > Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS) {
-        if (!expired) expired = &candidate;
+        if (!expired ||
+            static_cast<int32_t>(candidate.startedMs - expired->startedMs) < 0)
+          expired = &candidate;
       } else if (!candidate.active && !reusable) {
         reusable = &candidate;
       }
@@ -3686,7 +3856,7 @@ bool LoRaManager::persistFragmentRx() {
     uint16_t totalLen;
     uint16_t receivedMask;
     uint16_t receivedBytes;
-    uint32_t startedMs;
+    uint32_t ageMs;
     uint16_t lengths[Config::LORA_FRAGMENT_MAX_COUNT];
   };
 
@@ -3703,7 +3873,8 @@ bool LoRaManager::persistFragmentRx() {
     hdr.totalLen = st.totalLen;
     hdr.receivedMask = st.receivedMask;
     hdr.receivedBytes = st.receivedBytes;
-    hdr.startedMs = st.startedMs;
+    hdr.ageMs = min<uint32_t>(Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS + 1U,
+                             millis() - st.startedMs);
     memcpy(hdr.lengths, st.lengths, sizeof(hdr.lengths));
     if (f.write(reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)) != sizeof(hdr) ||
         f.write(st.data, st.totalLen) != st.totalLen) {
@@ -3714,11 +3885,18 @@ bool LoRaManager::persistFragmentRx() {
   }
   f.flush();
   f.close();
-  if (SD.exists(path)) SD.remove(path);
-  if (!SD.rename(tmp, path)) {
+  const char* backup = "/LORA/FRAG.BAK";
+  if (SD.exists(backup)) SD.remove(backup);
+  if (SD.exists(path) && !SD.rename(path, backup)) {
     if (SD.exists(tmp)) SD.remove(tmp);
     return false;
   }
+  if (!SD.rename(tmp, path)) {
+    if (SD.exists(backup)) (void)SD.rename(backup, path);
+    if (SD.exists(tmp)) SD.remove(tmp);
+    return false;
+  }
+  if (SD.exists(backup)) SD.remove(backup);
   fragmentRxDirty_ = false;
   return true;
 }
@@ -3728,6 +3906,8 @@ bool LoRaManager::loadFragmentRx() {
   SpiLock spiLock(pdMS_TO_TICKS(500));
   if (!spiLock.ok()) return false;
   File f = SD.open("/LORA/FRAG.Q", FILE_READ);
+  if (!f && SD.exists("/LORA/FRAG.BAK"))
+    f = SD.open("/LORA/FRAG.BAK", FILE_READ);
   if (!f || f.isDirectory()) {
     if (f) f.close();
     return true;
@@ -3742,13 +3922,14 @@ bool LoRaManager::loadFragmentRx() {
     uint16_t totalLen;
     uint16_t receivedMask;
     uint16_t receivedBytes;
-    uint32_t startedMs;
+    uint32_t ageMs;
     uint16_t lengths[Config::LORA_FRAGMENT_MAX_COUNT];
   };
   while (f.available()) {
     Header hdr{};
     if (f.read(reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)) != sizeof(hdr) ||
-        hdr.magic != FRAG_STORE_MAGIC || hdr.version != FRAG_STORE_VERSION ||
+        hdr.magic != FRAG_STORE_MAGIC ||
+        (hdr.version != FRAG_STORE_VERSION && hdr.version != 1) ||
         hdr.slot >= FRAGMENT_RX_SLOTS || hdr.count == 0 ||
         hdr.count > Config::LORA_FRAGMENT_MAX_COUNT ||
         hdr.totalLen == 0 || hdr.totalLen > Config::LORA_FRAGMENT_MAX_BYTES ||
@@ -3764,8 +3945,47 @@ bool LoRaManager::loadFragmentRx() {
     state.totalLen = hdr.totalLen;
     state.receivedMask = hdr.receivedMask;
     state.receivedBytes = hdr.receivedBytes;
-    state.startedMs = hdr.startedMs;
+    state.startedMs = millis() -
+        min<uint32_t>(hdr.version == FRAG_STORE_VERSION ? hdr.ageMs :
+                      Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS + 1U,
+                      Config::LORA_FRAGMENT_REASSEMBLY_TIMEOUT_MS + 1U);
     memcpy(state.lengths, hdr.lengths, sizeof(state.lengths));
+
+    const uint16_t validMask = static_cast<uint16_t>((1UL << hdr.count) - 1UL);
+    if ((state.receivedMask & static_cast<uint16_t>(~validMask)) != 0) {
+      f.close();
+      return false;
+    }
+    const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 -
+                            PACKET_TAG - Config::LORA_FRAGMENT_HEADER_BYTES -
+                            ROUTE_EXT_BYTES;
+    uint32_t lengthSum = 0;
+    for (uint8_t i = 0; i < hdr.count; ++i) {
+      const uint16_t bit = static_cast<uint16_t>(1U << i);
+      if (state.receivedMask & bit) {
+        const size_t offset = static_cast<size_t>(i) * chunkMax;
+        if (state.lengths[i] == 0 || state.lengths[i] > chunkMax ||
+            offset >= state.totalLen ||
+            state.lengths[i] > state.totalLen - offset) {
+          f.close();
+          return false;
+        }
+        lengthSum += state.lengths[i];
+      } else if (state.lengths[i] != 0) {
+        f.close();
+        return false;
+      }
+    }
+    for (uint8_t i = hdr.count; i < Config::LORA_FRAGMENT_MAX_COUNT; ++i) {
+      if (state.lengths[i] != 0) {
+        f.close();
+        return false;
+      }
+    }
+    if (lengthSum != state.receivedBytes) {
+      f.close();
+      return false;
+    }
     if (f.read(state.data, state.totalLen) != state.totalLen) {
       f.close();
       return false;

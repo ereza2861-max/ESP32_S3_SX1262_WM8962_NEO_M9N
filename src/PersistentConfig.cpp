@@ -21,7 +21,8 @@ RuntimeConfig gConfig{
     Config::WEB_USER,
     Config::WEB_PASSWORD,
     "",
-    ""};
+    "",
+    2};
 
 namespace {
 constexpr char NVS_NS[] = "fieldradio";
@@ -153,6 +154,7 @@ void RuntimeConfig::load() {
   const String webPasswordValue = prefs.getString("webpass", "");
   const String webPasswordSaltValue = prefs.getString("websalt", "");
   const String webPasswordHashValue = prefs.getString("webph", "");
+  const uint8_t savedRecordQuality = prefs.getUChar("recqual", audioRecordQuality);
   prefs.end();
 
   RuntimeConfig candidate = *this;
@@ -173,6 +175,7 @@ void RuntimeConfig::load() {
   candidate.webPassword = webPasswordValue;
   candidate.webPasswordSaltHex = webPasswordSaltValue;
   candidate.webPasswordHashHex = webPasswordHashValue;
+  candidate.audioRecordQuality = savedRecordQuality;
 
   if (candidate.validRadio()) {
     loraFreqMHz = candidate.loraFreqMHz;
@@ -183,6 +186,7 @@ void RuntimeConfig::load() {
     loraPowerDbm = candidate.loraPowerDbm;
   }
   if (candidate.volume <= 100) volume = candidate.volume;
+  if (candidate.audioRecordQuality <= 2) audioRecordQuality = candidate.audioRecordQuality;
   if (candidate.audioRecordSource <= Config::AUDIO_SOURCE_USB) {
     audioRecordSource = candidate.audioRecordSource;
   }
