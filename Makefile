@@ -14,8 +14,8 @@ PIO_ARGS ?=
 PROJECT_PATH := $(abspath $(PROJECT_DIR))
 PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 
-.PHONY: all build build-log ci-build clean upload monitor preflight check-secrets \
-        download-artifacts download-build-log download-ci auth-help info help
+.PHONY: all build build-log ci-build clean upload monitor provision check-provisioning \
+        preflight check-secrets download-artifacts download-build-log download-ci auth-help info help
 
 GH ?= gh
 CI_WORKFLOW ?= compile.yml
@@ -33,14 +33,17 @@ gh_check = set -eu; \
 
 all: build
 
-build:
+build: check-provisioning
 	@set -eu; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
 	$(PIO_RUN)
 
-ci-build: build
+ci-build:
+	@set -eu; \
+	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
+	$(PIO_RUN)
 
-build-log:
+build-log: check-provisioning
 	@set -o pipefail; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
 	$(PIO_RUN) 2>&1 | tee "$(PROJECT_PATH)/build.log"
@@ -75,15 +78,21 @@ clean:
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
 	$(PIO_RUN) -t clean
 
-upload:
+upload: check-provisioning
 	@set -eu; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
-	$(PIO_RUN) -t upload
+	$(PIO_RUN) -t upload $(if $(UPLOAD_PORT),--upload-port "$(UPLOAD_PORT)",)
 
 monitor:
 	@set -eu; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
 	$(PIO) -d "$(PROJECT_PATH)" device monitor
+
+provision:
+	@sh "$(PROJECT_PATH)/tools/provision-device.sh"
+
+check-provisioning:
+	@sh "$(PROJECT_PATH)/tools/check-provisioning.sh"
 
 preflight:
 	@sh "$(PROJECT_PATH)/tools/preflight-git-push.sh"
@@ -112,6 +121,8 @@ help:
 	@echo "  make download-artifacts CI_RUN_ID=<id> Download firmware from a specific Actions run"
 	@echo "  make ci-build              Same build entry point used by CI"
 	@echo "  make clean                 Clean PlatformIO build output"
+	@echo "  make provision             Create local credentials and a device TLS certificate"
+	@echo "  make check-provisioning     Validate local credentials and TLS material"
 	@echo "  make upload                Build and upload to the selected board"
 	@echo "  make monitor               Open serial monitor"
 	@echo "  make preflight             Scan Git state for credential/secret leakage"

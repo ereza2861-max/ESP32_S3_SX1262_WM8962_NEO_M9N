@@ -54,6 +54,20 @@ private:
     uint32_t crc;
   } __attribute__((packed));
 
+  struct NvsSnapshot {
+    uint32_t magic;
+    uint8_t version;
+    uint8_t reserved[3];
+    uint32_t generation;
+    uint16_t count;
+    uint16_t reserved2;
+    ReplayEntry entries[Config::LORA_REPLAY_SOURCE_CACHE_SIZE];
+    uint32_t crc;
+  } __attribute__((packed));
+
+  static constexpr uint32_t NVS_SNAPSHOT_MAGIC = 0x52534E50UL; // "RSNP"
+  static constexpr uint8_t NVS_SNAPSHOT_VERSION = 1;
+
   static_assert(sizeof(ReplayEntry) == 24, "ReplayEntry layout changed");
   static_assert(sizeof(FramSlot) == Config::REPLAY_FRAM_SLOT_BYTES,
                 "FRAM replay slot size mismatch");
@@ -71,6 +85,7 @@ private:
   bool persistFram(const ReplayEntry& entry, size_t slot);
   bool persistNvsJournal(const ReplayEntry& entry, size_t slot);
   bool compactNvsJournal(const ReplayEntry* entries, size_t count);
+  bool loadNvsSnapshot(ReplayEntry* out, size_t count, uint32_t& generation);
   bool readFram(uint16_t address, void* data, size_t len) const;
   bool writeFram(uint16_t address, const void* data, size_t len) const;
   bool validEntry(const ReplayEntry& entry) const;

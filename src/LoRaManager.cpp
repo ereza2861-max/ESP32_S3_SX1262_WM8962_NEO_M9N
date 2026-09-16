@@ -24,7 +24,8 @@ constexpr size_t PACKET_HEADER_V1 = 1 + 1 + 1 + 2 + 4;
 constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
 constexpr size_t PACKET_HEADER_V3 = PACKET_HEADER_V2 + 1 + sizeof(uint32_t);
 constexpr uint8_t ROUTE_EXT_MAGIC = 0xE7;
-constexpr uint8_t ROUTE_EXT_VERSION = 1;
+constexpr uint8_t ROUTE_EXT_VERSION_V1 = 1;
+constexpr uint8_t ROUTE_EXT_VERSION = 2;
 constexpr uint8_t ROUTE_EXT_FLAG_BROADCAST = 0x01;
 constexpr uint8_t ROUTE_EXT_MAX_HOPS = Config::LORA_INITIAL_TTL;
 constexpr uint32_t ROUTE_CACHE_TTL_MS = 120000UL;
@@ -485,14 +486,14 @@ bool LoRaManager::encryptRoutedPacket(const uint8_t* plain, size_t len, uint8_t 
 }
 
 bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
-                                   uint16_t seq, uint8_t hopIndex, uint32_t epochMs,
+                                   uint16_t seq, uint8_t hopIndex, uint32_t epochSec,
                                    String& packet) {
   uint8_t key[16];
   if (!plain || !loadKey(key) ||
       len + PACKET_HEADER_V3 + PACKET_TAG > Config::LORA_MAX_PACKET)
     return false;
   uint8_t rotatingKey[16] = {};
-  if (epochMs != 0 && deriveRotatingKey(key, epochMs, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
+  if (epochSec != 0 && deriveRotatingKey(key, epochSec, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
 
   const uint32_t nonce = esp_random();
   packet.reserve(PACKET_HEADER_V3 + len + PACKET_TAG);
@@ -508,13 +509,13 @@ bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type
   packet += static_cast<char>(Config::LORA_INITIAL_TTL);
   packet += static_cast<char>(hopIndex);
   for (uint8_t i = 0; i < 4; ++i)
-    packet += static_cast<char>((epochMs >> (8 * i)) & 0xFF);
+    packet += static_cast<char>((epochSec >> (8 * i)) & 0xFF);
 
   uint8_t iv[16] = {};
   memcpy(iv, &nonce, sizeof(nonce));
   memcpy(iv + 4, &seq, sizeof(seq));
   iv[6] = hopIndex;
-  memcpy(iv + 8, &epochMs, sizeof(epochMs));
+  memcpy(iv + 8, &epochSec, sizeof(epochSec));
   uint8_t streamBlock[16] = {};
   uint8_t cipher[Config::LORA_MAX_PACKET] = {};
   size_t ncOff = 0;
@@ -541,9 +542,9 @@ bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type
 bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
                                   uint16_t& seq, uint32_t& sourceId,
                                   uint8_t& ttl, uint8_t& hopIndex,
-                                  uint32_t& epochMs, uint8_t* plain,
+                                  uint32_t& epochSec, uint8_t* plain,
                                   size_t capacity, size_t& len) {
-  len = 0; sourceId = 0; ttl = 0; hopIndex = 0; epochMs = 0;
+  len = 0; sourceId = 0; ttl = 0; hopIndex = 0; epochSec = 0;
   if (packet.length() < PACKET_HEADER_V3 + PACKET_TAG ||
       static_cast<uint8_t>(packet[0]) != PACKET_MAGIC ||
       static_cast<uint8_t>(packet[1]) != LORA_PROTOCOL_VERSION_HOP)
@@ -557,7 +558,7 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
   memcpy(&sourceId, packet.c_str() + 9, sizeof(sourceId));
   ttl = static_cast<uint8_t>(packet[13]);
   hopIndex = static_cast<uint8_t>(packet[14]);
-  memcpy(&epochMs, packet.c_str() + 15, sizeof(epochMs));
+  memcpy(&epochSec, packet.c_str() + 15, sizeof(epochSec));
 
   const size_t cipherLen = packet.length() - PACKET_HEADER_V3 - PACKET_TAG;
   if (!plain || cipherLen > capacity) return false;
@@ -565,7 +566,7 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
   uint8_t key[16];
   if (!loadKey(key)) return false;
   uint8_t rotatingKey[16] = {};
-  if (epochMs != 0 && deriveRotatingKey(key, epochMs, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
+  if (epochSec != 0 && deriveRotatingKey(key, epochSec, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
   unsigned char expected[32] = {};
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, key, sizeof(key),
@@ -583,7 +584,7 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
   memcpy(iv, &nonce, sizeof(nonce));
   memcpy(iv + 4, &seq, sizeof(seq));
   iv[6] = hopIndex;
-  memcpy(iv + 8, &epochMs, sizeof(epochMs));
+  memcpy(iv + 8, &epochSec, sizeof(epochSec));
   uint8_t streamBlock[16] = {};
   size_t ncOff = 0;
   mbedtls_aes_context aes;
@@ -1124,109 +1125,153 @@ bool LoRaManager::persistForwardQueue() {
 }
 
 bool LoRaManager::loadForwardQueue() {
-  if (!storage.ready() || !forwardQueue_ || !SD.exists(FORWARD_QUEUE_FILE)) return true;
+  if (!storage.ready() || !forwardQueue_) return true;
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return false;
-  const char* queuePath = FORWARD_QUEUE_FILE;
-  File f = SD.open(queuePath, FILE_READ);
-  if (!f && SD.exists(FORWARD_QUEUE_BACKUP_FILE))
-    f = SD.open(FORWARD_QUEUE_BACKUP_FILE, FILE_READ);
-  if (!f) return false;
-  uint8_t header[FORWARD_RECORD_FIXED] = {};
+
+  const char* candidates[] = {FORWARD_QUEUE_FILE, FORWARD_QUEUE_BACKUP_FILE};
   uint8_t key[16] = {};
-  if (!loadKey(key)) { f.close(); return false; }
-  size_t loaded = 0;
-  while (loaded < Config::LORA_STORE_FORWARD_MAX_RECORDS &&
-         f.available() >= static_cast<int>(FORWARD_RECORD_FIXED_V1)) {
-    memset(header, 0, sizeof(header));
-    if (f.read(header, FORWARD_RECORD_FIXED_V1) != FORWARD_RECORD_FIXED_V1) break;
+  if (!loadKey(key)) return false;
 
-    size_t o = 0;
-    const uint16_t magic = static_cast<uint16_t>(header[o]) |
-                           (static_cast<uint16_t>(header[o + 1]) << 8); o += 2;
-    const uint8_t version = header[o++];
-    const uint8_t type = header[o++];
-    const uint8_t ttl = header[o++];
-    const uint8_t priority = header[o++];
-    uint16_t seq = 0; memcpy(&seq, header + o, 2); o += 2;
-    uint32_t sourceId = 0; memcpy(&sourceId, header + o, 4); o += 4;
-    uint16_t len = 0; memcpy(&len, header + o, 2); o += 2;
-    uint32_t nonce = 0; memcpy(&nonce, header + o, 4); o += 4;
+  auto drainQueue = [&]() {
+    if (!forwardQueue_) return;
+    ForwardPacket discarded{};
+    while (xQueueReceive(forwardQueue_, &discarded, 0) == pdPASS) {}
+  };
 
-    uint8_t wireVersion = Config::LORA_PROTOCOL_VERSION;
-    size_t headerLen = FORWARD_RECORD_FIXED_V1;
-    if (version == FORWARD_RECORD_VERSION) {
-      if (f.read(&wireVersion, 1) != 1) break;
-      header[FORWARD_RECORD_FIXED_V1] = wireVersion;
-      headerLen = FORWARD_RECORD_FIXED;
-    } else if (version != 1) {
-      break;
+  auto tryLoad = [&](const char* path) -> bool {
+    if (!SD.exists(path)) return false;
+    File f = SD.open(path, FILE_READ);
+    if (!f) return false;
+
+    ForwardPacket decoded[Config::LORA_STORE_FORWARD_MAX_RECORDS] = {};
+    size_t decodedCount = 0;
+    uint8_t header[FORWARD_RECORD_FIXED] = {};
+    bool validFile = true;
+
+    while (f.available()) {
+      if (decodedCount >= Config::LORA_STORE_FORWARD_MAX_RECORDS ||
+          f.available() < static_cast<int>(FORWARD_RECORD_FIXED_V1)) {
+        validFile = false;
+        break;
+      }
+      memset(header, 0, sizeof(header));
+      if (f.read(header, FORWARD_RECORD_FIXED_V1) != FORWARD_RECORD_FIXED_V1) {
+        validFile = false;
+        break;
+      }
+
+      size_t o = 0;
+      const uint16_t magic = static_cast<uint16_t>(header[o]) |
+                             (static_cast<uint16_t>(header[o + 1]) << 8); o += 2;
+      const uint8_t version = header[o++];
+      const uint8_t type = header[o++];
+      const uint8_t ttl = header[o++];
+      const uint8_t priority = header[o++];
+      uint16_t seq = 0; memcpy(&seq, header + o, 2); o += 2;
+      uint32_t sourceId = 0; memcpy(&sourceId, header + o, 4); o += 4;
+      uint16_t len = 0; memcpy(&len, header + o, 2); o += 2;
+      uint32_t nonce = 0; memcpy(&nonce, header + o, 4); o += 4;
+
+      uint8_t wireVersion = Config::LORA_PROTOCOL_VERSION;
+      size_t headerLen = FORWARD_RECORD_FIXED_V1;
+      if (version == FORWARD_RECORD_VERSION) {
+        if (f.read(&wireVersion, 1) != 1) { validFile = false; break; }
+        header[FORWARD_RECORD_FIXED_V1] = wireVersion;
+        headerLen = FORWARD_RECORD_FIXED;
+      } else if (version != 1) {
+        validFile = false;
+        break;
+      }
+
+      if (magic != FORWARD_RECORD_MAGIC || ttl == 0 || len == 0 ||
+          len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG ||
+          (wireVersion != Config::LORA_PROTOCOL_VERSION &&
+           wireVersion != LORA_PROTOCOL_VERSION_HOP)) {
+        validFile = false;
+        break;
+      }
+
+      uint8_t cipher[Config::LORA_MAX_PACKET] = {};
+      uint8_t tag[PACKET_TAG] = {};
+      if (f.read(cipher, len) != len || f.read(tag, PACKET_TAG) != PACKET_TAG) {
+        validFile = false;
+        break;
+      }
+
+      uint8_t bind[Config::LORA_MAX_PACKET + FORWARD_RECORD_FIXED] = {};
+      memcpy(bind, header, headerLen);
+      memcpy(bind + headerLen, cipher, len);
+      uint8_t expected[32] = {};
+      const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+      if (!md || mbedtls_md_hmac(md, key, sizeof(key), bind, headerLen + len,
+                                 expected, sizeof(expected)) != 0) {
+        validFile = false;
+        break;
+      }
+      uint8_t diff = 0;
+      for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ tag[i];
+      if (diff != 0) {
+        validFile = false;
+        break;
+      }
+
+      uint8_t iv[16] = {};
+      memcpy(iv, &nonce, 4);
+      memcpy(iv + 4, &seq, 2);
+      memcpy(iv + 8, &sourceId, 4);
+      uint8_t plain[Config::LORA_MAX_PACKET] = {};
+      uint8_t streamBlock[16] = {};
+      size_t ncOff = 0;
+      mbedtls_aes_context aes;
+      mbedtls_aes_init(&aes);
+      const bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
+                      mbedtls_aes_crypt_ctr(&aes, len, &ncOff, iv, streamBlock,
+                                            cipher, plain) == 0;
+      mbedtls_aes_free(&aes);
+      if (!ok) {
+        validFile = false;
+        break;
+      }
+
+      ForwardPacket& item = decoded[decodedCount++];
+      item.type = type;
+      item.wireVersion = wireVersion;
+      item.ttl = ttl;
+      item.priority = priority;
+      item.seq = seq;
+      item.sourceId = sourceId;
+      item.len = len;
+      item.receivedMs = millis();
+      item.dedupId = hashPayload(plain, len) ^ sourceId ^
+                     (static_cast<uint32_t>(seq) << 16);
+      item.persistId = item.dedupId;
+      memcpy(item.payload, plain, len);
     }
+    f.close();
 
-    if (magic != FORWARD_RECORD_MAGIC || ttl == 0 || len == 0 ||
-        len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG ||
-        (wireVersion != Config::LORA_PROTOCOL_VERSION &&
-         wireVersion != LORA_PROTOCOL_VERSION_HOP)) {
-      StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "Corrupt forward queue record";
-      break;
-    }
+    if (!validFile) return false;
+    drainQueue();
+    for (size_t i = 0; i < decodedCount; ++i)
+      if (xQueueSend(forwardQueue_, &decoded[i], 0) != pdPASS) {
+        drainQueue();
+        return false;
+      }
+    return true;
+  };
 
-    uint8_t cipher[Config::LORA_MAX_PACKET] = {};
-    uint8_t tag[PACKET_TAG] = {};
-    if (f.read(cipher, len) != len || f.read(tag, PACKET_TAG) != PACKET_TAG) break;
-
-    uint8_t bind[Config::LORA_MAX_PACKET + FORWARD_RECORD_FIXED] = {};
-    memcpy(bind, header, headerLen);
-    memcpy(bind + headerLen, cipher, len);
-    uint8_t expected[32] = {};
-    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    if (!md || mbedtls_md_hmac(md, key, sizeof(key), bind, headerLen + len,
-                               expected, sizeof(expected)) != 0) break;
-    uint8_t diff = 0;
-    for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ tag[i];
-    if (diff != 0) {
-      StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "Corrupt forward queue checksum";
-      continue;
-    }
-
-    uint8_t iv[16] = {};
-    memcpy(iv, &nonce, 4);
-    memcpy(iv + 4, &seq, 2);
-    memcpy(iv + 8, &sourceId, 4);
-    uint8_t plain[Config::LORA_MAX_PACKET] = {};
-    uint8_t streamBlock[16] = {};
-    size_t ncOff = 0;
-    mbedtls_aes_context aes;
-    mbedtls_aes_init(&aes);
-    const bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
-                    mbedtls_aes_crypt_ctr(&aes, len, &ncOff, iv, streamBlock,
-                                          cipher, plain) == 0;
-    mbedtls_aes_free(&aes);
-    if (!ok) {
-      StateLock lock(gState);
-      if (lock.ok()) gState.lastError = "Corrupt forward queue payload";
-      continue;
-    }
-
-    ForwardPacket item{};
-    item.type = type;
-    item.wireVersion = wireVersion;
-    item.ttl = ttl;
-    item.priority = priority;
-    item.seq = seq;
-    item.sourceId = sourceId;
-    item.len = len;
-    item.receivedMs = millis();
-    item.dedupId = hashPayload(plain, len) ^ sourceId ^
-                   (static_cast<uint32_t>(seq) << 16);
-    item.persistId = item.dedupId;
-    memcpy(item.payload, plain, len);
-    if (xQueueSend(forwardQueue_, &item, 0) == pdPASS) ++loaded;
+  // FWD.Q is accepted only after the complete file has been validated.
+  // If it is torn/corrupt, discard the partial queue state and recover from
+  // the last known-good .BAK instead.
+  for (const char* path : candidates) {
+    if (!SD.exists(path)) continue;
+    if (tryLoad(path)) return true;
   }
-  f.close();
-  return true;
+
+  drainQueue();
+  StateLock lock(gState);
+  if (lock.ok()) gState.lastError = "No valid forward queue snapshot";
+  return false;
 }
 
 bool LoRaManager::parseRouteExtension(const uint8_t* payload, size_t len,
@@ -1236,22 +1281,49 @@ bool LoRaManager::parseRouteExtension(const uint8_t* payload, size_t len,
   destination = nextHop = previousHop = 0;
   hopCount = 0;
   payloadOffset = 0;
-  if (!payload || len < ROUTE_EXT_BYTES ||
-      payload[0] != ROUTE_EXT_MAGIC || payload[1] != ROUTE_EXT_VERSION)
+  if (!payload || len < ROUTE_EXT_V1_BYTES ||
+      payload[0] != ROUTE_EXT_MAGIC)
     return false;
+
+  const uint8_t version = payload[1];
+  const size_t extBytes = version == ROUTE_EXT_VERSION ? ROUTE_EXT_V2_BYTES :
+                          version == ROUTE_EXT_VERSION_V1 ? ROUTE_EXT_V1_BYTES : 0;
+  if (!extBytes || len < extBytes) return false;
+
   const uint8_t flags = payload[2];
   hopCount = payload[3];
   memcpy(&destination, payload + 4, 4);
   memcpy(&nextHop, payload + 8, 4);
-  memcpy(&previousHop, payload + 12, 4);
-  if (hopCount > ROUTE_EXT_MAX_HOPS) return false;
-  if ((flags & static_cast<uint8_t>(~ROUTE_EXT_FLAG_BROADCAST)) != 0) return false;
-  if ((flags & ROUTE_EXT_FLAG_BROADCAST) != 0 && destination != 0) return false;
+  if (hopCount > ROUTE_EXT_MAX_HOPS ||
+      (flags & static_cast<uint8_t>(~ROUTE_EXT_FLAG_BROADCAST)) != 0 ||
+      ((flags & ROUTE_EXT_FLAG_BROADCAST) != 0 && destination != 0))
+    return false;
+
+  if (version == ROUTE_EXT_VERSION_V1) {
+    memcpy(&previousHop, payload + 12, 4);
+  } else {
+    // Rev-C route extension v2 carries the complete visited-node path:
+    // path[0] is the origin, path[hopCount] is the current forwarding node.
+    // Reject a frame if our own source ID already appears in the path.
+    for (uint8_t i = 0; i <= hopCount; ++i) {
+      uint32_t node = 0;
+      memcpy(&node, payload + 12U + static_cast<size_t>(i) * sizeof(uint32_t), 4);
+      if (node == 0) return false;
+      if (node == sourceId_) return false;
+      if (i > 0) {
+        uint32_t prev = 0;
+        memcpy(&prev, payload + 12U + static_cast<size_t>(i - 1U) * sizeof(uint32_t), 4);
+        if (node == prev) return false;
+      }
+      previousHop = node;
+    }
+  }
+
   if (destination == sourceId_ || nextHop == sourceId_ || nextHop == 0) {
-    payloadOffset = ROUTE_EXT_BYTES;
+    payloadOffset = extBytes;
     return true;
   }
-  payloadOffset = ROUTE_EXT_BYTES;
+  payloadOffset = extBytes;
   return true;
 }
 
@@ -1326,7 +1398,7 @@ size_t LoRaManager::addRouteExtension(const uint8_t* payload, size_t len,
                                        uint32_t sourceIdOverride) const {
   const uint32_t origin = sourceIdOverride != 0 ? sourceIdOverride : sourceId_;
   if (!payload || !out || destination == origin ||
-      len + ROUTE_EXT_BYTES > capacity) return 0;
+      len + ROUTE_EXT_V2_BYTES > capacity) return 0;
   const uint32_t nextHop = selectNextHop(destination, excludeNextHop);
   if (destination != 0 && nextHop == 0) return 0;
   const uint8_t flags = destination == 0 ? ROUTE_EXT_FLAG_BROADCAST : 0;
@@ -1337,9 +1409,10 @@ size_t LoRaManager::addRouteExtension(const uint8_t* payload, size_t len,
   out[3] = hopCount;
   memcpy(out + 4, &destination, 4);
   memcpy(out + 8, &nextHop, 4);
+  memset(out + 12, 0, ROUTE_EXT_V2_BYTES - 12);
   memcpy(out + 12, &origin, 4);
-  memcpy(out + ROUTE_EXT_BYTES, payload, len);
-  return len + ROUTE_EXT_BYTES;
+  memcpy(out + ROUTE_EXT_V2_BYTES, payload, len);
+  return len + ROUTE_EXT_V2_BYTES;
 }
 
 bool LoRaManager::routeAllowsForward(uint32_t destination, uint32_t nextHop,
@@ -1436,18 +1509,35 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
     if (selectedNextHop == 0 || selectedNextHop == previousHop ||
         selectedNextHop == forward.sourceId) return false;
     txNextHop = selectedNextHop;
-    routed[0] = ROUTE_EXT_MAGIC;
-    routed[1] = ROUTE_EXT_VERSION;
-    routed[2] = destination == 0 ? ROUTE_EXT_FLAG_BROADCAST : 0;
-    routed[3] = static_cast<uint8_t>(hopCount + 1U);
-    memcpy(routed + 4, &destination, 4);
-    memcpy(routed + 8, &selectedNextHop, 4);
-    memcpy(routed + 12, &sourceId_, 4);
+    const uint8_t routeVersion = forward.payload[1];
+    const size_t outRouteBytes = routeVersion == ROUTE_EXT_VERSION
+        ? ROUTE_EXT_V2_BYTES : ROUTE_EXT_V1_BYTES;
     const size_t appLen = forward.len - routeOffset;
-    if (routeOffset != ROUTE_EXT_BYTES ||
-        appLen + ROUTE_EXT_BYTES > sizeof(routed)) return false;
-    memcpy(routed + ROUTE_EXT_BYTES, forward.payload + routeOffset, appLen);
-    routedLen = appLen + ROUTE_EXT_BYTES;
+    if (appLen + outRouteBytes > sizeof(routed)) return false;
+
+    if (routeVersion == ROUTE_EXT_VERSION) {
+      memcpy(routed, forward.payload, ROUTE_EXT_V2_BYTES);
+      routed[3] = static_cast<uint8_t>(hopCount + 1U);
+      memcpy(routed + 8, &selectedNextHop, 4);
+      memcpy(routed + 12U + static_cast<size_t>(hopCount + 1U) * sizeof(uint32_t),
+             &sourceId_, sizeof(sourceId_));
+    } else {
+      // Upgrade a legacy v1 extension to Rev-C v2 while preserving its known
+      // origin/previous-hop information. Full history is only available from
+      // packets emitted after the Rev-C upgrade.
+      routed[0] = ROUTE_EXT_MAGIC;
+      routed[1] = ROUTE_EXT_VERSION;
+      routed[2] = destination == 0 ? ROUTE_EXT_FLAG_BROADCAST : 0;
+      routed[3] = static_cast<uint8_t>(hopCount + 1U);
+      memcpy(routed + 4, &destination, 4);
+      memcpy(routed + 8, &selectedNextHop, 4);
+      memset(routed + 12, 0, ROUTE_EXT_V2_BYTES - 12);
+      uint32_t origin = previousHop;
+      memcpy(routed + 12, &origin, 4);
+      memcpy(routed + 16, &sourceId_, 4);
+    }
+    memcpy(routed + outRouteBytes, forward.payload + routeOffset, appLen);
+    routedLen = appLen + outRouteBytes;
   } else {
     routedLen = addRouteExtension(forward.payload, forward.len, 0, 0,
                                   routed, sizeof(routed));
@@ -1962,6 +2052,7 @@ bool LoRaManager::begin() {
   (void)loadMessageHistory();
   (void)loadFragmentRx();
   (void)loadReplayState();
+  (void)loadScheduledMessages();
 
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
@@ -2302,11 +2393,11 @@ void LoRaManager::task() {
     const bool authenticated = decryptPacket(
         msg, type, seq, rxSourceId, rxTtl, plain, sizeof(plain), plainLen);
     uint8_t hopIndex = 0;
-    uint32_t epochMs = 0;
+    uint32_t epochSec = 0;
     bool authenticatedV3 = false;
     if (!authenticated) {
       authenticatedV3 = decryptPacketV3(msg, type, seq, rxSourceId, rxTtl,
-                                        hopIndex, epochMs, plain,
+                                        hopIndex, epochSec, plain,
                                         sizeof(plain), plainLen);
       if (authenticatedV3) {
         currentHopIndex_ = hopIndex;
@@ -2337,7 +2428,8 @@ void LoRaManager::task() {
     uint8_t routeHopCount = 0;
     size_t routeOffset = 0;
     const bool routePrefixPresent = rxAuthenticated && plainLen >= 2 &&
-        plain[0] == ROUTE_EXT_MAGIC && plain[1] == ROUTE_EXT_VERSION;
+        plain[0] == ROUTE_EXT_MAGIC &&
+        (plain[1] == ROUTE_EXT_VERSION || plain[1] == ROUTE_EXT_VERSION_V1);
     const bool hasRouteExtension = rxAuthenticated &&
         parseRouteExtension(plain, plainLen, routeDestination, routeNextHop,
                             routePreviousHop, routeHopCount, routeOffset);
@@ -2350,7 +2442,7 @@ void LoRaManager::task() {
     const bool nextHopIsUs = !hasRouteExtension || routeNextHop == 0 ||
                              routeNextHop == sourceId_;
     const bool duplicateV2 = (isV2 || isV3) &&
-        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen), isV3 ? epochMs : 0);
+        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen), isV3 ? epochSec : 0);
     const uint32_t immediatePeer = (hasRouteExtension && routePreviousHop != 0)
         ? routePreviousHop : rxSourceId;
     if (rxAuthenticated) updateNeighborMetric(immediatePeer, rssi, snr);
@@ -2401,12 +2493,16 @@ void LoRaManager::task() {
       textAckHopIndex_ = isV3 ? hopIndex : 0;
       textAckPending_ = true;
     }
-    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_SOS && appPayloadLen > 0 &&
-        !duplicateV2) {
-      char text[Config::LORA_MAX_PACKET + 1] = {};
-      memcpy(text, appPayload, appPayloadLen);
-      text[appPayloadLen] = '\0';
-      addMessageHistory(rxSourceId, text);
+    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_SOS && appPayloadLen > 0) {
+      // Re-ACK an authenticated duplicate so an ACK lost on-air does not
+      // force the sender into a false SOS escalation. Do not duplicate the
+      // user-visible history entry.
+      if (!duplicateV2) {
+        char text[Config::LORA_MAX_PACKET + 1] = {};
+        memcpy(text, appPayload, appPayloadLen);
+        text[appPayloadLen] = '\0';
+        addMessageHistory(rxSourceId, text);
+      }
       sosAckPendingSeq_ = seq;
       sosAckPendingSourceId_ = rxSourceId;
       sosAckPending_ = true;
@@ -2417,7 +2513,7 @@ void LoRaManager::task() {
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_TEXT_ACK) {
       handleTextAckPayload(appPayload, appPayloadLen);
     }
-    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_VOICE && !duplicateV2 && appPayloadLen == 168 &&
+    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_VOICE && appPayloadLen == 168 &&
         appPayload[0] == 0x56 && appPayload[1] == 1 &&
         (static_cast<uint16_t>(appPayload[4]) | (static_cast<uint16_t>(appPayload[5]) << 8)) == seq &&
         appPayload[2] == Config::VOICE_FRAME_MS &&
@@ -2434,7 +2530,7 @@ void LoRaManager::task() {
         bool alreadyQueued = false;
         for (auto& slot : voiceRx_)
           if (slot.used && slot.seq == seq) { alreadyQueued = true; break; }
-        if (!alreadyQueued) {
+        if (!duplicateV2 && !alreadyQueued) {
           VoiceRxSlot* freeSlot = nullptr;
           for (auto& slot : voiceRx_)
             if (!slot.used) { freeSlot = &slot; break; }
@@ -3315,6 +3411,101 @@ bool LoRaManager::setSosFormats(uint8_t mask) {
   return true;
 }
 
+bool LoRaManager::loadScheduledMessages() {
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", true)) return false;
+
+  ScheduledStore best{};
+  bool have = false;
+  const char* keys[] = {"sched_a", "sched_b"};
+  for (const char* key : keys) {
+    ScheduledStore candidate{};
+    if (prefs.getBytes(key, &candidate, sizeof(candidate)) != sizeof(candidate) ||
+        candidate.magic != SCHEDULED_STORE_MAGIC ||
+        candidate.version != SCHEDULED_STORE_VERSION ||
+        candidate.count > SCHEDULED_MESSAGE_MAX)
+      continue;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&candidate);
+    uint32_t crc = 0xFFFFFFFFUL;
+    for (size_t i = 0; i < offsetof(ScheduledStore, crc); ++i) {
+      crc ^= bytes[i];
+      for (uint8_t b = 0; b < 8; ++b)
+        crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320UL : (crc >> 1);
+    }
+    if (candidate.crc != ~crc) continue;
+    if (!have || static_cast<int32_t>(candidate.generation - best.generation) > 0) {
+      best = candidate;
+      have = true;
+    }
+  }
+  prefs.end();
+
+  if (!have) return true;
+  memset(scheduledMessages_, 0, sizeof(scheduledMessages_));
+  for (size_t i = 0; i < SCHEDULED_MESSAGE_MAX; ++i) {
+    const ScheduledStoreEntry& src = best.entries[i];
+    if (!src.used || !src.id || !src.atEpoch || src.text[0] == '\0') continue;
+    scheduledMessages_[i].used = true;
+    scheduledMessages_[i].id = src.id;
+    scheduledMessages_[i].atEpoch = src.atEpoch;
+    scheduledMessages_[i].text = String(src.text);
+  }
+  nextScheduledMessageId_ = best.nextId ? best.nextId : 1;
+  scheduledStoreGeneration_ = best.generation;
+  return true;
+}
+
+bool LoRaManager::persistScheduledMessages() {
+  ScheduledStore store{};
+  store.magic = SCHEDULED_STORE_MAGIC;
+  store.version = SCHEDULED_STORE_VERSION;
+  store.count = 0;
+  store.generation = scheduledStoreGeneration_ + 1U;
+  if (store.generation == 0) store.generation = 1;
+  store.nextId = nextScheduledMessageId_;
+  for (size_t i = 0; i < SCHEDULED_MESSAGE_MAX; ++i) {
+    const ScheduledMessage& src = scheduledMessages_[i];
+    ScheduledStoreEntry& dst = store.entries[i];
+    if (!src.used || !src.id || !src.atEpoch || src.text.isEmpty() ||
+        src.text.length() >= sizeof(dst.text))
+      continue;
+    dst.used = 1;
+    dst.id = src.id;
+    dst.atEpoch = src.atEpoch;
+    src.text.toCharArray(dst.text, sizeof(dst.text));
+    ++store.count;
+  }
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&store);
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < offsetof(ScheduledStore, crc); ++i) {
+    crc ^= bytes[i];
+    for (uint8_t b = 0; b < 8; ++b)
+      crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320UL : (crc >> 1);
+  }
+  store.crc = ~crc;
+
+  const char* key = (store.generation & 1U) ? "sched_a" : "sched_b";
+  Preferences prefs;
+  if (!prefs.begin("fieldradio", false)) return false;
+  const bool ok = prefs.putBytes(key, &store, sizeof(store)) == sizeof(store);
+  prefs.end();
+  if (!ok) return false;
+
+  // Read-back verification makes the bank switch transactional from the
+  // application's perspective; the previous bank remains recoverable.
+  Preferences verifyPrefs;
+  if (!verifyPrefs.begin("fieldradio", true)) return false;
+  ScheduledStore verify{};
+  const bool verified = verifyPrefs.getBytes(key, &verify, sizeof(verify)) == sizeof(verify) &&
+                        verify.magic == SCHEDULED_STORE_MAGIC &&
+                        verify.version == SCHEDULED_STORE_VERSION &&
+                        verify.generation == store.generation &&
+                        verify.crc == store.crc;
+  verifyPrefs.end();
+  if (verified) scheduledStoreGeneration_ = store.generation;
+  return verified;
+}
+
 bool LoRaManager::scheduleMessage(uint64_t atEpoch, const String& text) {
   if (!atEpoch || text.isEmpty() ||
       text.length() > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 -
@@ -3328,8 +3519,10 @@ bool LoRaManager::scheduleMessage(uint64_t atEpoch, const String& text) {
       if (nextScheduledMessageId_ == 0) nextScheduledMessageId_ = 1;
       entry.atEpoch = atEpoch;
       entry.text = text;
+      const bool persisted = persistScheduledMessages();
+      if (!persisted) entry = ScheduledMessage{};
       xSemaphoreGive(mutex_);
-      return true;
+      return persisted;
     }
   }
   xSemaphoreGive(mutex_);
@@ -3341,8 +3534,9 @@ bool LoRaManager::cancelScheduledMessage(uint32_t id) {
   for (auto& entry : scheduledMessages_) {
     if (entry.used && entry.id == id) {
       entry = ScheduledMessage{};
+      const bool persisted = persistScheduledMessages();
       xSemaphoreGive(mutex_);
-      return true;
+      return persisted;
     }
   }
   xSemaphoreGive(mutex_);
@@ -3387,6 +3581,16 @@ void LoRaManager::serviceScheduledMessages() {
       id = e.id;
       text = e.text;
       e = ScheduledMessage{};
+      if (!persistScheduledMessages()) {
+        // Do not lose a scheduled item merely because persistence failed.
+        // Restore it; transmission is deferred until the next service pass.
+        e.used = true;
+        e.id = id;
+        e.atEpoch = nowEpoch;
+        e.text = text;
+        id = 0;
+        text.clear();
+      }
       break;
     }
   }

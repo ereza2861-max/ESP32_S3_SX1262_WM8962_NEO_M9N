@@ -1,4 +1,4 @@
-# FieldRadio Rev B — LoRa Routing Validation Test Matrix
+# FieldRadio Rev-C — LoRa Routing Validation Test Matrix
 
 Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
 

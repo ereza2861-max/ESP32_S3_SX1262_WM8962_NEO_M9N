@@ -1,16 +1,16 @@
 #pragma once
 #include <Arduino.h>
-#include <WebServer.h>
+#include <ESPWebServerSecure.hpp>
 #include <FS.h>
 #include <IPAddress.h>
 
 class WebUi {
 public:
-  explicit WebUi(WebServer& server) : server_(server) {}
+  explicit WebUi(ESPWebServerSecure& server) : server_(server) {}
   void begin();
   void task();
 private:
-  WebServer& server_;
+  ESPWebServerSecure& server_;
   bool auth();
   bool sameOrigin();
   uint32_t authFailureWindowStartMs_ = 0;

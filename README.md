@@ -100,9 +100,28 @@ required for the cloud build. The workflow uploads successful firmware artifacts
 and always uploads the compile log. See `docs/GITHUB_ACTIONS_BUILD.md` for web
 and optional `gh` download workflows.
 
-For a local deployment that needs Wi-Fi credentials, copy
-`include/LocalConfig.example.h` to `include/LocalConfig.h` and edit the values.
-`LocalConfig.h` is ignored by Git and is not created or injected by GitHub Actions.
+For a fresh local deployment, run the complete provisioning flow before a
+normal build:
+
+```text
+make provision
+make check-provisioning
+make build
+make upload
+make monitor
+```
+
+`make provision` creates the ignored `include/LocalConfig.h` plus the ignored
+device-specific TLS files `secrets/web_tls_cert.der` and
+`secrets/web_tls_key.der`. The PlatformIO pre-build hook converts the DER pair
+into the ignored `include/generated/WebTlsProvisioning.h`. No private key or
+certificate is committed to Git. See `docs/LOCAL_PROVISIONING.md` for the
+tracked/local material boundary and production certificate replacement.
+
+The normal `make build` and `make upload` targets refuse to run without a
+complete local provisioning set. GitHub Actions uses `make ci-build`, which
+deliberately permits a secret-free compile and keeps HTTPS disabled in that
+CI artifact rather than silently falling back to HTTP.
 
 The CI workflow deliberately does not pass credentials, tokens, or other secret
 values to the compiler. It runs the repository preflight before compilation and

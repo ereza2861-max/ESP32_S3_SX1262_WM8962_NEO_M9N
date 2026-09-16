@@ -61,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for path in .pio/ sdkconfig sdkconfig.old; do
+          for path in .pio/ sdkconfig sdkconfig.old include/generated/WebTlsProvisioning.h; do
             if git check-ignore -q --no-index "$path"; then
               echo "OK: $path is ignored"
             else

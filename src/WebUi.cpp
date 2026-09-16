@@ -1,4 +1,5 @@
 #include "WebUi.h"
+#include "generated/WebTlsProvisioning.h"
 #include "Config.h"
 #include "AppState.h"
 #include "StorageManager.h"
@@ -553,7 +554,7 @@ setInterval(refreshScan,3000);setInterval(refreshHop,3000);setInterval(refreshMe
 bool WebUi::sameOrigin() {
   const String origin = server_.header("Origin");
   if (origin.isEmpty()) return false;
-  const String expected = String("http://") + WiFi.softAPIP().toString();
+  const String expected = String("https://") + WiFi.softAPIP().toString();
   return origin == expected;
 }
 
@@ -696,7 +697,7 @@ bool WebUi::issueSession() {
   server_.sendHeader("Set-Cookie",
       "FR-SESSION=" + hex + "; Max-Age=" +
       String(Config::WEB_SESSION_TIMEOUT_MS / 1000) +
-      "; HttpOnly; SameSite=Strict");
+      "; HttpOnly; Secure; SameSite=Strict");
 
   return true;
 }
@@ -802,9 +803,9 @@ void WebUi::begin() {
     memcpy(sessionSecret_ + i, &r, min<size_t>(4, sizeof(sessionSecret_) - i));
   }
   sessionSecretReady_ = true;
-  static const char* const headerKeys[] = {
-      "Origin", "Host", "Cookie", "X-CSRF-Token", "Authorization"};
-  server_.collectHeaders(headerKeys, 5);
+  // ESPWebServerSecure exposes request headers directly through header();
+  // collectHeaders() is intentionally not used because the HTTPS compatibility
+  // layer does not implement the WebServer header collection cache.
 
   server_.on("/", HTTP_GET, [this]{ if (auth()) handleRoot(); });
   server_.on("/api/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
@@ -933,7 +934,16 @@ void WebUi::begin() {
                    audio.playTone(static_cast<uint16_t>(f), static_cast<uint16_t>(ms));
     server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "FAIL");
   });
+#if WEB_TLS_CERT_CONFIGURED
+  server_.setServerKeyAndCert(WEB_TLS_KEY_DER, WEB_TLS_KEY_DER_LEN,
+                              WEB_TLS_CERT_DER, WEB_TLS_CERT_DER_LEN);
   server_.begin();
+#else
+  // Never fall back to plaintext HTTP when certificate provisioning is absent.
+  // The WebUI remains disabled until a device-specific certificate/key pair is
+  // provisioned through the ignored secrets/ directory.
+  Serial.println("WebUI HTTPS disabled: TLS certificate provisioning missing");
+#endif
 }
 
 void WebUi::task() {

@@ -1,4 +1,4 @@
-# LoRa Rev-B Level-3: selective ACK/window and routing metrics
+# LoRa Rev-C Level-3: selective ACK/window and routing metrics
 
 This revision keeps the authenticated LoRa envelope unchanged (packet v2). The
 voice reliability changes are carried inside the existing encrypted payload of
@@ -56,9 +56,12 @@ node. A packet is dropped when the hop limit is exhausted, when the next-hop
 does not match the local node, or when the selected next hop would immediately
 return to the previous hop.
 
-The replay cache also keys the accepted payload hash for an origin sequence, so
-a legitimate forwarded copy (same origin sequence but updated routing
-extension) is not incorrectly rejected as a replay.
+The replay cache is authoritative for the authenticated origin sequence.
+Forwarding may rewrite the routing extension, but that does **not** make a new
+origin frame: the same origin sequence remains replay-protected. The route
+extension currently carries only the immediate previous hop and hop count; it
+does not encode full path history, so loop prevention still relies on TTL,
+origin/previous-hop exclusion, next-hop selection, and replay/dedup state.
 
 ## Compatibility and safety
 

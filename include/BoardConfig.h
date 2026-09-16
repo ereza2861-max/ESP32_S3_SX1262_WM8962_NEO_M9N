@@ -48,7 +48,7 @@ constexpr int GNSS_RX = 44; // ESP32-S3 RX <- NEO-M9N TX
 constexpr int GNSS_TX = 43; // ESP32-S3 TX -> NEO-M9N RX
 constexpr uint32_t GNSS_BAUD = 38400;
 
-// Auxiliary Rev-B controls. These nets MUST be physically routed on the PCB.
+// Auxiliary Rev-C controls. These nets MUST be physically routed on the PCB.
 // PTT/SOS are active-high RTC inputs for deep-sleep wake. Use an external
 // pulldown (47 kOhm recommended) to GND and a normally-open pushbutton to 3V3;
 // add a local 100 nF capacitor from each input to GND for debounce/noise
@@ -83,6 +83,7 @@ constexpr int USB_D_PLUS = 20;
 constexpr uint8_t WM8962_I2C_ADDR = 0x1A;
 constexpr uint32_t WM8962_MCLK_HZ = 24000000UL;
 
+// Rev-C routing source of truth: keep this map synchronized with docs/PCB_MAPPING.md.
 // Catch accidental future pin aliasing at compile time.
 constexpr bool pinsUnique() {
   constexpr int pins[] = {

@@ -34,7 +34,7 @@ constexpr char LORA_KEY_HEX[] = FIELDRADIO_LORA_KEY_HEX;
 // An empty/default credential set keeps the network service disabled.
 constexpr bool CREDENTIALS_CONFIGURED =
     AP_PASSWORD[0] != '\0' && WEB_USER[0] != '\0' && WEB_PASSWORD[0] != '\0';
-constexpr uint16_t WEB_PORT = 80;
+constexpr uint16_t WEB_PORT = 443;
 
 // SX1262 / legal regional setting must be changed to the frequency allowed
 // by the local radio regulations and the actual RF matching network.
@@ -121,6 +121,9 @@ constexpr uint8_t LORA_TAG_BYTES = 8;
 constexpr uint8_t HOP_CHANNEL_MAX = 8;
 constexpr float HOP_CHANNEL_STEP_MHZ = 0.4f;
 constexpr uint32_t HOP_DWELL_MS = 1000UL;
+static_assert(HOP_CHANNEL_MAX == 0 ||
+              LORA_MIN_FREQ_MHZ + static_cast<float>(HOP_CHANNEL_MAX - 1U) * HOP_CHANNEL_STEP_MHZ <= LORA_MAX_FREQ_MHZ,
+              "Rev-C hop channel plan exceeds configured legal LoRa band");
 constexpr uint8_t HOP_LEGACY_RX_EVERY = 3;
 constexpr uint32_t SCANNER_DEFAULT_DWELL_MS = 100;
 constexpr uint32_t SCANNER_MIN_DWELL_MS = 25;
@@ -228,7 +231,8 @@ constexpr uint32_t RECORD_MAX_SECONDS = 300;
 constexpr uint16_t I2S_DMA_BUF_COUNT = 8;
 constexpr uint16_t I2S_DMA_BUF_LEN = 256;
 
-// Battery monitoring. BATTERY_ADC stays disabled on the supplied PCB (-1).
+// Battery monitoring. BATTERY_ADC is a routed Rev-C ADC1 input; keep this
+// comment synchronized with BoardConfig.h and docs/PCB_MAPPING.md.
 constexpr float BATTERY_DIVIDER_RATIO = 2.0f;
 constexpr float BATTERY_LOW_THRESHOLD = 3.4f;
 constexpr float BATTERY_CRITICAL = 3.2f;

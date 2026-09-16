@@ -1,4 +1,4 @@
-# Rev-B feature-gap audit and implementation gates
+# Rev-C feature-gap audit and implementation gates
 
 The firmware target is ESP32-S3-WROOM-1-N16R8 (16 MiB Quad SPI flash + 8 MiB Octal SPI PSRAM).
 
@@ -8,7 +8,7 @@ item in the requested backlog.
 
 ## GPIO decision
 
-The requested GPIO38..42 block is electrically usable as general GPIO on ESP32-S3.
+The requested GPIO39..42 block plus GPIO47/48 is electrically usable as general GPIO on ESP32-S3.
 GPIO0/3/45/46 are strapping pins and GPIO33..37 may be consumed by flash/PSRAM, so
 neither group is used for the new outputs. GPIO39..42 also carry JTAG functions; they
 are safe as normal GPIO after boot but cannot simultaneously be used for an active
@@ -18,15 +18,17 @@ The firmware allocation is:
 
 | Function | GPIO | Notes |
 |---|---:|---|
-| Buzzer | 38 | active-high assumption; passive buzzer needs PWM/transistor stage |
+| Buzzer | 47 | active-high; passive buzzer needs PWM/transistor stage |
 | Addressable RGB | 39 | one-wire data; requires actual addressable LED |
-| Haptic | 40 | driver enable; do not drive a motor directly from GPIO |
-| Charging LED | 41 | only a charge-probable heuristic because no charger STAT input is defined |
+| Haptic | 40 | active-high driver enable; do not drive a motor directly from GPIO |
+| Charging LED | 41 | charge-probable heuristic only; no charger STAT input is defined |
 | TX LED | 42 | dedicated |
 | RX LED | 48 | dedicated |
-| PTT | 21 | existing active-low input |
-| SOS | 47 | existing active-low input |
-| Battery ADC | 1 | existing divider input |
+| PTT | 21 | active-high RTC wake input; external pulldown required |
+| SOS | 18 | active-high RTC wake input; external pulldown required |
+| Battery ADC | 1 | ADC1 routed input |
+| MAX2016 forward | 2 | ADC1 |
+| MAX2016 reflected | 8 | ADC1 |
 
 GPIO43/44 are intentionally not used because they are the default UART0 TX/RX pins.
 

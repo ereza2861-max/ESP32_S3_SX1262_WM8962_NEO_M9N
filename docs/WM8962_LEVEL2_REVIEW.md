@@ -2,7 +2,7 @@
 
 ## Audit scope
 
-This review reconciles the current firmware with the supplied Rev B package.
+This review reconciles the current firmware with the supplied Rev-C package.
 The supplied freelancer package contains a *schematic reference* and GPIO
 contract, but no native KiCad schematic/netlist. Therefore pin-level PCB
 verification below is limited to the documented contract; it is not an ERC
@@ -35,12 +35,12 @@ DIO1 is the interrupt line; BUSY is a mandatory handshake line. The current
 firmware mapping is therefore:
 
 - GPIO10 = NSS/CS
-- GPIO14 = RESET
-- GPIO2 = DIO1/IRQ
+- GPIO17 = RESET
+- GPIO14 = DIO1/IRQ
 - GPIO15 = BUSY
 
-The previous Rev B documents incorrectly described GPIO2/GPIO15 as DIO0/DIO1.
-They are corrected by this patch.
+Historical Rev-B documents incorrectly described the SX1262 control pins.
+The current Rev-C contract above is the only mapping to route on the PCB.
 
 DIO2 is deliberately not assigned by firmware because its electrical function
 depends on the actual SX1262 RF front-end: it may control an RF switch on some

@@ -2,7 +2,6 @@
 #include <cstring>
 #include <cmath>
 #include <WiFi.h>
-#include <WebServer.h>
 #include <SPI.h>
 #include <esp_task_wdt.h>
 #include <esp_sleep.h>
@@ -28,7 +27,7 @@ GnssManager gnss;
 LoRaManager lora;
 AudioManager audio;
 StorageManager storage;
-WebServer server(Config::WEB_PORT);
+ESPWebServerSecure server(Config::WEB_PORT);
 WebUi web(server);
 
 static uint32_t lastStatus = 0;
