@@ -48,6 +48,7 @@ constexpr int SD_CS = 16; // microSD CS; secondary SPI chip-select
 constexpr int GNSS_RX = 44; // ESP32-S3 RX <- NEO-M9N TX
 constexpr int GNSS_TX = 43; // ESP32-S3 TX -> NEO-M9N RX
 constexpr uint32_t GNSS_BAUD = 38400;
+constexpr int GNSS_PPS = 9; // NEO-M9N 1-PPS; dedicated timing input, no longer an analog spare
 
 // Auxiliary Rev-C controls. These nets MUST be physically routed on the PCB.
 // PTT/SOS are active-high RTC inputs for deep-sleep wake. Use an external
@@ -91,7 +92,7 @@ constexpr bool pinsUnique() {
   constexpr int pins[] = {
       I2C_SDA, I2C_SCL, I2S_BCLK, I2S_LRCLK, I2S_DOUT, I2S_DIN,
       SPI_SCK, SPI_MISO, SPI_MOSI, LORA_CS, LORA_RST, LORA_DIO1,
-      LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, BTN_PTT, BTN_SOS, BATTERY_ADC,
+      LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, GNSS_PPS, BTN_PTT, BTN_SOS, BATTERY_ADC,
       BUZZER, LED_RGB, HAPTIC, LED_CHARGING, LED_TX, LED_RX,
       USB_D_MINUS, USB_D_PLUS, MAX2016_OUT_FWD, MAX2016_OUT_REF
   };
@@ -119,6 +120,9 @@ constexpr bool isAdc2Pin(int pin) { return pin >= 11 && pin <= 20; }
 static_assert(isAdc1Pin(BATTERY_ADC) && isAdc1Pin(MAX2016_OUT_FWD) &&
               isAdc1Pin(MAX2016_OUT_REF),
               "All onboard analogue sensors must remain on ADC1");
+static_assert(isRtcCapable(GNSS_PPS) && !isForbiddenSharedPin(GNSS_PPS),
+              "GNSS PPS GPIO must be RTC-capable and non-strapping");
+static_assert(GNSS_PPS == 9, "Rev-C GNSS PPS routing is fixed to GPIO9");
 static_assert(isRtcCapable(LORA_DIO1) && isRtcCapable(BTN_PTT) &&
               isRtcCapable(BTN_SOS),
               "Deep-sleep wake sources must be RTC-capable GPIOs");

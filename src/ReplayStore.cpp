@@ -51,10 +51,15 @@ bool ReplayStore::begin() {
 }
 
 bool ReplayStore::beginFram() {
+  if (!gI2cMutex) return false;
   Wire.begin(Board::FRAM_SDA, Board::FRAM_SCL, 400000);
-  Wire.setTimeOut(50);
-  Wire.beginTransmission(Config::REPLAY_FRAM_I2C_ADDR);
-  if (Wire.endTransmission() != 0) return false;
+  Wire.setTimeOut(Config::I2C_TIMEOUT_MS);
+  {
+    I2cLock lock(pdMS_TO_TICKS(Config::I2C_TIMEOUT_MS));
+    if (!lock.ok()) return false;
+    Wire.beginTransmission(Config::REPLAY_FRAM_I2C_ADDR);
+    if (Wire.endTransmission() != 0) return false;
+  }
 
   FramHeader header{};
   const bool headerRead = readFram(0, &header, sizeof(header));
@@ -100,6 +105,8 @@ bool ReplayStore::beginNvsJournal() {
 bool ReplayStore::readFram(uint16_t address, void* data, size_t len) const {
   if (!data || !len || static_cast<uint32_t>(address) + len > Config::REPLAY_FRAM_SIZE_BYTES)
     return false;
+  I2cLock lock(pdMS_TO_TICKS(Config::I2C_TIMEOUT_MS));
+  if (!lock.ok()) return false;
   Wire.beginTransmission(Config::REPLAY_FRAM_I2C_ADDR);
   Wire.write(static_cast<uint8_t>(address >> 8));
   Wire.write(static_cast<uint8_t>(address));
@@ -115,6 +122,8 @@ bool ReplayStore::readFram(uint16_t address, void* data, size_t len) const {
 bool ReplayStore::writeFram(uint16_t address, const void* data, size_t len) const {
   if (!data || !len || static_cast<uint32_t>(address) + len > Config::REPLAY_FRAM_SIZE_BYTES)
     return false;
+  I2cLock lock(pdMS_TO_TICKS(Config::I2C_TIMEOUT_MS));
+  if (!lock.ok()) return false;
   const uint8_t* p = static_cast<const uint8_t*>(data);
   while (len) {
     const size_t chunk = min<size_t>(Config::REPLAY_FRAM_WRITE_CHUNK_BYTES, len);

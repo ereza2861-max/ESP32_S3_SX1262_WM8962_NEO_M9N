@@ -8,10 +8,11 @@ void IRAM_ATTR GnssPps::isr(void* arg) {
 }
 
 bool GnssPps::begin(int pin) {
-  if (pin < 0) return false;
+  if (pin < 0 || pin > 48) return false;
+  if (pin != Board::GNSS_PPS) return false;
   pin_ = pin;
+  lastEdgeUs_ = 0;
   pinMode(pin_, INPUT);
   attachInterruptArg(pin_, isr, this, RISING);
-  // TODO: validate the selected PPS GPIO against the final PCB routing.
   return true;
 }

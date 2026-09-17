@@ -34,7 +34,7 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 | Battery ADC | 1 |
 | MAX2016 forward ADC | 2 |
 | MAX2016 reflected ADC | 8 |
-| Future ADC1 sensor spare | 9 |
+| GNSS 1-PPS | 9 |
 | PTT | 21 |
 | SOS | 18 |
 | TX indicator LED | 42 |
@@ -187,3 +187,13 @@ dynamic MIC/SPK sampling-rate configuration. The WM8962 clock remains at the
 PCB's fixed 44.1 kHz configuration. A future true dynamic-rate implementation
 must replace or fork the UAC descriptor/driver rather than pretending that a
 runtime packet-size check changes the negotiated USB format.
+
+
+### GNSS PPS and battery gauge
+
+GNSS 1-PPS is routed to GPIO9 and is no longer reserved for a future analog device. The
+firmware captures PPS edges and periodically synchronizes system UTC from validated GNSS time.
+Deep sleep uses a 12-hour timer wake to force a periodic time-sync opportunity. The MAX17048
+battery gauge at I2C address `0x36` is polled periodically with bounded bus operations and
+falls back to the ADC1 battery path if unavailable. See `docs/PCB_MAPPING.md` for the hardware
+contract.

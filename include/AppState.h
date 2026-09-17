@@ -14,6 +14,8 @@ struct GpsState {
   uint32_t lastFixMs = 0;
   bool timeValid = false;
   uint64_t utcEpoch = 0;
+  bool ppsValid = false;
+  uint32_t ppsLastEdgeUs = 0;
 };
 
 struct MessageHistoryEntry {
@@ -60,6 +62,7 @@ struct HealthLogEntry {
 };
 
 extern SemaphoreHandle_t gSpiMutex;
+extern SemaphoreHandle_t gI2cMutex;
 
 struct RuntimeState {
   SemaphoreHandle_t mutex = nullptr;
@@ -212,6 +215,19 @@ public:
   bool ok() const { return locked_; }
   SpiLock(const SpiLock&) = delete;
   SpiLock& operator=(const SpiLock&) = delete;
+private:
+  bool locked_;
+};
+
+
+class I2cLock {
+public:
+  explicit I2cLock(TickType_t timeout = pdMS_TO_TICKS(100))
+      : locked_(gI2cMutex && xSemaphoreTake(gI2cMutex, timeout) == pdTRUE) {}
+  ~I2cLock() { if (locked_) xSemaphoreGive(gI2cMutex); }
+  bool ok() const { return locked_; }
+  I2cLock(const I2cLock&) = delete;
+  I2cLock& operator=(const I2cLock&) = delete;
 private:
   bool locked_;
 };

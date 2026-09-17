@@ -25,7 +25,7 @@ The firmware allocation is:
 | TX LED | 42 | dedicated |
 | RX LED | — | Dedicated RX LED removed; RX is already represented by the addressable RGB status LED so GPIO48 can be reserved for I2C SCL. |
 | PTT | 21 | active-high RTC wake input; external pulldown required |
-| Future ADC1 sensor | 9 | intentionally reserved spare ADC1 channel |
+| GNSS 1-PPS | 9 | dedicated digital timing input; no longer an analog spare |
 | SOS | 18 | active-high RTC wake input; external pulldown required |
 | Battery ADC | 1 | ADC1 routed input |
 | MAX2016 forward | 2 | ADC1 |
@@ -46,7 +46,9 @@ GPIO43/44 are used for GNSS despite being the default UART0 TX/RX pins; this is 
 - constant-time password verification;
 - configuration version bump and automatic migration/save;
 - configuration audit log with rotation;
-- cppcheck CI baseline.
+- cppcheck CI baseline;
+- GNSS 1-PPS input on GPIO9 with periodic 12-hour GNSS time synchronization;
+- MAX17048 VCELL/SOC polling with bounded I2C access and ADC fallback.
 
 ## Important limitations
 

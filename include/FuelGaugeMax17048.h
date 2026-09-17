@@ -13,4 +13,5 @@ private:
   bool available_ = false;
   float voltage_ = NAN;
   int8_t percent_ = -1;
+  uint32_t lastPollMs_ = 0;
 };

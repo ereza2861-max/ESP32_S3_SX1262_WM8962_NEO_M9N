@@ -8,6 +8,8 @@
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 #include <Preferences.h>
+#include <Wire.h>
+#include "FuelGaugeMax17048.h"
 #include <SD.h>
 #include <nvs_flash.h>
 #include <esp32-hal-cpu.h>
@@ -31,6 +33,7 @@ AudioManager audio;
 StorageManager storage;
 ESPWebServerSecure server(Config::WEB_PORT);
 WebUi web(server);
+FuelGaugeMax17048 fuelGauge;
 
 static uint32_t lastStatus = 0;
 static uint32_t lastReport = 0;
@@ -545,6 +548,12 @@ static void enterDeepSleep() {
   if (Board::BTN_PTT >= 0) wakeMask |= 1ULL << Board::BTN_PTT;
   if (Board::BTN_SOS >= 0) wakeMask |= 1ULL << Board::BTN_SOS;
 
+  const esp_err_t timerWakeErr = esp_sleep_enable_timer_wakeup(
+      static_cast<uint64_t>(Config::GNSS_TIME_SYNC_PERIOD_MS) * 1000ULL);
+  if (timerWakeErr != ESP_OK)
+    Serial.printf("POWER: failed to configure 12h GNSS time-sync wake: %s\\n",
+                  esp_err_to_name(timerWakeErr));
+
   if (wakeMask != 0) {
     const esp_err_t wakeErr =
         esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_HIGH);
@@ -825,6 +834,21 @@ static void taskHealth(void*) {
       }
       lastCheck = now;
     }
+    fuelGauge.task();
+    if (fuelGauge.available()) {
+      const float voltage = fuelGauge.voltage();
+      const int8_t percent = fuelGauge.percent();
+      StateLock batteryLock(gState);
+      if (batteryLock.ok()) {
+        gState.batteryAvailable = isfinite(voltage);
+        gState.batteryV = voltage;
+        gState.batteryPercent = percent;
+        gState.batteryLow = gState.batteryAvailable &&
+                            voltage <= Config::BATTERY_LOW_THRESHOLD;
+        gState.batteryCritical = gState.batteryAvailable &&
+                                 voltage <= Config::BATTERY_CRITICAL;
+      }
+    }
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
@@ -928,7 +952,8 @@ void setup() {
 
   gState.mutex = xSemaphoreCreateMutex();
   gSpiMutex = xSemaphoreCreateMutex();
-  if (!gState.mutex || !gSpiMutex) {
+  gI2cMutex = xSemaphoreCreateMutex();
+  if (!gState.mutex || !gSpiMutex || !gI2cMutex) {
     Serial.println("FATAL: mutex initialization");
     for (;;) delay(1000);
   }
@@ -936,6 +961,8 @@ void setup() {
   recordBootDiagnostics();
   loadBatteryHealth();
   SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
+  Wire.begin(Board::I2C_SDA, Board::I2C_SCL, 400000);
+  Wire.setTimeOut(Config::I2C_TIMEOUT_MS);
 
 #if defined(ARDUINO_ARCH_ESP32)
   if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLDOWN);
@@ -964,6 +991,7 @@ void setup() {
   bool loraOk = lora.begin();
   bool lorawanOk = lorawan.begin();
   bool audioOk = audio.begin();
+  const bool batteryGaugeOk = fuelGauge.begin();
   recordBrownoutMarker();
   audio.setVolume(gConfig.volume);
 

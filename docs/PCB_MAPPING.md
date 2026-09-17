@@ -10,10 +10,9 @@ PCB dari mapping ESP32-WROOM-32E lama.
 
 - **ADC1 (GPIO1..10)** adalah domain analog utama. Semua input analog onboard tetap di
   ADC1 agar pembacaan tidak bergantung pada konflik ADC2/Wi-Fi.
-- **GPIO9 sengaja dikosongkan** sebagai satu spare ADC1 yang aman untuk sensor analog
-  masa depan. Karena jumlah GPIO WROOM-1 yang usable terbatas, mempertahankan semua
-  fungsi audio/radio/GNSS/USB/indikator sekaligus tidak memungkinkan mengosongkan seluruh
-  GPIO3..10 tanpa menghapus atau memindahkan fungsi lain.
+- **GPIO9 dipakai sebagai GNSS 1-PPS input**, sehingga GPIO9 tidak lagi dicadangkan
+  untuk perangkat analog masa depan. PPS adalah input digital/timing dan tidak dipakai
+  sebagai ADC oleh firmware.
 - GPIO4..7 tetap dipakai I2S digital; GPIO8 dipakai MAX2016 reflected ADC; GPIO10 dipakai
   SX1262 NSS. Jadi jangan menganggap seluruh rentang GPIO3..10 sebagai spare analog.
 - **ADC2 (GPIO11..20) aman sebagai GPIO digital saat Wi-Fi aktif**. Konfliknya berlaku
@@ -26,8 +25,7 @@ PCB dari mapping ESP32-WROOM-32E lama.
 - GPIO39..42 membawa fungsi JTAG, dan GPIO43/44 adalah UART0 default. Keduanya tetap dapat
   dipakai melalui GPIO Matrix setelah boot, tetapi bukan pilihan untuk fungsi boot-critical.
 - GPIO48 sekarang dipakai sebagai I2C SCL. Dedicated RX LED dihapus sebagai net terpisah
-  karena status RX sudah ditampilkan oleh addressable RGB LED; ini membebaskan satu GPIO
-  untuk menjaga GPIO9 sebagai spare ADC1.
+  karena status RX sudah ditampilkan oleh addressable RGB LED.
 
 ## Pin map
 
@@ -41,7 +39,7 @@ PCB dari mapping ESP32-WROOM-32E lama.
 | WM8962 DACDAT | 6 | ADC1-capable, dipakai digital I2S |
 | WM8962 ADCDAT | 7 | ADC1-capable, dipakai digital I2S |
 | MAX2016 reflected | 8 | ADC1 |
-| **Future analog sensor** | **9** | **ADC1 spare** |
+| **GNSS 1-PPS** | **9** | **digital timing input; ADC1-capable but not used as ADC** |
 | SX1262 NSS | 10 | ADC1-capable, dipakai digital CS |
 | Shared SPI MOSI | 11 | ADC2; digital-only in this design |
 | Shared SPI SCK | 12 | ADC2; digital-only in this design |
@@ -79,7 +77,7 @@ The supplied PCB has no routed PTT/SOS/battery/LED nets. Rev-C firmware assigns:
 - GPIO40: active-high haptic-driver enable
 - GPIO41: charging-indicator output (heuristic only; no charger STAT input)
 - GPIO42: TX indicator output
-- GPIO9: intentionally reserved as future ADC1 sensor input
+- GPIO9: GNSS 1-PPS timing input; not reserved for future analog devices
 - GPIO48: I2C SCL
 
 For each PTT/SOS input, populate an external 47 kOhm pulldown to GND and a
@@ -101,8 +99,8 @@ pin. This avoids making LED behavior part of the boot contract.
 ESP32-S3 ADC2 channels must not be treated as general-purpose analog inputs while Wi-Fi is
 active. The restriction is on the **ADC operation**, not on digital GPIO operation. Using
 GPIO11..18 for SPI, radio control and buttons as digital signals is valid while Wi-Fi is
-running. Future analog sensors should use the reserved GPIO9/ADC1 or an external ADC if
-more analog channels are required.
+running. Future analog sensors should use another verified ADC1 route or an external ADC;
+GPIO9 is occupied by GNSS 1-PPS.
 
 ## WM8962 analogue net contract
 
@@ -129,3 +127,22 @@ The radio remains powered while the MCU enters deep sleep and is placed into SX1
 duty-cycle mode rather than standby/sleep. A received packet asserts DIO1 and wakes the
 ESP32-S3. The duty-cycle receiver requires a sufficiently long transmitter preamble; this
 firmware uses a 32-symbol LoRa preamble and RadioLib's automatic duty-cycle timing.
+
+## GNSS 1-PPS and periodic time synchronization
+
+- NEO-M9N 1-PPS is routed to **GPIO9** and configured as a rising-edge interrupt input.
+- The PPS edge timestamp is exposed in runtime GNSS state and is considered valid for 2 seconds.
+- The system clock is synchronized from validated GNSS UTC time at boot/first valid fix and
+  at least once every 12 hours while the firmware remains running.
+- Deep sleep also arms a **12-hour RTC timer wake** so an idle device periodically boots,
+  reacquires GNSS time, and performs the same synchronization path. GPIO wake sources remain
+  available in parallel.
+- The PCB must provide a clean 3.3 V-compatible PPS signal from the GNSS module; no LED,
+  analog sensor, or external pull network should be attached to GPIO9 that can distort PPS.
+
+## I2C battery-gauge polling
+
+The MAX17048 at I2C address `0x36` is polled every 10 seconds on the shared I2C bus. A bounded
+50 ms I2C timeout and a mutex serialize access to the bus. VCELL and SOC are validated before
+they replace the ADC-derived battery state. If the gauge is absent or becomes unresponsive,
+the existing ADC1 battery measurement remains the fallback.

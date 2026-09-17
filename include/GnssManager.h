@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
+#include "GnssPps.h"
 
 class GnssManager {
 public:
@@ -9,6 +10,7 @@ public:
 private:
   TinyGPSPlus gps_;
   HardwareSerial serial_{1};
+  GnssPps pps_;
   uint64_t lastSyncEpoch_ = 0;
   uint32_t lastSyncMs_ = 0;
 };

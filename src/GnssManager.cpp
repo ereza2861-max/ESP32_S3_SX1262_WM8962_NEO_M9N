@@ -20,7 +20,7 @@ uint64_t daysFromCivil(int64_t y, unsigned m, unsigned d) {
 }
 bool GnssManager::begin() {
   serial_.begin(Board::GNSS_BAUD, SERIAL_8N1, Board::GNSS_RX, Board::GNSS_TX);
-  return true;
+  return pps_.begin(Board::GNSS_PPS);
 }
 
 void GnssManager::task() {
@@ -39,6 +39,10 @@ void GnssManager::task() {
   {
     StateLock lock(gState);
     if (!lock.ok()) return;
+    const uint32_t ppsEdgeUs = pps_.lastEdgeUs();
+    gState.gps.ppsLastEdgeUs = ppsEdgeUs;
+    gState.gps.ppsValid = ppsEdgeUs != 0U &&
+        static_cast<uint32_t>(micros() - ppsEdgeUs) <= Config::GNSS_PPS_VALID_US;
     if (gps_.location.isValid() && gps_.location.age() < Config::GNSS_STALE_MS) {
       gState.gps.valid = true;
       gState.gps.lat = gps_.location.lat();
@@ -72,7 +76,9 @@ void GnssManager::task() {
         epoch = gState.gps.utcEpoch;
         const time_t systemNow = time(nullptr);
         syncSystemTime = epoch > 1700000000ULL &&
-            (systemNow < 1700000000 || llabs(static_cast<long long>(systemNow) - static_cast<long long>(epoch)) > 2);
+            (lastSyncMs_ == 0U || systemNow < 1700000000 ||
+             llabs(static_cast<long long>(systemNow) - static_cast<long long>(epoch)) > 2 ||
+             now - lastSyncMs_ >= Config::GNSS_TIME_SYNC_PERIOD_MS);
       }
       if (now - lastTrackLogMs >= Config::TRACK_LOG_PERIOD_MS) {
         lastTrackLogMs = now;

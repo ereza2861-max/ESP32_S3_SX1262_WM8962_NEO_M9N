@@ -91,7 +91,7 @@ the existing AP provisioning path.
 - AES-GCM P2P wire version 4 is scaffolded but disabled; versions 2/3 remain
   unchanged.
 - X25519/ECDH key rotation is scaffolded only.
-- Wi-Fi STA, MQTT, BLE provisioning, MAX17048, GNSS PPS and fragment ARQ are
+- Wi-Fi STA, MQTT, BLE provisioning and fragment ARQ are
   scaffolded and not enabled by default.
 - The exact SDPPI/Komdigi deployment frequency plan must be verified against
   the current network operator and regulatory release before field TX.
