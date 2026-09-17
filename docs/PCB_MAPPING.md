@@ -2,60 +2,107 @@
 
 Mapping berikut adalah **source of truth Rev-C** untuk routing firmware ESP32-S3-WROOM-1-N16R8.
 Nilai pin harus identik dengan `include/BoardConfig.h`; jangan membuat alias pin
-alternatif di schematic/KiCad tanpa mengubah kedua dokumen dan firmware secara
-atomik. Semua net pada tabel di bawah dianggap komitmen routing Rev-C. Ini membutuhkan rerouting PCB dari mapping ESP32-WROOM-32E lama.
+alternatif di schematic/KiCad tanpa mengubah kedua dokumen dan firmware secara atomik.
+Semua net pada tabel di bawah dianggap komitmen routing Rev-C dan membutuhkan rerouting
+PCB dari mapping ESP32-WROOM-32E lama.
 
-Rev-C pin correction: I2C SDA is moved from GPIO8 to GPIO38; the microSD CS net is moved from GPIO38 to GPIO16; MAX2016 reflected detector is moved from GPIO16 to GPIO8. GPIO16 is digital-only in firmware and is never used as an ADC input.
+## Normalized GPIO policy
 
-- GPIO12/13/11: shared SPI (SCK/MISO/MOSI)
-- GPIO10: SX1262 NSS
-- GPIO17: SX1262 RESET
-- GPIO14: SX1262 DIO1 / IRQ (direct, active-high, RTC-capable)
-- GPIO18: SOS button, active-high RTC wake input
-- GPIO21: PTT button, active-high RTC wake input
-- GPIO15: SX1262 BUSY (mandatory)
-- GPIO16: microSD CS (secondary SPI chip-select; digital only)
-- GPIO38: WM8962 I2C SDA
-- GPIO9: WM8962 I2C SCL
-- GPIO4: WM8962 BCLK
-- GPIO5: WM8962 LRCLK
-- GPIO6: ESP32-S3 -> WM8962 DACDAT
-- GPIO7: WM8962 ADCDAT -> ESP32-S3
-- GPIO19/20: native USB D-/D+
-- GPIO43/44: NEO-M9N UART TX/RX (moved off RTC GPIO18 to free SOS wake)
-- external 24 MHz oscillator: WM8962 MCLK
-- GPIO1: battery ADC (ADC1)
-- GPIO2: MAX2016 forward detector ADC (ADC1)
-- GPIO8: MAX2016 reflected detector ADC (ADC1)
+- **ADC1 (GPIO1..10)** adalah domain analog utama. Semua input analog onboard tetap di
+  ADC1 agar pembacaan tidak bergantung pada konflik ADC2/Wi-Fi.
+- **GPIO9 sengaja dikosongkan** sebagai satu spare ADC1 yang aman untuk sensor analog
+  masa depan. Karena jumlah GPIO WROOM-1 yang usable terbatas, mempertahankan semua
+  fungsi audio/radio/GNSS/USB/indikator sekaligus tidak memungkinkan mengosongkan seluruh
+  GPIO3..10 tanpa menghapus atau memindahkan fungsi lain.
+- GPIO4..7 tetap dipakai I2S digital; GPIO8 dipakai MAX2016 reflected ADC; GPIO10 dipakai
+  SX1262 NSS. Jadi jangan menganggap seluruh rentang GPIO3..10 sebagai spare analog.
+- **ADC2 (GPIO11..20) aman sebagai GPIO digital saat Wi-Fi aktif**. Konfliknya berlaku
+  pada akses ADC2 sebagai *analog ADC*, bukan pada `digitalRead/digitalWrite` atau peripheral
+  digital seperti SPI. Karena itu GPIO11/12/13 untuk SPI dan GPIO14..18 untuk kontrol radio/
+  tombol tetap valid. GPIO19/20 tetap dicadangkan untuk native USB dan bukan spare ADC2.
+- GPIO0/3/45/46 adalah **strapping pins**; jangan dipakai untuk LED atau output yang dapat
+  mengubah level strap saat reset. GPIO26..37 tidak dipakai karena paket WROOM-1-N16R8
+  menggunakan jalur internal Octal Flash/PSRAM pada kelompok tersebut.
+- GPIO39..42 membawa fungsi JTAG, dan GPIO43/44 adalah UART0 default. Keduanya tetap dapat
+  dipakai melalui GPIO Matrix setelah boot, tetapi bukan pilihan untuk fungsi boot-critical.
+- GPIO48 sekarang dipakai sebagai I2C SCL. Dedicated RX LED dihapus sebagai net terpisah
+  karena status RX sudah ditampilkan oleh addressable RGB LED; ini membebaskan satu GPIO
+  untuk menjaga GPIO9 sebagai spare ADC1.
 
-Mapping Rev-C sekarang menetapkan pin fisik untuk PTT/SOS, tetapi net tersebut tetap
-harus benar-benar dirutekan pada PCB. Kontrol web/API tetap dapat digunakan sebagai
-jalur kontrol sekunder.
+## Pin map
 
+| Fungsi | GPIO | Domain / catatan |
+|---|---:|---|
+| Battery ADC | 1 | ADC1; future-ADC policy |
+| MAX2016 forward | 2 | ADC1 |
+| GPIO3 | 3 | **Spare hanya secara logika, tetapi strapping; jangan dirouting sebagai sensor/LED** |
+| WM8962 BCLK | 4 | ADC1-capable, dipakai digital I2S |
+| WM8962 LRCLK | 5 | ADC1-capable, dipakai digital I2S |
+| WM8962 DACDAT | 6 | ADC1-capable, dipakai digital I2S |
+| WM8962 ADCDAT | 7 | ADC1-capable, dipakai digital I2S |
+| MAX2016 reflected | 8 | ADC1 |
+| **Future analog sensor** | **9** | **ADC1 spare** |
+| SX1262 NSS | 10 | ADC1-capable, dipakai digital CS |
+| Shared SPI MOSI | 11 | ADC2; digital-only in this design |
+| Shared SPI SCK | 12 | ADC2; digital-only in this design |
+| Shared SPI MISO | 13 | ADC2; digital-only in this design |
+| SX1262 DIO1 / IRQ | 14 | ADC2 + RTC; active-high wake |
+| SX1262 BUSY | 15 | ADC2 + RTC; digital input |
+| microSD CS | 16 | ADC2 + RTC; digital output |
+| SX1262 RESET | 17 | ADC2 + RTC; digital output |
+| SOS button | 18 | ADC2 + RTC; active-high wake, external pulldown |
+| Native USB D- | 19 | USB; do not repurpose |
+| Native USB D+ | 20 | USB; do not repurpose |
+| PTT button | 21 | RTC; active-high wake, external pulldown |
+| GPIO26..37 | 26..37 | Reserved by WROOM-1-N16R8 flash/PSRAM; do not route |
+| WM8962 I2C SDA | 38 | GPIO Matrix I2C |
+| Addressable RGB | 39 | JTAG-capable after boot; one-wire data |
+| Haptic enable | 40 | JTAG-capable after boot; active-high driver enable |
+| Charging indicator | 41 | JTAG-capable after boot; heuristic only |
+| TX indicator | 42 | JTAG-capable after boot; dedicated |
+| GNSS TX | 43 | UART0 default pin; remapped Serial output |
+| GNSS RX | 44 | UART0 default pin; remapped Serial input |
+| GPIO45 | 45 | **Strapping; do not use for LED** |
+| GPIO46 | 46 | **Strapping; do not use for LED** |
+| I2C SCL | 48 | GPIO Matrix I2C; no dedicated RX LED |
+| Buzzer | 47 | active-high; passive buzzer requires driver/PWM as applicable |
 
-## Auxiliary field controls (required PCB reroute)
+## Auxiliary field controls
 
 The supplied PCB has no routed PTT/SOS/battery/LED nets. Rev-C firmware assigns:
 - GPIO21: PTT, active-high RTC wake input
 - GPIO18: SOS, active-high RTC wake input
-- GPIO43/44: NEO-M9N UART TX/RX after moving GNSS off GPIO18
+- GPIO43/44: NEO-M9N UART TX/RX
 - GPIO1: battery ADC input
 - GPIO47: active-high buzzer output
 - GPIO39: addressable RGB data output
 - GPIO40: active-high haptic-driver enable
 - GPIO41: charging-indicator output (heuristic only; no charger STAT input)
 - GPIO42: TX indicator output
-- GPIO48: RX indicator output
+- GPIO9: intentionally reserved as future ADC1 sensor input
+- GPIO48: I2C SCL
 
 For each PTT/SOS input, populate an external 47 kOhm pulldown to GND and a
-normally-open pushbutton to 3V3. Add a local 100 nF capacitor from the MCU input
-to GND. This is intentionally active-high; an external pullup would produce the
-opposite idle/push polarity and is not electrically consistent with active-high
-wake. The external pulldown is required for a deterministic deep-sleep state.
+normally-open pushbutton to 3V3. Add a local 100 nF capacitor from each input to GND.
+This is intentionally active-high; an external pullup would invert the idle/push polarity.
+The external pulldown is required for a deterministic deep-sleep state.
 
-PTT/SOS and the GNSS reroute are firmware-safe only if the Rev-C PCB actually
-routes these nets. Do not install this mapping onto the existing unrouted PCB.
+### Strapping LED warning
 
+Do **not** copy the proposed `GPIO46 -> TX LED` arrangement. GPIO46 is a strapping pin with
+a default weak pulldown. It can operate as a normal GPIO after reset, but an external LED
+network participates in the reset-time strap level and can also affect ROM strap behavior.
+An active-low LED tied to VCC would also naturally be driven toward **ON** during reset by
+the weak pulldown. GPIO42 is therefore retained for the TX indicator; it is not a strapping
+pin. This avoids making LED behavior part of the boot contract.
+
+### ADC2 + Wi-Fi rule
+
+ESP32-S3 ADC2 channels must not be treated as general-purpose analog inputs while Wi-Fi is
+active. The restriction is on the **ADC operation**, not on digital GPIO operation. Using
+GPIO11..18 for SPI, radio control and buttons as digital signals is valid while Wi-Fi is
+running. Future analog sensors should use the reserved GPIO9/ADC1 or an external ADC if
+more analog channels are required.
 
 ## WM8962 analogue net contract
 
@@ -69,20 +116,16 @@ The supplied PCB mapping does not contain a native KiCad netlist, so firmware lo
 
 Do not enable speaker routing until the final schematic/netlist proves `SPKOUTL/R` connectivity, load impedance, and the required Class-D power network.
 
-
 ## Deep-sleep wake contract
 
 ESP32-S3 deep-sleep wake is configured with EXT1/ANY_HIGH on GPIO14 (SX1262 DIO1),
-GPIO21 (PTT), and GPIO18 (SOS). GPIO14 is an RTC-capable, non-strapping GPIO.
-The button inputs must have external bias because internal GPIO pulls are not
-relied upon while the RTC power domain is reduced.
+GPIO21 (PTT), and GPIO18 (SOS). All three are RTC-capable and non-strapping GPIOs.
+The button inputs must have external bias because internal GPIO pulls are not relied upon
+while the RTC power domain is reduced.
 
-SX1262 DIO1 is connected directly to ESP32-S3 GPIO14. No transistor inverter is
-required: the SX1262 DIO1 interrupt is active-high and the radio/MCU logic are
-3.3 V compatible. The radio remains powered while the MCU enters deep sleep and
-is placed into SX1262 receive duty-cycle mode rather than standby/sleep. A
-received packet asserts DIO1 and wakes the ESP32-S3. The duty-cycle receiver
-requires a sufficiently long transmitter preamble; this firmware uses a
-32-symbol LoRa preamble and RadioLib's automatic duty-cycle timing. The PCB
-must provide continuous radio power, clean local decoupling, and controlled
-routing of DIO1.
+SX1262 DIO1 is connected directly to ESP32-S3 GPIO14. No transistor inverter is required:
+the SX1262 DIO1 interrupt is active-high and the radio/MCU logic are 3.3 V compatible.
+The radio remains powered while the MCU enters deep sleep and is placed into SX1262 receive
+duty-cycle mode rather than standby/sleep. A received packet asserts DIO1 and wakes the
+ESP32-S3. The duty-cycle receiver requires a sufficiently long transmitter preamble; this
+firmware uses a 32-symbol LoRa preamble and RadioLib's automatic duty-cycle timing.

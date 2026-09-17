@@ -830,11 +830,11 @@ void setup() {
   if (Board::LED_CHARGING >= 0) pinMode(Board::LED_CHARGING, OUTPUT);
   if (Board::LED_TX >= 0) pinMode(Board::LED_TX, OUTPUT);
   if (Board::LED_RX >= 0) pinMode(Board::LED_RX, OUTPUT);
-  digitalWrite(Board::BUZZER, LOW);
-  digitalWrite(Board::HAPTIC, LOW);
-  digitalWrite(Board::LED_CHARGING, LOW);
-  digitalWrite(Board::LED_TX, LOW);
-  digitalWrite(Board::LED_RX, LOW);
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
+  if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
+  if (Board::LED_CHARGING >= 0) digitalWrite(Board::LED_CHARGING, LOW);
+  if (Board::LED_TX >= 0) digitalWrite(Board::LED_TX, LOW);
+  if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, LOW);
   rgb.begin();
   rgb.clear();
   rgb.show();

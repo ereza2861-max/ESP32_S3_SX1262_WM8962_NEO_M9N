@@ -21,7 +21,7 @@
  */
 namespace Board {
 constexpr int I2C_SDA = 38;
-constexpr int I2C_SCL = 9;
+constexpr int I2C_SCL = 48;
 
 // WM8962 I2S
 // ESP32 -> WM8962: DOUT = codec DACDAT
@@ -64,6 +64,7 @@ constexpr int MAX2016_OUT_FWD = 2;
 constexpr int MAX2016_OUT_REF = 8;
 
 // External 32-KB I2C FRAM (MB85RC256V), sharing the codec I2C bus.
+// GPIO48 is a normal GPIO on ESP32-S3-WROOM-1 and is routed through the GPIO matrix.
 constexpr int FRAM_SDA = I2C_SDA;
 constexpr int FRAM_SCL = I2C_SCL;
 constexpr int BUZZER = 47;        // active-high buzzer; passive buzzer needs PWM hardware
@@ -71,7 +72,7 @@ constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
 constexpr int HAPTIC = 40;        // active-high haptic driver enable
 constexpr int LED_CHARGING = 41;  // charging-status LED; driven only from charger heuristic
 constexpr int LED_TX = 42;        // dedicated TX indicator
-constexpr int LED_RX = 48;        // dedicated RX indicator
+constexpr int LED_RX = -1;        // RX is already indicated by the addressable RGB LED; GPIO48 is reserved for I2C SCL
 constexpr int STATUS_LED = -1;    // removed: do not alias status onto another function
 
 // ESP32-S3 native USB uses GPIO19=D- and GPIO20=D+.
@@ -101,4 +102,31 @@ constexpr bool pinsUnique() {
   return true;
 }
 static_assert(pinsUnique(), "BoardConfig GPIO collision detected");
+
+// ESP32-S3-WROOM-1-N16R8 reserves GPIO26..37 for package flash/PSRAM and
+// GPIO0/3/45/46 are strapping pins. Keep the routing contract explicit so a
+// future pin-map edit cannot silently consume a boot-critical or memory pin.
+constexpr bool isForbiddenSharedPin(int pin) {
+  return pin == 0 || pin == 3 || pin == 45 || pin == 46 ||
+         (pin >= 26 && pin <= 37);
+}
+constexpr bool isRtcCapable(int pin) { return pin >= 0 && pin <= 21; }
+constexpr bool isAdc1Pin(int pin) { return pin >= 1 && pin <= 10; }
+constexpr bool isAdc2Pin(int pin) { return pin >= 11 && pin <= 20; }
+
+static_assert(isAdc1Pin(BATTERY_ADC) && isAdc1Pin(MAX2016_OUT_FWD) &&
+              isAdc1Pin(MAX2016_OUT_REF),
+              "All onboard analogue sensors must remain on ADC1");
+static_assert(isRtcCapable(LORA_DIO1) && isRtcCapable(BTN_PTT) &&
+              isRtcCapable(BTN_SOS),
+              "Deep-sleep wake sources must be RTC-capable GPIOs");
+static_assert(!isForbiddenSharedPin(LORA_DIO1) &&
+              !isForbiddenSharedPin(BTN_PTT) &&
+              !isForbiddenSharedPin(BTN_SOS),
+              "Wake GPIO must not use a strapping or flash/PSRAM pin");
+static_assert(USB_D_MINUS == 19 && USB_D_PLUS == 20,
+              "Native USB D-/D+ routing is fixed to GPIO19/GPIO20");
+static_assert(isAdc2Pin(SPI_SCK) && isAdc2Pin(SPI_MISO) &&
+              isAdc2Pin(SPI_MOSI),
+              "Shared SPI pins are intentionally digital ADC2 GPIOs");
 }

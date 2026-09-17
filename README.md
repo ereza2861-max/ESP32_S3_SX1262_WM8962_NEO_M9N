@@ -22,15 +22,27 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 | SX1262 RESET | 17 |
 | SX1262 DIO1 / IRQ | 14 |
 | SX1262 BUSY | 15 |
-| microSD CS | 38 |
+| microSD CS | 16 |
 | GNSS RX | 44 |
 | GNSS TX | 43 |
-| WM8962 SDA | 8 |
-| WM8962 SCL | 9 |
+| WM8962 SDA | 38 |
+| WM8962 SCL | 48 |
 | WM8962 BCLK | 4 |
 | WM8962 LRCLK | 5 |
 | WM8962 DACDAT / ESP32-S3 TX | 6 |
 | WM8962 ADCDAT / ESP32-S3 RX | 7 |
+| Battery ADC | 1 |
+| MAX2016 forward ADC | 2 |
+| MAX2016 reflected ADC | 8 |
+| Future ADC1 sensor spare | 9 |
+| PTT | 21 |
+| SOS | 18 |
+| TX indicator LED | 42 |
+| Addressable RGB | 39 |
+| Haptic | 40 |
+| Charging indicator | 41 |
+| Buzzer | 47 |
+| Native USB D-/D+ | 19 / 20 |
 | WM8962 MCLK | external 24 MHz oscillator |
 
 ## Fitur
@@ -45,7 +57,7 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 - Basic-auth untuk endpoint web.
 - Safe path validation untuk file deletion/playback.
 - FreeRTOS task separation.
-- Physical PTT/SOS, battery ADC, status LED, RX squelch and RX/TX audio feedback.
+- Physical PTT/SOS, battery ADC, addressable RGB status, TX indicator, RX status through RGB, RX squelch and RX/TX audio feedback.
 - Authenticated AES-128-CTR + HMAC-SHA256 LoRa payloads with voice sequence/CRC.
 - SD track logging and recording-space rotation.
 - Rate-limited web control and authenticated reboot transport.

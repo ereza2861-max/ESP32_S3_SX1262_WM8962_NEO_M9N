@@ -10,9 +10,9 @@ item in the requested backlog.
 
 The requested GPIO39..42 block plus GPIO47/48 is electrically usable as general GPIO on ESP32-S3.
 GPIO0/3/45/46 are strapping pins and GPIO33..37 may be consumed by flash/PSRAM, so
-neither group is used for the new outputs. GPIO39..42 also carry JTAG functions; they
-are safe as normal GPIO after boot but cannot simultaneously be used for an active
-JTAG debug connection.
+neither group is used for the new outputs. GPIO39..42 also carry JTAG functions; they are usable as normal GPIO after boot, but
+they cannot simultaneously serve as an active JTAG debug connection. GPIO46 is deliberately
+not used for an LED because it is a strapping pin.
 
 The firmware allocation is:
 
@@ -23,19 +23,20 @@ The firmware allocation is:
 | Haptic | 40 | active-high driver enable; do not drive a motor directly from GPIO |
 | Charging LED | 41 | charge-probable heuristic only; no charger STAT input is defined |
 | TX LED | 42 | dedicated |
-| RX LED | 48 | dedicated |
+| RX LED | — | Dedicated RX LED removed; RX is already represented by the addressable RGB status LED so GPIO48 can be reserved for I2C SCL. |
 | PTT | 21 | active-high RTC wake input; external pulldown required |
+| Future ADC1 sensor | 9 | intentionally reserved spare ADC1 channel |
 | SOS | 18 | active-high RTC wake input; external pulldown required |
 | Battery ADC | 1 | ADC1 routed input |
 | MAX2016 forward | 2 | ADC1 |
 | MAX2016 reflected | 8 | ADC1 |
 
-GPIO43/44 are intentionally not used because they are the default UART0 TX/RX pins.
+GPIO43/44 are used for GNSS despite being the default UART0 TX/RX pins; this is a deliberate GPIO-Matrix/UART routing choice.
 
 ## Implemented in this patch
 
 - compile-time GPIO collision detection;
-- independent TX/RX indicators;
+- TX indicator plus RGB-based RX status; no dedicated RX LED net;
 - addressable RGB status indication;
 - haptic/buzzer feedback for physical PTT/SOS;
 - battery sample/cycle counters persisted in encrypted NVS when NVS encryption is provisioned;
