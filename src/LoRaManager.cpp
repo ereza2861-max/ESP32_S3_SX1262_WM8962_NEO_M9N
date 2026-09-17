@@ -6,6 +6,7 @@
 #include "AudioManager.h"
 #include "Telemetry.h"
 #include "StorageManager.h"
+#include "RadioArbiter.h"
 #include <esp_system.h>
 #include <Preferences.h>
 #include <mbedtls/aes.h>
@@ -252,6 +253,11 @@ bool LoRaManager::nextTxSequence(uint16_t& seq) {
 
 int8_t LoRaManager::effectiveTxPowerDbm() const {
   int8_t configured = gConfig.loraPowerDbm;
+  {
+    StateLock lock(gState);
+    if (lock.ok() && gState.brownoutReset && millis() < 60000UL)
+      configured = min<int8_t>(configured, static_cast<int8_t>(Config::BATTERY_TX_POWER_LOW_DBM));
+  }
   float battery = NAN;
   bool low = false, critical = false;
   {
@@ -2016,6 +2022,48 @@ bool LoRaManager::sendSosAck(uint16_t ackedSeq, uint32_t ackedSourceId) {
   return transmit(packet, true);
 }
 
+void LoRaManager::suspendForLoRaWAN() {
+  if (suspendedForLoRaWAN_.exchange(true, std::memory_order_acq_rel)) return;
+  if (!mutex_) return;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return;
+  ready_ = false;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(100));
+    if (spiLock.ok()) (void)radio_.sleep();
+  }
+  StateLock lock(gState);
+  if (lock.ok()) gState.loraReady = false;
+  xSemaphoreGive(mutex_);
+}
+
+bool LoRaManager::resumeFromLoRaWAN() {
+  if (!mutex_) return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+  bool ok = false;
+  {
+    SpiLock spiLock(pdMS_TO_TICKS(500));
+    if (spiLock.ok()) {
+      const int16_t st = radio_.begin(
+          gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
+          gConfig.loraCr, gConfig.loraSyncWord, effectiveTxPowerDbm(),
+          Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
+      if (st == RADIOLIB_ERR_NONE) {
+        radio_.setPacketReceivedAction(onDio1);
+        ok = radio_.startReceive() == RADIOLIB_ERR_NONE;
+      }
+    }
+  }
+  ready_ = ok;
+  suspendedForLoRaWAN_.store(false, std::memory_order_release);
+  StateLock lock(gState);
+  if (lock.ok()) {
+    gState.loraReady = ok;
+    if (!ok) gState.lastError = "Failed to resume P2P radio after LoRaWAN";
+  }
+  xSemaphoreGive(mutex_);
+  return ok;
+}
+
 bool LoRaManager::begin() {
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
@@ -2139,7 +2187,9 @@ void LoRaManager::serviceVoiceReorder() {
 }
 
 void LoRaManager::task() {
-  if (!mutex_) return;
+  if (!mutex_ || suspendedForLoRaWAN_.load(std::memory_order_acquire)) return;
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, 0);
+  if (!radioGuard.ok()) return;
   if (adrEnabled_ && millis() - lastAdrMs_ >= Config::ADR_REEVALUATE_MS) {
     lastAdrMs_ = millis();
     serviceAdr();
@@ -2996,6 +3046,8 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
 }
 
 bool LoRaManager::prepareForFactoryReset() {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
+  if (!radioGuard.ok()) return false;
   if (!mutex_) return false;
   storageResetting_.store(true, std::memory_order_release);
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
@@ -3022,6 +3074,8 @@ void LoRaManager::cancelFactoryReset() {
 }
 
 bool LoRaManager::prepareForDeepSleep() {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
+  if (!radioGuard.ok()) return false;
   rtcRadioState.magic = RTC_RADIO_MAGIC;
   rtcRadioState.hopFrame = hopFrame_;
   rtcRadioState.sosSeq = sosSeq_.load(std::memory_order_acquire);
@@ -3619,6 +3673,8 @@ void LoRaManager::updateSourceId() {
 }
 
 bool LoRaManager::applyConfig() {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
+  if (!radioGuard.ok()) return false;
   if (!mutex_) return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
 
@@ -3650,10 +3706,14 @@ bool LoRaManager::applyConfig() {
 }
 
 bool LoRaManager::sendText(const String& text) {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
+  if (!radioGuard.ok()) return false;
   return sendTextTo(0, text);
 }
 
 bool LoRaManager::sendTextTo(uint32_t destination, const String& text) {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
+  if (!radioGuard.ok()) return false;
   if (text.isEmpty()) return false;
   if (!textStateMutex_ ||
       xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
@@ -3669,6 +3729,8 @@ bool LoRaManager::sendTextTo(uint32_t destination, const String& text) {
 }
 
 bool LoRaManager::sendVoiceFrame() {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
+  if (!radioGuard.ok()) return false;
   if (!ready_ || voiceTxOutstanding_ >= Config::LORA_VOICE_WINDOW_SIZE)
     return false;
 
@@ -4257,6 +4319,8 @@ bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination)
 }
 
 bool LoRaManager::sendPosition() {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
+  if (!radioGuard.ok()) return false;
   double lat, lon, alt;
   uint32_t sat;
   {
@@ -4273,6 +4337,8 @@ bool LoRaManager::sendPosition() {
 }
 
 bool LoRaManager::sendSOS() {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
+  if (!radioGuard.ok()) return false;
   if (sosAwaitingAck_ && millis() - sosSentMs_ < Config::SOS_REPEAT_MS)
     return false;
   {
@@ -4372,6 +4438,8 @@ bool LoRaManager::cancelSOS() {
 }
 
 bool LoRaManager::manualTune(float freqMHz) {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
+  if (!radioGuard.ok()) return false;
   if (!isfinite(freqMHz) || freqMHz < Config::LORA_MIN_FREQ_MHZ ||
       freqMHz > Config::LORA_MAX_FREQ_MHZ || !mutex_) return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(500)) != pdTRUE) return false;

@@ -4,6 +4,7 @@
 #include "AppState.h"
 #include "StorageManager.h"
 #include "LoRaManager.h"
+#include "LoRaWANManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
 #include <cstring>
@@ -21,6 +22,7 @@
 #endif
 #include <esp_system.h>
 #include <nvs_flash.h>
+#include <ctype.h>
 
 static String jsonEscape(const String& input) {
   String out;
@@ -261,6 +263,7 @@ static bool eraseStorageTree(const char* path) {
 
 extern StorageManager storage;
 extern LoRaManager lora;
+extern LoRaWANManager lorawan;
 extern AudioManager audio;
 
 static const char INDEX_HTML[] PROGMEM = R"HTML(
@@ -300,6 +303,20 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <button onclick="replyMessage()">Reply</button></div>
 <div class=card><input id=file value="/REC/">
 <button onclick="play()">Play WAV</button></div>
+<div class=card><h3>LoRaWAN</h3>
+<label>Region <select id=lwRegion><option value="0">AS923-1</option><option value="1" selected>AS923-2 (Indonesia)</option><option value="2">AS923-3</option><option value="3">AS923-4</option></select></label>
+<label>Mode <select id=lwMode><option value="0">OTAA</option><option value="1">ABP</option></select></label>
+<input id=lwDevEui placeholder="DevEUI 16 hex">
+<input id=lwJoinEui placeholder="JoinEUI 16 hex (OTAA)">
+<input id=lwAppKey placeholder="AppKey 32 hex (OTAA)" type=password>
+<input id=lwDevAddr placeholder="DevAddr 8 hex (ABP)">
+<input id=lwNwkSKey placeholder="NwkSKey 32 hex (ABP)" type=password>
+<input id=lwAppSKey placeholder="AppSKey 32 hex (ABP)" type=password>
+<input id=lwFPort type=number min=1 max=223 value=1 placeholder="FPort">
+<input id=lwPeriod type=number min=30 max=86400 value=300 placeholder="Uplink period seconds">
+<button onclick="saveLw()">Save LoRaWAN</button><button onclick="lwConnect()">Connect</button><button onclick="lwDisconnect()">Disconnect</button>
+<button onclick="lwUplink()">Kirim Uplink Test</button><textarea id=lwPayload maxlength=51 placeholder="Payload text or hex via prefix hex:"></textarea>
+<pre id=lwStatus></pre></div>
 <div class=card><h3>Configuration</h3>
 <input id=freq value="923" placeholder="Freq MHz"><input id=bw value="125" placeholder="BW kHz">
 <input id=sf value="7" placeholder="SF"><input id=cr value="5" placeholder="CR 5-8">
@@ -547,8 +564,32 @@ async function refreshHop(){
       ' dwell='+h.dwellMs+'ms channels=['+h.channels.join(',')+']';
   }catch(e){}
 }
+async function refreshLw(){
+  try{
+    const x=await (await fetch('/api/lorawan/status')).json();
+    lwStatus.textContent=JSON.stringify(x,null,2);
+    if(x.region!==undefined)lwRegion.value=String(x.region);
+    if(x.mode!==undefined)lwMode.value=String(x.mode);
+  }catch(e){}
+}
+async function saveLw(){
+  const q=new URLSearchParams({enabled:'1',region:lwRegion.value,mode:lwMode.value,
+    deveui:lwDevEui.value,joineui:lwJoinEui.value,appkey:lwAppKey.value,
+    devaddr:lwDevAddr.value,nwkskey:lwNwkSKey.value,appskey:lwAppSKey.value,
+    fport:lwFPort.value,period:lwPeriod.value});
+  alert(await j('/api/lorawan/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q}));
+  refreshLw();
+}
+async function lwConnect(){toast(await j('/api/lorawan/connect',{method:'POST'}));refreshLw()}
+async function lwDisconnect(){toast(await j('/api/lorawan/disconnect',{method:'POST'}));refreshLw()}
+async function lwUplink(){
+  const v=lwPayload.value||'';
+  const q=v.startsWith('hex:')?new URLSearchParams({hex:v.substring(4)}):new URLSearchParams({text:v});
+  toast(await j('/api/lorawan/uplink',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q}));
+  refreshLw();
+}
 setInterval(refresh,1000);syncSource();refresh();refreshMessages();refreshRadioHistory();refreshSosHistory()
-setInterval(refreshScan,3000);setInterval(refreshHop,3000);setInterval(refreshMessages,2000);setInterval(refreshRadioHistory,3000);refreshScan();refreshHop()
+setInterval(refreshLw,2000);refreshLw();setInterval(refreshScan,3000);setInterval(refreshHop,3000);setInterval(refreshMessages,2000);setInterval(refreshRadioHistory,3000);refreshScan();refreshHop()
 </script></body></html>)HTML";
 
 bool WebUi::sameOrigin() {
@@ -810,6 +851,11 @@ void WebUi::begin() {
   server_.on("/", HTTP_GET, [this]{ if (auth()) handleRoot(); });
   server_.on("/api/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
   server_.on("/api/v1/status", HTTP_GET, [this]{ if (auth()) handleStatus(); });
+  server_.on("/api/lorawan/status", HTTP_GET, [this]{ if (auth()) handleLoRaWANStatus(); });
+  server_.on("/api/lorawan/connect", HTTP_POST, [this]{ if (auth()) handleLoRaWANConnect(); });
+  server_.on("/api/lorawan/disconnect", HTTP_POST, [this]{ if (auth()) handleLoRaWANDisconnect(); });
+  server_.on("/api/lorawan/config", HTTP_POST, [this]{ if (auth()) handleLoRaWANConfig(); });
+  server_.on("/api/lorawan/uplink", HTTP_POST, [this]{ if (auth()) handleLoRaWANUplink(); });
   server_.on("/api/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
   server_.on("/api/v1/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
   server_.on("/api/v1/csrf", HTTP_GET, [this]{ if (auth()) server_.send(200, "application/json", "{\"token\":\"" + csrfTokenHex_ + "\"}"); });
@@ -1078,6 +1124,178 @@ void WebUi::handleStatus() {
   j += "}";
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", j);
+}
+
+void WebUi::handleLoRaWANStatus() {
+  StateLock lock(gState);
+  if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
+  String j = "{\"enabled\":" + String(gConfig.lorawanEnabled ? "true" : "false") +
+             ",\"mode\":" + String(gConfig.lorawanMode) +
+             ",\"region\":" + String(static_cast<uint8_t>(lorawan.regionalProfile())) +
+             ",\"state\":" + String(static_cast<uint8_t>(lorawan.state())) +
+             ",\"joined\":" + String(lorawan.isJoined() ? "true" : "false") +
+             ",\"joining\":" + String(lorawan.isJoining() ? "true" : "false") +
+             ",\"rssi\":" + String(lorawan.lastRssi()) +
+             ",\"snr\":" + String(lorawan.lastSnr(), 1) +
+             ",\"uplinkCount\":" + String(lorawan.uplinkCount()) +
+             ",\"downlinkCount\":" + String(lorawan.downlinkCount()) +
+             ",\"joinRetryCount\":" + String(lorawan.joinRetryCount()) +
+             ",\"lastJoinMs\":" + String(lorawan.lastJoinAttemptMs()) +
+             ",\"devEuiMasked\":\"" + jsonEscape(gState.lorawanDevEuiMasked) +
+             "\",\"error\":\"" + jsonEscape(lorawan.lastError()) + "\"}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+void WebUi::handleLoRaWANConnect() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const bool ok = gConfig.lorawanMode == 0 ? lorawan.connectOTAA() : lorawan.connectABP();
+  server_.send(ok ? 202 : 400, "text/plain", ok ? "LoRaWAN connect requested" : "LoRaWAN connect rejected");
+}
+
+void WebUi::handleLoRaWANDisconnect() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const bool ok = lorawan.disconnect();
+  server_.send(ok ? 202 : 400, "text/plain", ok ? "LoRaWAN disconnect requested" : "LoRaWAN disconnect rejected");
+}
+
+void WebUi::handleLoRaWANConfig() {
+  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  RuntimeConfig candidate = gConfig;
+
+  auto hexField = [](const String& v, size_t n) {
+    if (v.length() != n) return false;
+    for (size_t i = 0; i < v.length(); ++i) {
+      const char c = v[i];
+      if (!isxdigit(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+  };
+  auto parseU32 = [](const String& raw, uint32_t maxValue, uint32_t& out) {
+    if (raw.isEmpty() || raw.length() > 10) return false;
+    uint32_t value = 0;
+    for (size_t i = 0; i < raw.length(); ++i) {
+      if (raw[i] < '0' || raw[i] > '9') return false;
+      const uint32_t digit = static_cast<uint32_t>(raw[i] - '0');
+      if (value > (maxValue - digit) / 10U) return false;
+      value = value * 10U + digit;
+    }
+    out = value;
+    return true;
+  };
+
+  if (server_.hasArg("enabled")) {
+    const String v = server_.arg("enabled");
+    if (v != "0" && v != "1") { server_.send(400, "text/plain", "invalid enabled"); return; }
+    candidate.lorawanEnabled = v == "1";
+  }
+  if (server_.hasArg("mode")) {
+    uint32_t v = 0;
+    if (!parseU32(server_.arg("mode"), 1, v)) { server_.send(400, "text/plain", "invalid mode"); return; }
+    candidate.lorawanMode = static_cast<uint8_t>(v);
+  }
+  if (server_.hasArg("region")) {
+    uint32_t v = 0;
+    if (!parseU32(server_.arg("region"), 3, v)) { server_.send(400, "text/plain", "invalid region"); return; }
+    candidate.lorawanRegion = static_cast<uint8_t>(v);
+  }
+  if (server_.hasArg("deveui")) candidate.lorawanDevEui = server_.arg("deveui");
+  if (server_.hasArg("joineui")) candidate.lorawanJoinEui = server_.arg("joineui");
+  if (server_.hasArg("appkey")) candidate.lorawanAppKey = server_.arg("appkey");
+  if (server_.hasArg("nwkskey")) candidate.lorawanNwkSKey = server_.arg("nwkskey");
+  if (server_.hasArg("appskey")) candidate.lorawanAppSKey = server_.arg("appskey");
+
+  if (server_.hasArg("devaddr")) {
+    const String raw = server_.arg("devaddr");
+    if (!hexField(raw, 8)) { server_.send(400, "text/plain", "invalid DevAddr"); return; }
+    for (size_t i = 0; i < 4; ++i) {
+      auto n = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      const int hi = n(raw[i * 2]), lo = n(raw[i * 2 + 1]);
+      if (hi < 0 || lo < 0) { server_.send(400, "text/plain", "invalid DevAddr"); return; }
+      candidate.lorawanDevAddr[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+  }
+  if (server_.hasArg("fport")) {
+    uint32_t v = 0;
+    if (!parseU32(server_.arg("fport"), 223, v) || v == 0) {
+      server_.send(400, "text/plain", "invalid FPort"); return;
+    }
+    candidate.lorawanFPort = static_cast<uint8_t>(v);
+  }
+  if (server_.hasArg("period")) {
+    uint32_t v = 0;
+    if (!parseU32(server_.arg("period"), 86400, v) || v == 0) {
+      server_.send(400, "text/plain", "invalid period"); return;
+    }
+    candidate.lorawanUplinkPeriodSec = static_cast<uint16_t>(min<uint32_t>(v, 65535U));
+  }
+
+  if (candidate.lorawanEnabled) {
+    if (!hexField(candidate.lorawanDevEui, 16) ||
+        (candidate.lorawanMode == 0 &&
+         (!hexField(candidate.lorawanJoinEui, 16) || !hexField(candidate.lorawanAppKey, 32))) ||
+        (candidate.lorawanMode == 1 &&
+         (!hexField(candidate.lorawanNwkSKey, 32) || !hexField(candidate.lorawanAppSKey, 32)))) {
+      server_.send(400, "text/plain", "invalid LoRaWAN credentials"); return;
+    }
+  }
+  if (!candidate.validLoRaWAN()) {
+    server_.send(400, "text/plain", "invalid LoRaWAN configuration"); return;
+  }
+
+  const RuntimeConfig previous = gConfig;
+  const bool wasJoined = lorawan.isJoined();
+  if (wasJoined) (void)lorawan.disconnect();
+  gConfig = candidate;
+  if (!gConfig.save()) {
+    gConfig = previous;
+    server_.send(503, "text/plain", "NVS save failed");
+    return;
+  }
+  lorawan.setRegionalProfile(static_cast<RegionalProfile>(gConfig.lorawanRegion));
+  if (!gConfig.lorawanEnabled) (void)lorawan.disconnect();
+  auditConfigChange(previous, gConfig, "lorawan-web");
+  server_.send(200, "text/plain", "LoRaWAN configuration saved");
+}
+
+void WebUi::handleLoRaWANUplink() {
+  if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String text = server_.arg("text");
+  const String raw = server_.arg("hex");
+  uint8_t payload[Config::LORAWAN_MAX_PAYLOAD] = {};
+  size_t len = 0;
+  if (!raw.isEmpty()) {
+    if ((raw.length() & 1U) || raw.length() > Config::LORAWAN_MAX_PAYLOAD * 2U) {
+      server_.send(400, "text/plain", "invalid hex payload"); return;
+    }
+    auto n = [](char c) -> int {
+      if (c >= '0' && c <= '9') return c - '0';
+      if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+      if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+      return -1;
+    };
+    for (size_t i = 0; i < raw.length() / 2; ++i) {
+      const int hi = n(raw[i * 2]), lo = n(raw[i * 2 + 1]);
+      if (hi < 0 || lo < 0) { server_.send(400, "text/plain", "invalid hex payload"); return; }
+      payload[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    len = raw.length() / 2;
+  } else {
+    if (text.isEmpty() || text.length() > Config::LORAWAN_MAX_PAYLOAD) {
+      server_.send(400, "text/plain", "invalid text payload"); return;
+    }
+    memcpy(payload, text.c_str(), text.length());
+    len = text.length();
+  }
+  const String confirmed = server_.arg("confirmed");
+  const bool isConfirmed = confirmed == "1";
+  const bool ok = lorawan.sendUplink(gConfig.lorawanFPort, payload, len, isConfirmed);
+  server_.send(ok ? 202 : 409, "text/plain", ok ? "uplink queued" : "uplink rejected");
 }
 
 void WebUi::handleFiles() { const String dir = server_.arg("dir"); server_.send(200, "application/json", storage.listJson(dir.isEmpty() ? "/REC" : dir)); }

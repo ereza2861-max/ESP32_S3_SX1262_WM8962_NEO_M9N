@@ -42,6 +42,7 @@ struct HealthLogEntry {
   uint32_t loraStackMin = 0;
   uint32_t audioStackMin = 0;
   uint32_t webStackMin = 0;
+  uint32_t lorawanStackMin = 0;
   uint32_t heapLargestFree = 0;
   uint32_t bootCount = 0;
   uint32_t wakeupCause = 0;
@@ -76,6 +77,20 @@ struct RuntimeState {
   bool usbAudioReady = false;
   bool usbAudioActive = false;
   bool loraReady = false;
+  bool lorawanReady = false;
+  bool lorawanJoined = false;
+  bool lorawanJoining = false;
+  uint8_t lorawanState = 0;
+  uint32_t lorawanUplinkCount = 0;
+  uint32_t lorawanDownlinkCount = 0;
+  int16_t lorawanRssi = -127;
+  float lorawanSnr = -20.0f;
+  uint32_t lorawanJoinRetryCount = 0;
+  uint32_t lorawanLastJoinMs = 0;
+  uint8_t lorawanRegion = Config::LORAWAN_REGION_DEFAULT;
+  uint8_t lorawanDataRate = 0;
+  String lorawanLastError;
+  String lorawanDevEuiMasked;
   bool rxActive = false;
   uint32_t rxActivityMs = 0;
   int16_t loraRssi = -127;
@@ -139,7 +154,7 @@ struct RuntimeState {
   uint32_t voiceDrops = 0;
   uint32_t voiceRxLost = 0;
   uint32_t healthAlerts = 0;
-  uint32_t wdtResetCounts[4] = {}; // GNSS, LoRa, Audio, Web watchdog-feed counts
+  uint32_t wdtResetCounts[5] = {}; // GNSS, LoRa, Audio, Web, LoRaWAN watchdog-feed counts
   uint16_t sosSeq = 0;
   bool sosAcked = false;
   uint8_t sosRetries = 0;
@@ -176,6 +191,7 @@ struct RuntimeState {
   uint32_t loraStackMin = 0;
   uint32_t gnssStackMin = 0;
   uint32_t webStackMin = 0;
+  uint32_t lorawanStackMin = 0;
   uint32_t heapLargestFree = 0;
   uint32_t bootCount = 0;
   uint32_t wakeupCause = 0;

@@ -19,7 +19,18 @@ struct RuntimeConfig {
   String webPassword;                 // runtime-only plaintext; never persisted
   String webPasswordSaltHex;           // persisted credential salt
   String webPasswordHashHex;           // persisted credential hash
-  uint8_t audioRecordQuality = 2;      // 0=low 8k mono, 1=medium 16k mono, 2=high 44.1k stereo
+  uint8_t audioRecordQuality = 2;
+  bool lorawanEnabled = false;
+  uint8_t lorawanMode = 0;
+  uint8_t lorawanRegion = Config::LORAWAN_REGION_DEFAULT;
+  String lorawanDevEui;
+  String lorawanJoinEui;
+  String lorawanAppKey;
+  String lorawanNwkSKey;
+  String lorawanAppSKey;
+  uint8_t lorawanDevAddr[4] = {};
+  uint8_t lorawanFPort = Config::LORAWAN_DEFAULT_FPORT;
+  uint16_t lorawanUplinkPeriodSec = Config::LORAWAN_UPLINK_PERIOD_SEC_DEFAULT;      // 0=low 8k mono, 1=medium 16k mono, 2=high 44.1k stereo
 
   void load();
   bool migrate();
@@ -27,6 +38,7 @@ struct RuntimeConfig {
   bool setRadio(float freqMHz, float bwKHz, uint8_t sf, uint8_t cr,
                 uint8_t syncWord, int8_t powerDbm);
   bool validRadio() const;
+  bool validLoRaWAN() const;
   bool webPasswordConfigured() const;
   bool verifyWebPassword(const String& password) const;
 };

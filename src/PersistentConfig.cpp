@@ -110,6 +110,16 @@ bool validHexKey(const String& value) {
   return true;
 }
 
+bool validHexString(const String& value, size_t length) {
+  if (value.length() != length) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}
+
 bool validCallsign(const String& value) {
   if (value.isEmpty() || value.length() > 16) return false;
   for (size_t i = 0; i < value.length(); ++i) {
@@ -130,6 +140,24 @@ bool RuntimeConfig::validRadio() const {
          loraSf >= 5 && loraSf <= 12 &&
          loraCr >= 5 && loraCr <= 8 &&
          loraPowerDbm >= 2 && loraPowerDbm <= 17;
+}
+
+bool RuntimeConfig::validLoRaWAN() const {
+  if (lorawanMode > 1 || lorawanRegion > 3 ||
+      lorawanFPort == 0 || lorawanFPort > 223 ||
+      lorawanUplinkPeriodSec == 0)
+    return false;
+  if (!lorawanEnabled) return true;
+  if (!validHexString(lorawanDevEui, 16)) return false;
+  if (lorawanMode == 0) {
+    return validHexString(lorawanJoinEui, 16) &&
+           validHexString(lorawanAppKey, 32);
+  }
+  bool nonZeroAddr = false;
+  for (uint8_t b : lorawanDevAddr) nonZeroAddr |= b != 0;
+  return nonZeroAddr &&
+         validHexString(lorawanNwkSKey, 32) &&
+         validHexString(lorawanAppSKey, 32);
 }
 
 void RuntimeConfig::load() {
@@ -155,6 +183,19 @@ void RuntimeConfig::load() {
   const String webPasswordSaltValue = prefs.getString("websalt", "");
   const String webPasswordHashValue = prefs.getString("webph", "");
   const uint8_t savedRecordQuality = prefs.getUChar("recqual", audioRecordQuality);
+  const bool savedLwEnabled = prefs.getBool("lw_enabled", lorawanEnabled);
+  const uint8_t savedLwMode = prefs.getUChar("lw_mode", lorawanMode);
+  const uint8_t savedLwRegion = prefs.getUChar("lw_region", lorawanRegion);
+  const String savedLwDevEui = prefs.getString("lw_deveui", lorawanDevEui);
+  const String savedLwJoinEui = prefs.getString("lw_joineui", lorawanJoinEui);
+  const String savedLwAppKey = prefs.getString("lw_appkey", lorawanAppKey);
+  const String savedLwNwkSKey = prefs.getString("lw_nwkskey", lorawanNwkSKey);
+  const String savedLwAppSKey = prefs.getString("lw_appskey", lorawanAppSKey);
+  uint8_t savedLwDevAddr[sizeof(lorawanDevAddr)] = {};
+  if (prefs.getBytes("lw_devaddr", savedLwDevAddr, sizeof(savedLwDevAddr)) != sizeof(savedLwDevAddr))
+    memcpy(savedLwDevAddr, lorawanDevAddr, sizeof(savedLwDevAddr));
+  const uint8_t savedLwFPort = prefs.getUChar("lw_fport", lorawanFPort);
+  const uint16_t savedLwPeriod = prefs.getUShort("lw_period", lorawanUplinkPeriodSec);
   prefs.end();
 
   RuntimeConfig candidate = *this;
@@ -176,6 +217,17 @@ void RuntimeConfig::load() {
   candidate.webPasswordSaltHex = webPasswordSaltValue;
   candidate.webPasswordHashHex = webPasswordHashValue;
   candidate.audioRecordQuality = savedRecordQuality;
+  candidate.lorawanEnabled = savedLwEnabled;
+  candidate.lorawanMode = savedLwMode;
+  candidate.lorawanRegion = savedLwRegion;
+  candidate.lorawanDevEui = savedLwDevEui;
+  candidate.lorawanJoinEui = savedLwJoinEui;
+  candidate.lorawanAppKey = savedLwAppKey;
+  candidate.lorawanNwkSKey = savedLwNwkSKey;
+  candidate.lorawanAppSKey = savedLwAppSKey;
+  memcpy(candidate.lorawanDevAddr, savedLwDevAddr, sizeof(candidate.lorawanDevAddr));
+  candidate.lorawanFPort = savedLwFPort;
+  candidate.lorawanUplinkPeriodSec = savedLwPeriod;
 
   if (candidate.validRadio()) {
     loraFreqMHz = candidate.loraFreqMHz;
@@ -199,6 +251,19 @@ void RuntimeConfig::load() {
   if (validCredential(candidate.apSsid, 32)) apSsid = candidate.apSsid;
   if (candidate.apPassword.length() <= 63) apPassword = candidate.apPassword;
   if (validCredential(candidate.webUser, 32)) webUser = candidate.webUser;
+  if (candidate.validLoRaWAN()) {
+    lorawanEnabled = candidate.lorawanEnabled;
+    lorawanMode = candidate.lorawanMode;
+    lorawanRegion = candidate.lorawanRegion;
+    lorawanDevEui = candidate.lorawanDevEui;
+    lorawanJoinEui = candidate.lorawanJoinEui;
+    lorawanAppKey = candidate.lorawanAppKey;
+    lorawanNwkSKey = candidate.lorawanNwkSKey;
+    lorawanAppSKey = candidate.lorawanAppSKey;
+    memcpy(lorawanDevAddr, candidate.lorawanDevAddr, sizeof(lorawanDevAddr));
+    lorawanFPort = candidate.lorawanFPort;
+    lorawanUplinkPeriodSec = candidate.lorawanUplinkPeriodSec;
+  }
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
   uint8_t passwordSaltCheck[PASSWORD_SALT_BYTES] = {};
   if (hexDecode(candidate.webPasswordSaltHex, passwordSaltCheck, sizeof(passwordSaltCheck)) &&
@@ -227,6 +292,7 @@ bool RuntimeConfig::save() const {
   if (!validRadio() || volume > 100 || audioRecordSource > Config::AUDIO_SOURCE_USB ||
       !isfinite(batteryCalibration) ||
       batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
+      !validLoRaWAN() ||
 !validCallsign(callsign) || !validHexKey(loraKeyHex) || apSsid.isEmpty() || apSsid.length() > 32 ||
       apPassword.length() < 8 || apPassword.length() > 63 ||
       webUser.isEmpty() || webUser.length() > 32 ||
@@ -249,7 +315,19 @@ bool RuntimeConfig::save() const {
             prefs.putString("lorakey", loraKeyHex) > 0 &&
             prefs.putString("apssid", apSsid) > 0 &&
             prefs.putString("appass", apPassword) > 0 &&
-            prefs.putString("webuser", webUser) > 0;
+            prefs.putString("webuser", webUser) > 0 &&
+            prefs.putUChar("recqual", audioRecordQuality) > 0 &&
+            prefs.putBool("lw_enabled", lorawanEnabled) &&
+            prefs.putUChar("lw_mode", lorawanMode) > 0 &&
+            prefs.putUChar("lw_region", lorawanRegion) > 0 &&
+            prefs.putString("lw_deveui", lorawanDevEui) > 0 &&
+            prefs.putString("lw_joineui", lorawanJoinEui) > 0 &&
+            prefs.putString("lw_appkey", lorawanAppKey) > 0 &&
+            prefs.putString("lw_nwkskey", lorawanNwkSKey) > 0 &&
+            prefs.putString("lw_appskey", lorawanAppSKey) > 0 &&
+            prefs.putBytes("lw_devaddr", lorawanDevAddr, sizeof(lorawanDevAddr)) == sizeof(lorawanDevAddr) &&
+            prefs.putUChar("lw_fport", lorawanFPort) > 0 &&
+            prefs.putUShort("lw_period", lorawanUplinkPeriodSec) > 0;
   if (ok) {
     uint8_t salt[PASSWORD_SALT_BYTES] = {};
     uint8_t hash[32] = {};

@@ -38,6 +38,11 @@ private:
   String selfTestResult_;
   void handleRoot();
   void handleStatus();
+  void handleLoRaWANStatus();
+  void handleLoRaWANConnect();
+  void handleLoRaWANDisconnect();
+  void handleLoRaWANConfig();
+  void handleLoRaWANUplink();
   void handleApiVersion();
   void handleFiles();
   void handleDownload();

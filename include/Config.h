@@ -184,7 +184,7 @@ constexpr uint32_t LORA_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t HEALTH_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t LOG_PERSIST_PERIOD_MS = 5000UL;
 constexpr uint32_t RANGE_TEST_PERIOD_MS = 5000UL;
-constexpr uint8_t CONFIG_VERSION = 3;
+constexpr uint8_t CONFIG_VERSION = 4;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
 constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;
@@ -192,6 +192,27 @@ constexpr uint32_t SOS_BEACON_PERIOD_MS = 15000UL;
 constexpr uint32_t MESSAGE_HISTORY_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t CAPTURE_MAX_DURATION_MS = 10UL * 60UL * 1000UL;
 constexpr uint32_t ADR_REEVALUATE_MS = 10000UL;
+
+// LoRaWAN Class A regional configuration. RegionalProfile indexes match the
+// RadioLib LoRaWANBand_t variants AS923, AS923_2, AS923_3 and AS923_4.
+constexpr uint8_t LORAWAN_REGION_DEFAULT = 1; // AS923_2
+constexpr uint16_t LORAWAN_UPLINK_PERIOD_SEC_DEFAULT = 300;
+constexpr uint8_t LORAWAN_DEFAULT_FPORT = 1;
+constexpr uint32_t LORAWAN_JOIN_RETRY_MIN_MS = 30000UL;
+constexpr uint32_t LORAWAN_JOIN_RETRY_MAX_MS = 900000UL;
+constexpr uint8_t LORAWAN_JOIN_BACKOFF_MULT = 2;
+constexpr size_t LORAWAN_MAX_PAYLOAD = 51;
+constexpr size_t LORAWAN_MAX_DOWNLINK = 242;
+constexpr size_t LORAWAN_DOWNLINK_QUEUE = 4;
+constexpr uint32_t LORAWAN_DOWNLINK_HOLD_MS = 60000UL;
+constexpr bool LORAWAN_DUTY_CYCLE_ENABLED = true;
+constexpr bool LORAWAN_DWELL_TIME_ENABLED = false;
+constexpr uint16_t LORAWAN_MAX_DWELL_MS = 400;
+constexpr uint32_t LORAWAN_RX2_FREQ_HZ_AS923_2 = 921400000UL;
+constexpr uint8_t LORAWAN_RX2_DR_AS923_2 = 2;
+constexpr bool LORA_USE_AES_GCM = false;
+constexpr uint8_t LORA_PROTOCOL_VERSION_GCM = 4;
+
 
 // WM8962/ESP32-S3 I2S audio
 constexpr uint32_t AUDIO_SAMPLE_RATE = 44100;

@@ -45,6 +45,28 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 | Native USB D-/D+ | 19 / 20 |
 | WM8962 MCLK | external 24 MHz oscillator |
 
+
+## LoRaWAN Class A
+
+FieldRadio can optionally operate the existing SX1262 as a **LoRaWAN Class A
+end-device** using RadioLib's open-source LoRaWAN implementation. It supports
+OTAA and ABP and exposes AS923-1/2/3/4 profiles; the default is AS923-2 for
+Indonesia. LoRaWAN is opt-in and shares the physical SX1262 with the existing
+P2P protocol through `RadioArbiter`.
+
+Configure credentials from the authenticated HTTPS WebUI under the **LoRaWAN**
+card or use the serial commands `lw status`, `lw connect`, `lw disconnect` and
+`lw uplink <hex>`. Credentials are stored in NVS and production provisioning
+must enable NVS encryption + flash encryption.
+
+The existing Wi-Fi AP is intentionally retained because it allows direct
+phone/tablet access when the device is deployed without a router. The
+optional STA/MQTT path is only a scaffold; STA-only provisioning would create
+a router dependency.
+
+See `docs/LORAWAN.md` for provisioning, regional notes, payload format and
+known limitations.
+
 ## Fitur
 
 - GNSS position/altitude/satellite telemetry.

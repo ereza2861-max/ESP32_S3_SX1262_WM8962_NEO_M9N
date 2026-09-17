@@ -8,6 +8,7 @@
 #include "Config.h"
 #include "ReplayStore.h"
 #include "RfDetector.h"
+#include "RadioArbiter.h"
 
 struct ChannelScanResult {
   float freqMHz = 0.0f;
@@ -77,12 +78,18 @@ public:
   uint32_t dedupEvictions() const { return dedupEvictions_; }
   uint8_t lqi() const;
   const RfDetector& rfDetector() const { return rfDetector_; }
+  PhysicalLayer* radioLayer() { return &radio_; }
+  int16_t radioRssi() const { return static_cast<int16_t>(radio_.getRSSI()); }
+  float radioSnr() const { return radio_.getSNR(); }
+  void suspendForLoRaWAN();
+  bool resumeFromLoRaWAN();
 private:
   Module module_;
   SX1262 radio_;
   volatile uint32_t irqCount_ = 0;
   portMUX_TYPE irqMux_ = portMUX_INITIALIZER_UNLOCKED;
   bool ready_ = false;
+  std::atomic<bool> suspendedForLoRaWAN_{false};
   std::atomic<bool> storageResetting_{false};
   uint32_t lastRecoveryMs_ = 0;
   SemaphoreHandle_t mutex_ = nullptr;

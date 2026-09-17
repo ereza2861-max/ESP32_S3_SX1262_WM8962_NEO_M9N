@@ -35,3 +35,6 @@ CONFIG_ESP_BROWNOUT_DET=y
 # Detect stack overflows with FreeRTOS canary checks.
 CONFIG_FREERTOS_CHECK_STACKOVERFLOW=2
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
+
+# Protect persisted LoRaWAN and other credentials at rest.
+CONFIG_NVS_ENCRYPTION=y

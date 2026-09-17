@@ -17,6 +17,7 @@
 #include "AppState.h"
 #include "GnssManager.h"
 #include "LoRaManager.h"
+#include "LoRaWANManager.h"
 #include "AudioManager.h"
 #include "StorageManager.h"
 #include "WebUi.h"
@@ -25,6 +26,7 @@
 
 GnssManager gnss;
 LoRaManager lora;
+LoRaWANManager lorawan(lora);
 AudioManager audio;
 StorageManager storage;
 ESPWebServerSecure server(Config::WEB_PORT);
@@ -49,8 +51,8 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
-static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0;
-static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr;
+static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0, hbLoRaWAN = 0;
+static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr;
 static uint32_t bootCount = 0;
 static Adafruit_NeoPixel rgb(1, Board::LED_RGB, NEO_GRB + NEO_KHZ800);
 static uint32_t lastBatteryHealthPersist = 0;
@@ -147,6 +149,39 @@ static const char* wakeupCauseName(esp_sleep_wakeup_cause_t cause) {
     case ESP_SLEEP_WAKEUP_UART: return "UART";
     default: return "POWERON/OTHER";
   }
+}
+
+static void enforceProductionSecurity() {
+#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#ifndef CONFIG_SECURE_BOOT_V2_ENABLED
+#define CONFIG_SECURE_BOOT_V2_ENABLED 0
+#endif
+#ifndef CONFIG_SECURE_FLASH_ENC_ENABLED
+#define CONFIG_SECURE_FLASH_ENC_ENABLED 0
+#endif
+#if !CONFIG_SECURE_BOOT_V2_ENABLED || !CONFIG_SECURE_FLASH_ENC_ENABLED
+  Serial.println("FATAL: production build requires Secure Boot V2 + Flash Encryption");
+  for (;;) delay(1000);
+#endif
+#endif
+}
+
+static void recordBrownoutMarker() {
+  bool brownout = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) brownout = gState.brownoutReset;
+  }
+  if (!brownout || !storage.ready()) return;
+  SpiLock spiLock(pdMS_TO_TICKS(100));
+  if (!spiLock.ok()) return;
+  if (!SD.exists("/LOG")) (void)SD.mkdir("/LOG");
+  File f = SD.open("/LOG/BROWNOUT.LOG", FILE_APPEND);
+  if (!f) return;
+  f.printf("%lu,brownout,tx_power_cap=%d,duration_ms=60000\n",
+           static_cast<unsigned long>(millis()),
+           static_cast<int>(Config::BATTERY_TX_POWER_LOW_DBM));
+  f.close();
 }
 
 static void recordBootDiagnostics() {
@@ -587,6 +622,17 @@ static void taskLoRa(void*) {
   }
 }
 
+static void taskLoRaWAN(void*) {
+  watchdogSubscribe();
+  for (;;) {
+    esp_task_wdt_reset();
+    { StateLock lock(gState); if (lock.ok()) ++gState.wdtResetCounts[4]; }
+    lorawan.task();
+    ++hbLoRaWAN;
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
 static void taskAudio(void*) {
   watchdogSubscribe();
   for (;;) {
@@ -611,6 +657,8 @@ static void taskWeb(void*) {
 
 
 static void handlePhysicalControls(uint32_t now) {
+  static uint32_t modeChordSince = 0;
+  static bool modeChordHandled = false;
   const bool pttRaw = Board::BTN_PTT >= 0 && digitalRead(Board::BTN_PTT) == HIGH;
   const bool sosRaw = Board::BTN_SOS >= 0 && digitalRead(Board::BTN_SOS) == HIGH;
 
@@ -619,6 +667,35 @@ static void handlePhysicalControls(uint32_t now) {
 
   const bool pttPressed = (now - pttDebounceMs >= BUTTON_DEBOUNCE_MS) ? rawPttButton : lastPttButton;
   const bool sosPressed = (now - sosDebounceMs >= BUTTON_DEBOUNCE_MS) ? rawSosButton : lastSosButton;
+
+  // Both physical buttons held for 1.5 s toggle the LoRaWAN opt-in mode.
+  // This chord is checked before PTT/SOS handling so it cannot accidentally
+  // transmit an SOS while selecting the radio mode.
+  if (pttPressed && sosPressed) {
+    if (!modeChordSince) modeChordSince = now;
+    if (!modeChordHandled && now - modeChordSince >= 1500U) {
+      modeChordHandled = true;
+      gConfig.lorawanEnabled = !gConfig.lorawanEnabled;
+      if (!gConfig.save()) {
+        gConfig.lorawanEnabled = !gConfig.lorawanEnabled;
+        Serial.println("LORAWAN: physical mode toggle failed to save");
+      } else if (gConfig.lorawanEnabled) {
+        Serial.println("LORAWAN: physical mode ON");
+        if (gConfig.lorawanMode == 0) (void)lorawan.connectOTAA();
+        else (void)lorawan.connectABP();
+      } else {
+        Serial.println("LORAWAN: physical mode OFF");
+        (void)lorawan.disconnect();
+      }
+    }
+    lastPttButton = false;
+    lastSosButton = false;
+    return;
+  }
+  if (!pttPressed && !sosPressed) {
+    modeChordSince = 0;
+    modeChordHandled = false;
+  }
 
   if (pttPressed != lastPttButton) {
     lastPttButton = pttPressed;
@@ -705,16 +782,16 @@ static void manageWifi(uint32_t now) {
 
 static void taskHealth(void*) {
   watchdogSubscribe();
-  uint32_t last[4] = {0, 0, 0, 0};
+  uint32_t last[5] = {0, 0, 0, 0, 0};
   uint32_t lastCheck = millis();
   for (;;) {
     esp_task_wdt_reset();
     const uint32_t now = millis();
     if (now - lastCheck >= 5000) {
-      const uint32_t hb[4] = {hbGnss, hbLoRa, hbAudio, hbWeb};
+      const uint32_t hb[5] = {hbGnss, hbLoRa, hbAudio, hbWeb, hbLoRaWAN};
       bool stalled = false;
       uint8_t stalledMask = 0;
-      for (size_t i = 0; i < 4; ++i) {
+      for (size_t i = 0; i < 5; ++i) {
         if (hb[i] == last[i]) {
           stalled = true;
           stalledMask |= static_cast<uint8_t>(1U << i);
@@ -729,6 +806,7 @@ static void taskHealth(void*) {
         gState.loraStackMin = hLoRa ? uxTaskGetStackHighWaterMark(hLoRa) : 0;
         gState.audioStackMin = hAudio ? uxTaskGetStackHighWaterMark(hAudio) : 0;
         gState.webStackMin = hWeb ? uxTaskGetStackHighWaterMark(hWeb) : 0;
+         gState.lorawanStackMin = hLoRaWAN ? uxTaskGetStackHighWaterMark(hLoRaWAN) : 0;
         if (stalled) {
           ++gState.healthAlerts;
           HealthLogEntry& e = gState.healthLog[gState.healthLogNext];
@@ -774,6 +852,42 @@ static void serviceSerialConsole() {
       Serial.printf("freq=%.3f bw=%.1f sf=%u cr=%u pwr=%d callsign=%s\n",
                     gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
                     gConfig.loraCr, gConfig.loraPowerDbm, gConfig.callsign.c_str());
+    } else if (line == "lw status") {
+      Serial.printf("LORAWAN: state=%u joined=%d joining=%d region=%u uplink=%lu downlink=%lu RSSI=%d SNR=%.1f retries=%lu lastJoin=%lu err=%s\n",
+                    static_cast<unsigned>(lorawan.state()), lorawan.isJoined(),
+                    lorawan.isJoining(), static_cast<unsigned>(lorawan.regionalProfile()),
+                    static_cast<unsigned long>(lorawan.uplinkCount()),
+                    static_cast<unsigned long>(lorawan.downlinkCount()),
+                    lorawan.lastRssi(), lorawan.lastSnr(),
+                    static_cast<unsigned long>(lorawan.joinRetryCount()),
+                    static_cast<unsigned long>(lorawan.lastJoinAttemptMs()),
+                    lorawan.lastError().c_str());
+    } else if (line == "lw connect") {
+      Serial.println(lorawan.connectOTAA() ? "LORAWAN: join requested" : "LORAWAN: join request rejected");
+    } else if (line == "lw disconnect") {
+      Serial.println(lorawan.disconnect() ? "LORAWAN: disconnect requested" : "LORAWAN: disconnect rejected");
+    } else if (line.startsWith("lw uplink ")) {
+      String hex = line.substring(10);
+      uint8_t payload[Config::LORAWAN_MAX_PAYLOAD] = {};
+      if (hex.length() == 0 || (hex.length() & 1U) ||
+          hex.length() > Config::LORAWAN_MAX_PAYLOAD * 2U) {
+        Serial.println("LORAWAN: invalid uplink hex");
+      } else {
+        bool ok = true;
+        auto nibble = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+        };
+        for (size_t i = 0; i < hex.length() / 2; ++i) {
+          const int hi = nibble(hex[i * 2]), lo = nibble(hex[i * 2 + 1]);
+          if (hi < 0 || lo < 0) { ok = false; break; }
+          payload[i] = static_cast<uint8_t>((hi << 4) | lo);
+        }
+        Serial.println(ok && lorawan.sendUplink(gConfig.lorawanFPort, payload, hex.length() / 2)
+                           ? "LORAWAN: uplink queued" : "LORAWAN: uplink rejected");
+      }
     } else if (line == "reboot") {
       ESP.restart();
     } else if (line == "wipe") {
@@ -786,7 +900,7 @@ static void serviceSerialConsole() {
           (unsigned)gState.healthLogCount);
     } else if (line == "help" || line.isEmpty()) {
       Serial.printf("wdt=%lu,%lu,%lu,%lu\n", (unsigned long)gState.wdtResetCounts[0], (unsigned long)gState.wdtResetCounts[1], (unsigned long)gState.wdtResetCounts[2], (unsigned long)gState.wdtResetCounts[3]);
-      Serial.println("commands: status config reboot wipe log help");
+      Serial.println("commands: status config lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
     } else {
       Serial.println("unknown command; type help");
     }
@@ -796,6 +910,7 @@ static void serviceSerialConsole() {
 
 void setup() {
   Serial.begin(Config::SERIAL_BAUD);
+  enforceProductionSecurity();
   delay(300);
   Serial.println("\nFieldRadio ESP32-S3-WROOM-1 boot");
 #if defined(ARDUINO_ARCH_ESP32)
@@ -847,7 +962,9 @@ void setup() {
   bool sdOk = storage.begin();
   bool gpsOk = gnss.begin();
   bool loraOk = lora.begin();
+  bool lorawanOk = lorawan.begin();
   bool audioOk = audio.begin();
+  recordBrownoutMarker();
   audio.setVolume(gConfig.volume);
 
   setupWifi();
@@ -858,6 +975,7 @@ void setup() {
   bool tasksOk = true;
   tasksOk &= (xTaskCreatePinnedToCore(taskGnss, "GNSS", 4096, nullptr, 3, &hGnss, 1) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskLoRa, "LoRa", 12288, nullptr, 4, &hLoRa, 1) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskLoRaWAN, "LoRaWAN", 8192, nullptr, 4, &hLoRaWAN, 1) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskAudio, "Audio", 8192, nullptr, 5, &hAudio, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskWeb, "Web", 6144, nullptr, 2, &hWeb, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskHealth, "Health", 4096, nullptr, 1, nullptr, 0) == pdPASS);
@@ -873,8 +991,8 @@ void setup() {
     StateLock lock(gState);
     if (lock.ok()) wifiOk = gState.wifiReady;
   }
-  Serial.printf("SD=%d GNSS=%d LoRa=%d Audio=%d USB=%d WiFi=%d\n",
-                sdOk, gpsOk, loraOk, audioOk, usbAudioOk, wifiOk);
+  Serial.printf("SD=%d GNSS=%d LoRa=%d LoRaWAN=%d Audio=%d USB=%d WiFi=%d\n",
+                sdOk, gpsOk, loraOk, lorawanOk, audioOk, usbAudioOk, wifiOk);
 }
 
 void loop() {
@@ -902,7 +1020,7 @@ void loop() {
     StateLock lock(gState);
     if (lock.ok()) activePower = gState.ptt || gState.sos || gState.recording ||
         gState.playing || gState.usbAudioActive || gState.rxActive ||
-        gState.wifiReady;
+        gState.wifiReady || gState.lorawanJoining || gState.lorawanJoined;
   }
   setPowerProfile(activePower);
   manageWifi(now);
@@ -935,8 +1053,14 @@ void loop() {
     StateLock lock(gState);
     if (lock.ok()) rangeTest = gState.rangeTest;
   }
-  if (now - lastReport >= Config::GPS_REPORT_PERIOD_MS ||
-      (rangeTest && now - lastRangeReportMs >= Config::RANGE_TEST_PERIOD_MS)) {
+  bool lorawanJoined = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) lorawanJoined = gState.lorawanJoined;
+  }
+  if (!lorawanJoined &&
+      (now - lastReport >= Config::GPS_REPORT_PERIOD_MS ||
+       (rangeTest && now - lastRangeReportMs >= Config::RANGE_TEST_PERIOD_MS))) {
     lastReport = now;
     lastRangeReportMs = now;
     lora.sendPosition();

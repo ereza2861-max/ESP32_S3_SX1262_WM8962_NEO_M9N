@@ -20,6 +20,7 @@
  * GPIO19/20 are reserved for the ESP32-S3 native USB D-/D+.
  */
 namespace Board {
+constexpr bool LORAWAN_SHARES_RADIO = true;
 constexpr int I2C_SDA = 38;
 constexpr int I2C_SCL = 48;
 
@@ -102,6 +103,7 @@ constexpr bool pinsUnique() {
   return true;
 }
 static_assert(pinsUnique(), "BoardConfig GPIO collision detected");
+static_assert(LORAWAN_SHARES_RADIO, "LoRaWAN requires the existing SX1262 radio");
 
 // ESP32-S3-WROOM-1-N16R8 reserves GPIO26..37 for package flash/PSRAM and
 // GPIO0/3/45/46 are strapping pins. Keep the routing contract explicit so a
