@@ -47,6 +47,14 @@ bool LoRaWANManager::recreateNode() {
   return true;
 }
 
+static String deviceDevEuiFromEfuse() {
+  uint64_t mac = ESP.getEfuseMac();
+  char eui[17] = {};
+  snprintf(eui, sizeof(eui), "%016llX",
+           static_cast<unsigned long long>(mac));
+  return String(eui);
+}
+
 bool LoRaWANManager::begin() {
   if (ready_) return true;
   mutex_ = xSemaphoreCreateMutex();
@@ -65,6 +73,8 @@ bool LoRaWANManager::begin() {
   Serial.println("LORAWAN: WARNING: CONFIG_NVS_ENCRYPTION is disabled; credentials are not protected at rest");
 #endif
 
+  // DevEUI is hardware-derived; never accept a mutable NVS DevEUI for OTAA.
+  gConfig.lorawanDevEui = deviceDevEuiFromEfuse();
   region_ = static_cast<RegionalProfile>(gConfig.lorawanRegion <= 3 ?
                                           gConfig.lorawanRegion :
                                           Config::LORAWAN_REGION_DEFAULT);

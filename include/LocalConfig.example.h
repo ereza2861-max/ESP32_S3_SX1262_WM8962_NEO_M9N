@@ -15,3 +15,16 @@
 //   secrets/web_tls_cert.der
 //   secrets/web_tls_key.der
 // The PlatformIO pre-build script converts them into an ignored generated header.
+
+// Optional deployment overrides for STA/MQTT. Never commit LocalConfig.h.
+// The supplied deployment password belongs here locally, not in Git.
+#define FIELDRADIO_STA_SSID "replace-with-sta-ssid"
+#define FIELDRADIO_STA_PASSWORD "replace-with-sta-password"
+#define FIELDRADIO_DEVICE_ID "ESP32S3_VOICE_NODE_01"
+#define FIELDRADIO_CALLSIGN "FIELD_RADIO_01"
+#define FIELDRADIO_MQTT_HOST "broker.emqx.io"
+#define FIELDRADIO_MQTT_PORT 8883
+#define FIELDRADIO_MQTT_USERNAME ""
+#define FIELDRADIO_MQTT_PASSWORD ""
+#define FIELDRADIO_MQTT_TOPIC_ROOT "fieldradio"
+#define FIELDRADIO_MQTT_SERVER_NAME "broker.emqx.io"

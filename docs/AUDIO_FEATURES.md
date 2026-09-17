@@ -1,5 +1,7 @@
 # Audio feature contract
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Hardware-dependent claims are design targets/pending validation; see `docs/PROJECT_STATUS.md`.
+
 This firmware uses the ESP32-S3 + WM8962 clock domain at 44.1 kHz.
 
 Implemented in this patch:

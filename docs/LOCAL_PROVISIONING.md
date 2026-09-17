@@ -1,5 +1,7 @@
 # Local device provisioning
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Provisioning procedures are development/design workflows and are not evidence of deployed production hardware. See `docs/PROJECT_STATUS.md`.
+
 This repository deliberately does not contain device credentials, TLS private keys,
 TLS certificates, or generated TLS headers. A fresh clone therefore needs one local
 provisioning step before a production/local firmware build.

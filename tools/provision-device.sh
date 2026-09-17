@@ -62,6 +62,13 @@ else
     printf '\n'
   fi
 
+  sta_ssid="${FIELDRADIO_STA_SSID:-}"
+  sta_password="${FIELDRADIO_STA_PASSWORD:-}"
+  mqtt_host="${FIELDRADIO_MQTT_HOST:-broker.emqx.io}"
+  mqtt_port="${FIELDRADIO_MQTT_PORT:-8883}"
+  mqtt_user="${FIELDRADIO_MQTT_USERNAME:-}"
+  mqtt_password="${FIELDRADIO_MQTT_PASSWORD:-}"
+
   lora_key="${FIELDRADIO_LORA_KEY_HEX:-}"
   if [ -z "$lora_key" ] && [ -t 0 ]; then
     printf '%s' "LoRa AES-128 key (32 hex chars, blank=generate): "
@@ -71,10 +78,10 @@ else
     lora_key="$(openssl rand -hex 16)"
   fi
 
-  python3 - "$ap_ssid" "$ap_password" "$web_user" "$web_password" "$lora_key" <<'PY'
+  python3 - "$ap_ssid" "$ap_password" "$web_user" "$web_password" "$lora_key" "$sta_ssid" "$sta_password" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_password" <<'PY'
 import re
 import sys
-ssid, appass, webuser, webpass, key = sys.argv[1:]
+ssid, appass, webuser, webpass, key, sta_ssid, sta_pass, mqtt_host, mqtt_port, mqtt_user, mqtt_pass = sys.argv[1:]
 
 def byte_len(value):
     return len(value.encode("utf-8"))
@@ -94,6 +101,16 @@ for name, value, minimum, maximum in (
 
 if appass == webpass:
     raise SystemExit("ERROR: AP and WebUI passwords must be different.")
+if sta_ssid and not 1 <= byte_len(sta_ssid) <= 32:
+    raise SystemExit("ERROR: STA SSID must be 1..32 UTF-8 bytes when supplied.")
+if sta_pass and not 8 <= byte_len(sta_pass) <= 63:
+    raise SystemExit("ERROR: STA password must be 8..63 UTF-8 bytes when supplied.")
+if not 1 <= byte_len(mqtt_host) <= 253:
+    raise SystemExit("ERROR: MQTT host must be 1..253 UTF-8 bytes.")
+if not mqtt_port.isdigit() or not 1 <= int(mqtt_port) <= 65535:
+    raise SystemExit("ERROR: MQTT port must be 1..65535.")
+if len(mqtt_user) > 128 or len(mqtt_pass) > 128:
+    raise SystemExit("ERROR: MQTT credentials must be <=128 characters.")
 if not re.fullmatch(r"[0-9A-Fa-f]{32}", key):
     raise SystemExit("ERROR: LoRa key must be exactly 32 hexadecimal characters.")
 PY
@@ -110,6 +127,16 @@ PY
 #define FIELDRADIO_WEB_USER "$web_user"
 #define FIELDRADIO_WEB_PASSWORD "$web_password"
 #define FIELDRADIO_LORA_KEY_HEX "$lora_key"
+#define FIELDRADIO_STA_SSID "$sta_ssid"
+#define FIELDRADIO_STA_PASSWORD "$sta_password"
+#define FIELDRADIO_DEVICE_ID "${FIELDRADIO_DEVICE_ID:-ESP32S3_VOICE_NODE_01}"
+#define FIELDRADIO_CALLSIGN "${FIELDRADIO_CALLSIGN:-FIELD_RADIO_01}"
+#define FIELDRADIO_MQTT_HOST "$mqtt_host"
+#define FIELDRADIO_MQTT_PORT $mqtt_port
+#define FIELDRADIO_MQTT_USERNAME "$mqtt_user"
+#define FIELDRADIO_MQTT_PASSWORD "$mqtt_password"
+#define FIELDRADIO_MQTT_TOPIC_ROOT "${FIELDRADIO_MQTT_TOPIC_ROOT:-fieldradio}"
+#define FIELDRADIO_MQTT_SERVER_NAME "${FIELDRADIO_MQTT_SERVER_NAME:-broker.emqx.io}"
 EOF
   mv -f "$tmp" "$LOCAL_CONFIG"
   trap - EXIT HUP INT TERM

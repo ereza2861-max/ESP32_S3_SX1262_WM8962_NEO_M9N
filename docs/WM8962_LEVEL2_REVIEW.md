@@ -1,5 +1,7 @@
 # WM8962 / SX1262 Level-2 Hardware-Firmware Review
 
+> **Hardware status (2026-09-17):** No node is operating and the PCB has not been fabricated. Statements about Rev-C/PCB bring-up are design targets or pending validation, not evidence of production hardware. See `docs/PROJECT_STATUS.md`.
+
 ## Audit scope
 
 This review reconciles the current firmware with the supplied Rev-C package.
@@ -40,7 +42,7 @@ firmware mapping is therefore:
 - GPIO15 = BUSY
 
 Historical Rev-B documents incorrectly described the SX1262 control pins.
-The current Rev-C contract above is the only mapping to route on the PCB.
+The current Rev-C contract above is the candidate mapping to route on the PCB; fabrication has not yet occurred.
 
 DIO2 is deliberately not assigned by firmware because its electrical function
 depends on the actual SX1262 RF front-end: it may control an RF switch on some

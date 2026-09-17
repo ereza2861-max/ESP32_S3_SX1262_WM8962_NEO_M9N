@@ -1,5 +1,7 @@
 # Cloud compiling with GitHub Actions
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Hardware-dependent claims are design targets/pending validation; see `docs/PROJECT_STATUS.md`.
+
 The ESP32-S3 firmware can be compiled in GitHub Actions; a local PlatformIO installation is not required for the cloud build.
 
 ## From the GitHub web interface

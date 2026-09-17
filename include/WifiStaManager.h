@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "Config.h"
 
 class WifiStaManager {
 public:
@@ -10,6 +11,8 @@ public:
 
 private:
   bool connected_ = false;
+  uint32_t nextRetryMs_ = 0;
+  uint32_t retryDelayMs_ = Config::STA_RETRY_MIN_MS;
   String ssid_;
   String pass_;
 };

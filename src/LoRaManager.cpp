@@ -11,6 +11,7 @@
 #include <Preferences.h>
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
+#include <mbedtls/gcm.h>
 #include <time.h>
 #include <esp_attr.h>
 #include <SD.h>
@@ -24,6 +25,7 @@ constexpr uint8_t PACKET_MAGIC = 0xF1;
 constexpr size_t PACKET_HEADER_V1 = 1 + 1 + 1 + 2 + 4;
 constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
 constexpr size_t PACKET_HEADER_V3 = PACKET_HEADER_V2 + 1 + sizeof(uint32_t);
+constexpr size_t PACKET_HEADER_V4 = PACKET_HEADER_V2 + 8;
 constexpr uint8_t ROUTE_EXT_MAGIC = 0xE7;
 constexpr uint8_t ROUTE_EXT_VERSION_V1 = 1;
 constexpr uint8_t ROUTE_EXT_VERSION = 2;
@@ -791,20 +793,43 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
 }
 
 bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& seq,
-                                uint32_t& sourceId, uint8_t& ttl,
-                                uint8_t* plain, size_t capacity, size_t& len) {
-  len = 0;
-  sourceId = 0;
-  ttl = 0;
-  size_t headerLen = 0;
-
+                                 uint32_t& sourceId, uint8_t& ttl,
+                                 uint8_t* plain, size_t capacity, size_t& len) {
+  len = 0; sourceId = 0; ttl = 0;
   if (packet.length() < PACKET_HEADER_V1 + PACKET_TAG ||
-      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC)
-    return false;
+      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC) return false;
 
   const uint8_t version = static_cast<uint8_t>(packet[1]);
+  type = static_cast<uint8_t>(packet[2]);
+  seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
+        (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
+
+  if (version == Config::LORA_PROTOCOL_VERSION_GCM && Config::LORA_USE_AES_GCM) {
+    if (packet.length() < PACKET_HEADER_V4 + 16) return false;
+    uint8_t nonce[12] = {};
+    memcpy(nonce, packet.c_str() + 5, sizeof(nonce));
+    memcpy(&sourceId, packet.c_str() + 17, sizeof(sourceId));
+    ttl = static_cast<uint8_t>(packet[21]);
+    const size_t cipherLen = packet.length() - PACKET_HEADER_V4 - 16;
+    if (!plain || cipherLen > capacity) return false;
+    uint8_t key[16] = {};
+    if (!loadKey(key)) return false;
+    const uint8_t* cipher = reinterpret_cast<const uint8_t*>(packet.c_str()) + PACKET_HEADER_V4;
+    const uint8_t* tag = cipher + cipherLen;
+    mbedtls_gcm_context gcm; mbedtls_gcm_init(&gcm);
+    const bool ok = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 128) == 0 &&
+      mbedtls_gcm_auth_decrypt(&gcm, cipherLen, nonce, sizeof(nonce),
+        reinterpret_cast<const unsigned char*>(packet.c_str()), PACKET_HEADER_V4,
+        tag, 16, cipher, plain) == 0;
+    mbedtls_gcm_free(&gcm);
+    if (!ok) return false;
+    len = cipherLen;
+    return true;
+  }
+
+  // Legacy CTR/HMAC decoding is retained only for internal V3 hopping paths.
+  size_t headerLen = 0;
   if (version == Config::LORA_PROTOCOL_VERSION) {
-    if (packet.length() < PACKET_HEADER_V2 + PACKET_TAG) return false;
     headerLen = PACKET_HEADER_V2;
     memcpy(&sourceId, packet.c_str() + PACKET_HEADER_V1, sizeof(sourceId));
     ttl = static_cast<uint8_t>(packet[PACKET_HEADER_V1 + sizeof(sourceId)]);
@@ -813,46 +838,30 @@ bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& s
   } else {
     return false;
   }
-
   const size_t cipherLen = packet.length() - headerLen - PACKET_TAG;
   if (!plain || cipherLen > capacity) return false;
-
-  uint8_t key[16];
+  uint8_t key[16] = {};
   if (!loadKey(key)) return false;
-  type = static_cast<uint8_t>(packet[2]);
-  seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
-        (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
-  uint32_t nonce = 0;
-  memcpy(&nonce, packet.c_str() + 5, sizeof(nonce));
-
+  uint32_t nonce = 0; memcpy(&nonce, packet.c_str() + 5, sizeof(nonce));
   unsigned char expected[32] = {};
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, key, sizeof(key),
-      reinterpret_cast<const unsigned char*>(packet.c_str()),
-      headerLen + cipherLen, expected, sizeof(expected)) != 0)
-    return false;
-
+      reinterpret_cast<const unsigned char*>(packet.c_str()), headerLen + cipherLen,
+      expected, sizeof(expected)) != 0) return false;
   const uint8_t* got = reinterpret_cast<const uint8_t*>(packet.c_str()) + headerLen + cipherLen;
-  uint8_t diff = 0;
-  for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ got[i];
-  if (diff != 0) return false;
-
-  uint8_t iv[16] = {};
-  memcpy(iv, &nonce, sizeof(nonce));
-  memcpy(iv + 4, &seq, sizeof(seq));
-  uint8_t streamBlock[16] = {};
-  size_t ncOff = 0;
-  mbedtls_aes_context aes;
-  mbedtls_aes_init(&aes);
+  uint8_t diff = 0; for (size_t i = 0; i < PACKET_TAG; ++i) diff |= expected[i] ^ got[i];
+  if (diff) return false;
+  uint8_t iv[16] = {}; memcpy(iv, &nonce, 4); memcpy(iv + 4, &seq, 2);
+  uint8_t streamBlock[16] = {}; size_t ncOff = 0;
+  mbedtls_aes_context aes; mbedtls_aes_init(&aes);
   const bool ok = mbedtls_aes_setkey_enc(&aes, key, 128) == 0 &&
       mbedtls_aes_crypt_ctr(&aes, cipherLen, &ncOff, iv, streamBlock,
-          reinterpret_cast<const unsigned char*>(packet.c_str()) + headerLen, plain) == 0;
+        reinterpret_cast<const unsigned char*>(packet.c_str()) + headerLen, plain) == 0;
   mbedtls_aes_free(&aes);
   if (!ok) return false;
-  len = cipherLen;
-
-  return true;
+  len = cipherLen; return true;
 }
+
 
 uint32_t LoRaManager::hashPayload(const uint8_t* data, size_t len) {
   uint32_t hash = 2166136261UL;
@@ -1872,7 +1881,7 @@ void LoRaManager::serviceTextRetry() {
     if (!textStateMutex_ ||
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return;
     if (!textAwaitingAck_ || textPendingPacket_.isEmpty() ||
-        millis() - textSentMs_ < Config::SOS_REPEAT_MS) {
+        millis() - textSentMs_ < Config::LORA_FRAGMENT_ACK_TIMEOUT_MS) {
       xSemaphoreGive(textStateMutex_);
       return;
     }
@@ -2471,6 +2480,8 @@ void LoRaManager::task() {
     (void)capturePacket(msg, rssi, snr, rxAuthenticated);
     const bool isV2 = authenticated &&
                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION;
+    const bool isV4 = authenticated &&
+                     static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION_GCM;
     const bool isV3 = authenticatedV3;
     uint32_t routeDestination = 0;
     uint32_t routeNextHop = 0;
@@ -2491,7 +2502,7 @@ void LoRaManager::task() {
                                 routeDestination == sourceId_);
     const bool nextHopIsUs = !hasRouteExtension || routeNextHop == 0 ||
                              routeNextHop == sourceId_;
-    const bool duplicateV2 = (isV2 || isV3) &&
+    const bool duplicateV2 = (isV2 || isV3 || isV4) &&
         seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen), isV3 ? epochSec : 0);
     const uint32_t immediatePeer = (hasRouteExtension && routePreviousHop != 0)
         ? routePreviousHop : rxSourceId;
@@ -2503,7 +2514,7 @@ void LoRaManager::task() {
       recordNeighborTxResult(immediatePeer, true);
     if (hasRouteExtension && routePreviousHop != 0)
       learnRoute(rxSourceId, routePreviousHop, rssi, snr);
-    const bool isForwardable = rxAuthenticated && (isV2 || isV3) &&
+    const bool isForwardable = rxAuthenticated && (isV2 || isV3 || isV4) &&
         !duplicateV2 && !malformedRouteExtension;
     bool pttOrRecording = false;
     {
@@ -2537,7 +2548,7 @@ void LoRaManager::task() {
       textPayloadValid = true;
     }
     if (rxAuthenticated && !malformedRouteExtension && addressedToUs &&
-        nextHopIsUs && type == Config::LORA_TYPE_TEXT && textPayloadValid) {
+        nextHopIsUs && (type == Config::LORA_TYPE_TEXT || type == Config::LORA_TYPE_FRAG_DATA) && textPayloadValid) {
       textAckSeq_ = seq;
       textAckSourceId_ = rxSourceId;
       textAckHopIndex_ = isV3 ? hopIndex : 0;
@@ -2963,12 +2974,16 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       return false;
     const uint8_t wireVersion = static_cast<uint8_t>(packet[1]);
     if (wireVersion != Config::LORA_PROTOCOL_VERSION &&
-        wireVersion != LORA_PROTOCOL_VERSION_HOP)
+        wireVersion != LORA_PROTOCOL_VERSION_HOP &&
+        wireVersion != Config::LORA_PROTOCOL_VERSION_GCM)
       return false;
     txType = static_cast<uint8_t>(packet[2]);
     txSeq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
             (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
-    txTtl = static_cast<uint8_t>(packet[13]);
+    txTtl = (wireVersion == Config::LORA_PROTOCOL_VERSION_GCM &&
+             packet.length() > 21)
+        ? static_cast<uint8_t>(packet[21])
+        : static_cast<uint8_t>(packet[13]);
   }
 
   if (Config::LORA_LBT_ENABLED) {
@@ -4292,7 +4307,7 @@ bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination)
         routed, sizeof(routed));
     String packet;
     if (!routedLen ||
-        !encryptPacket(routed, routedLen, Config::LORA_TYPE_TEXT, seq, packet))
+        !encryptPacket(routed, routedLen, Config::LORA_TYPE_FRAG_DATA, seq, packet))
       return false;
     if (!textStateMutex_ ||
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)

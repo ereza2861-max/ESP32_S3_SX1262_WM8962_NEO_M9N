@@ -1,5 +1,7 @@
 # FieldRadio LoRaWAN Class A
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Rev-C is a pre-fabrication design target; pin rolling remains acceptable until fabrication is explicitly recorded. See `docs/PROJECT_STATUS.md`.
+
 FieldRadio uses the existing SX1262 as a LoRaWAN Class A end-device. It is
 not a gateway or packet forwarder. The SX1262 is shared with the existing
 encrypted P2P service through `RadioArbiter`.
@@ -88,11 +90,10 @@ the existing AP provisioning path.
 
 ## Known limitations / TODO
 
-- AES-GCM P2P wire version 4 is scaffolded but disabled; versions 2/3 remain
-  unchanged.
+- AES-GCM P2P wire version 4 is enabled for the primary P2P packet path.
 - X25519/ECDH key rotation is scaffolded only.
-- Wi-Fi STA, MQTT, BLE provisioning and fragment ARQ are
-  scaffolded and not enabled by default.
+- Wi-Fi STA and MQTT contain partial/scaffold integration and are not production-secure end-to-end; BLE provisioning remains scaffolded.
+- Fragment payloads use a dedicated `LORA_TYPE_FRAG_DATA` wire type and the existing authenticated ACK path. Full 8-frame bitmap Selective Repeat remains a follow-up item.
 - The exact SDPPI/Komdigi deployment frequency plan must be verified against
   the current network operator and regulatory release before field TX.
 - Join is intentionally serialized with P2P radio ownership; a single SX1262

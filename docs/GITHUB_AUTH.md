@@ -1,5 +1,7 @@
 # GitHub authentication and PAT migration
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Hardware-dependent claims are design targets/pending validation; see `docs/PROJECT_STATUS.md`.
+
 ## Recommended path
 
 Do not put a GitHub PAT in this repository, PlatformIO build flags, `LocalConfig.h`, a Makefile, or a GitHub Actions secret for this build. The current Actions workflow only needs `contents: read` and `actions/checkout` with `persist-credentials: false`.

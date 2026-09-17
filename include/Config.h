@@ -114,7 +114,7 @@ constexpr uint32_t TRACK_MAX_BYTES = 1024UL * 1024UL;
 constexpr uint8_t TRACK_ROTATIONS = 3;
 constexpr size_t WEB_UPLOAD_MAX_BYTES = 8UL * 1024UL * 1024UL;
 constexpr uint32_t USB_VOLUME_PERSIST_DELAY_MS = 1500UL;
-constexpr uint8_t LORA_TAG_BYTES = 8;
+constexpr uint8_t LORA_TAG_BYTES = 16;
 // Optional frequency-hopping profile. Channel indexes map linearly across the
 // configured legal band; deployments can change the spacing without changing
 // the packet format.
@@ -210,8 +210,12 @@ constexpr bool LORAWAN_DWELL_TIME_ENABLED = false;
 constexpr uint16_t LORAWAN_MAX_DWELL_MS = 400;
 constexpr uint32_t LORAWAN_RX2_FREQ_HZ_AS923_2 = 921400000UL;
 constexpr uint8_t LORAWAN_RX2_DR_AS923_2 = 2;
-constexpr bool LORA_USE_AES_GCM = false;
+constexpr bool LORA_USE_AES_GCM = true;
 constexpr uint8_t LORA_PROTOCOL_VERSION_GCM = 4;
+constexpr uint8_t LORA_TYPE_FRAG_DATA = 7;
+constexpr uint8_t LORA_TYPE_FRAG_ACK = 8;
+constexpr uint8_t LORA_FRAGMENT_WINDOW_SIZE = 8;
+constexpr uint32_t LORA_FRAGMENT_ACK_TIMEOUT_MS = 1500UL;
 
 
 // WM8962/ESP32-S3 I2S audio
@@ -278,6 +282,59 @@ constexpr uint32_t DEEP_SLEEP_IDLE_MS = 300000;
 
 // Watchdog.
 constexpr uint32_t TASK_WDT_TIMEOUT_MS = 10000;
+
+// MQTT/STA integration. Set these in ignored LocalConfig.h for a deployment.
+#ifndef FIELDRADIO_STA_SSID
+#define FIELDRADIO_STA_SSID ""
+#endif
+#ifndef FIELDRADIO_STA_PASSWORD
+#define FIELDRADIO_STA_PASSWORD ""
+#endif
+#ifndef FIELDRADIO_DEVICE_ID
+#define FIELDRADIO_DEVICE_ID "ESP32S3_VOICE_NODE_01"
+#endif
+#ifndef FIELDRADIO_CALLSIGN
+#define FIELDRADIO_CALLSIGN "FIELD_RADIO_01"
+#endif
+constexpr char STA_SSID[] = FIELDRADIO_STA_SSID;
+constexpr char STA_PASSWORD[] = FIELDRADIO_STA_PASSWORD;
+constexpr char DEVICE_ID[] = FIELDRADIO_DEVICE_ID;
+constexpr char DEVICE_CALLSIGN[] = FIELDRADIO_CALLSIGN;
+constexpr uint32_t STA_RETRY_MIN_MS = 5000UL;
+constexpr uint32_t STA_RETRY_MAX_MS = 300000UL;
+
+#ifndef FIELDRADIO_MQTT_HOST
+#define FIELDRADIO_MQTT_HOST "broker.emqx.io"
+#endif
+#ifndef FIELDRADIO_MQTT_PORT
+#define FIELDRADIO_MQTT_PORT 8883
+#endif
+#ifndef FIELDRADIO_MQTT_USERNAME
+#define FIELDRADIO_MQTT_USERNAME ""
+#endif
+#ifndef FIELDRADIO_MQTT_PASSWORD
+#define FIELDRADIO_MQTT_PASSWORD ""
+#endif
+#ifndef FIELDRADIO_MQTT_TOPIC_ROOT
+#define FIELDRADIO_MQTT_TOPIC_ROOT "fieldradio"
+#endif
+#ifndef FIELDRADIO_MQTT_SERVER_NAME
+#define FIELDRADIO_MQTT_SERVER_NAME "broker.emqx.io"
+#endif
+constexpr char MQTT_HOST[] = FIELDRADIO_MQTT_HOST;
+constexpr uint16_t MQTT_PORT = FIELDRADIO_MQTT_PORT;
+constexpr char MQTT_USERNAME[] = FIELDRADIO_MQTT_USERNAME;
+constexpr char MQTT_PASSWORD[] = FIELDRADIO_MQTT_PASSWORD;
+constexpr char MQTT_TOPIC_ROOT[] = FIELDRADIO_MQTT_TOPIC_ROOT;
+constexpr char MQTT_SERVER_NAME[] = FIELDRADIO_MQTT_SERVER_NAME;
+constexpr uint32_t MQTT_TELEMETRY_PERIOD_MS = 30000UL;
+constexpr uint32_t MQTT_HEALTH_PERIOD_MS = 60000UL;
+constexpr bool MQTT_LWT_ENABLED = true;
+constexpr bool MQTT_RETAIN_AVAILABILITY = true;
+constexpr bool MQTT_RETAIN_TELEMETRY = false;
+constexpr uint32_t MQTT_RECONNECT_MIN_MS = 5000UL;
+constexpr uint32_t MQTT_RECONNECT_MAX_MS = 300000UL;
+constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = MQTT_TELEMETRY_PERIOD_MS;
 
 // Services
 constexpr uint32_t GPS_REPORT_PERIOD_MS = 30000;

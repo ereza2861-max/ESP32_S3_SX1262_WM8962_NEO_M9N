@@ -1,10 +1,11 @@
 # PCB mapping source of truth — ESP32-S3-WROOM-1-N16R8
 
+> **Status proyek (2026-09-17):** Belum ada node yang beroperasi dan PCB belum diproduksi. Rev-C di sini adalah target/candidate routing contract. Rolling/perubahan pin masih diterima selama belum ada keterangan eksplisit bahwa PCB sudah diproduksi. Lihat `docs/PROJECT_STATUS.md`.
+
 Mapping berikut adalah **source of truth Rev-C** untuk routing firmware ESP32-S3-WROOM-1-N16R8.
 Nilai pin harus identik dengan `include/BoardConfig.h`; jangan membuat alias pin
 alternatif di schematic/KiCad tanpa mengubah kedua dokumen dan firmware secara atomik.
-Semua net pada tabel di bawah dianggap komitmen routing Rev-C dan membutuhkan rerouting
-PCB dari mapping ESP32-WROOM-32E lama.
+Semua net pada tabel di bawah adalah candidate routing Rev-C dan menjadi basis rerouting dari mapping ESP32-WROOM-32E lama; ini belum merupakan bukti routing PCB fisik telah diproduksi.
 
 ## Normalized GPIO policy
 
@@ -67,7 +68,7 @@ PCB dari mapping ESP32-WROOM-32E lama.
 
 ## Auxiliary field controls
 
-The supplied PCB has no routed PTT/SOS/battery/LED nets. Rev-C firmware assigns:
+The current design package has no fabrication-confirmed routed PTT/SOS/battery/LED nets. Rev-C firmware assigns:
 - GPIO21: PTT, active-high RTC wake input
 - GPIO18: SOS, active-high RTC wake input
 - GPIO43/44: NEO-M9N UART TX/RX
@@ -104,7 +105,7 @@ GPIO9 is occupied by GNSS 1-PPS.
 
 ## WM8962 analogue net contract
 
-The supplied PCB mapping does not contain a native KiCad netlist, so firmware locks only to the documented Rev-C audio contract:
+The current design package does not contain a fabrication-confirmed native KiCad netlist, so firmware locks only to the documented Rev-C audio contract:
 
 - `MIC_L/MIC_R` -> WM8962 `IN1L/IN1R` (PGA path, recommended microphone pins).
 - `LINE2_L/LINE2_R` -> WM8962 `IN2L/IN2R` (direct input-mixer path).

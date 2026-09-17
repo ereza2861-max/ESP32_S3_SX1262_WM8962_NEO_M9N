@@ -1,5 +1,7 @@
 # FieldRadio Rev-C — LoRa Routing Validation Test Matrix
 
+> **Status (2026-09-17):** No node is operating and the PCB has not been fabricated. This matrix is a planned hardware/integration validation procedure, not evidence that 2-node, 3-node, or 4-node tests have been executed. Rev-C remains a pre-fabrication candidate and pin rolling is acceptable until fabrication is explicitly recorded. See `docs/PROJECT_STATUS.md`.
+
 Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
 
 ## Tujuan

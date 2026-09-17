@@ -1,8 +1,10 @@
 # FieldRadio — ESP32-S3-WROOM-1-N16R8 firmware
 
+> **Status proyek (2026-09-17):** Belum ada node yang beroperasi dan PCB belum diproduksi. Rev-C adalah target routing/design revision. Rolling/perubahan pin masih diterima selama belum ada keterangan eksplisit bahwa PCB sudah diproduksi. Lihat `docs/PROJECT_STATUS.md` sebagai source of truth status proyek.
+
 Repository: `ESP32_S3_SX1262_WM8962_NEO_M9N`
 
-Firmware baru ini ditujukan untuk PCB yang diberikan:
+Firmware baru ini ditujukan untuk **target PCB/routing Rev-C**:
 - ESP32-S3-WROOM-1-N16R8 (16 MB Quad SPI flash + 8 MB Octal SPI PSRAM)
 - SX1262
 - WM8962
@@ -11,7 +13,7 @@ Firmware baru ini ditujukan untuk PCB yang diberikan:
 
 ## Pin mapping PCB
 
-`include/BoardConfig.h` and `docs/PCB_MAPPING.md` are the firmware pin-mapping source of truth. GPIO7 is the selected WM8962 ADCDAT input; the older GPIO34 reference is obsolete.
+`include/BoardConfig.h` and `docs/PCB_MAPPING.md` are the firmware pin-mapping source of truth; the physical PCB is not yet fabricated. GPIO7 is the selected WM8962 ADCDAT input; the older GPIO34 reference is obsolete.
 
 | Fungsi | GPIO |
 |---|---:|
@@ -86,7 +88,7 @@ known limitations.
 
 ## Catatan migrasi ESP32-S3 dan USB audio
 
-ESP32-S3 tidak menyediakan Bluetooth Classic/A2DP, sehingga fitur A2DP dihapus. USB Audio memakai native USB D-/D+ pada GPIO19/GPIO20. Mapping GPIO di atas adalah mapping PCB baru untuk S3 dan memerlukan rerouting; firmware ini bukan drop-in replacement untuk PCB WROOM-32E lama. Espressif menyediakan `usb_device_uac` untuk ESP32-S3 dengan streaming speaker/mic, volume/mute dan feedback endpoint.
+ESP32-S3 tidak menyediakan Bluetooth Classic/A2DP, sehingga fitur A2DP dihapus. USB Audio memakai native USB D-/D+ pada GPIO19/GPIO20. Mapping GPIO di atas adalah candidate mapping PCB baru untuk S3 dan memerlukan rerouting sebelum fabrication; firmware ini bukan drop-in replacement untuk PCB WROOM-32E lama. Espressif menyediakan `usb_device_uac` untuk ESP32-S3 dengan streaming speaker/mic, volume/mute dan feedback endpoint.
 
 ## Rekaman dan USB Audio
 

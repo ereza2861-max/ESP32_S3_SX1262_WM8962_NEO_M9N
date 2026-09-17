@@ -1,8 +1,12 @@
 #include "FragmentArq.h"
 
 bool FragmentArq::begin() {
-  // TODO: keep this disabled until the P2P wire-compatible extension is reviewed.
+  // Fragment transport is implemented by LoRaManager; this object is the
+  // lifecycle marker retained for dependency-injection/tests.
+  enabled_ = true;
   return true;
 }
 
-void FragmentArq::task() {}
+void FragmentArq::task() {
+  // LoRaManager owns the radio/ARQ state machine. Keep this task non-blocking.
+}

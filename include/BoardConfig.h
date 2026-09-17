@@ -15,6 +15,10 @@
  * The PlatformIO environment must configure QIO flash + OPI PSRAM for this
  * exact module variant. Do not silently substitute an N16R2 or no-PSRAM board.
  *
+ * PROJECT STATUS (2026-09-17): no node is operating and the PCB has not been
+ * fabricated. This is a pre-fabrication candidate routing contract; pin rolling
+ * remains acceptable until the repository explicitly records PCB fabrication.
+ *
  * IMPORTANT: this is a new S3 routing map. It is NOT electrically compatible
  * with the old ESP32-WROOM-32E PCB without PCB trace/net changes.
  * GPIO19/20 are reserved for the ESP32-S3 native USB D-/D+.

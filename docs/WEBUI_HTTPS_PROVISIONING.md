@@ -1,5 +1,7 @@
 # WebUI HTTPS provisioning (Rev-C)
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Provisioning procedures are development/design workflows and are not evidence of deployed production hardware. See `docs/PROJECT_STATUS.md`.
+
 The WebUI now listens only on HTTPS port 443. It does **not** fall back to plaintext HTTP when TLS material is missing. The Arduino `WebServer` API is retained through the IDF5-compatible `ESPWebServerSecure` compatibility layer, which wraps the ESP32 HTTPS server.
 
 ## Provisioning

@@ -20,6 +20,8 @@
 #include "GnssManager.h"
 #include "LoRaManager.h"
 #include "LoRaWANManager.h"
+#include "WifiStaManager.h"
+#include "MqttClientManager.h"
 #include "AudioManager.h"
 #include "StorageManager.h"
 #include "WebUi.h"
@@ -29,6 +31,8 @@
 GnssManager gnss;
 LoRaManager lora;
 LoRaWANManager lorawan(lora);
+WifiStaManager wifiSta;
+MqttClientManager mqtt;
 AudioManager audio;
 StorageManager storage;
 ESPWebServerSecure server(Config::WEB_PORT);
@@ -55,7 +59,7 @@ constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0, hbLoRaWAN = 0;
-static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr;
+static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr, hNet = nullptr;
 static uint32_t bootCount = 0;
 static Adafruit_NeoPixel rgb(1, Board::LED_RGB, NEO_GRB + NEO_KHZ800);
 static uint32_t lastBatteryHealthPersist = 0;
@@ -642,6 +646,16 @@ static void taskLoRaWAN(void*) {
   }
 }
 
+static void taskNet(void*) {
+  watchdogSubscribe();
+  for (;;) {
+    esp_task_wdt_reset();
+    wifiSta.task();
+    mqtt.task();
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
 static void taskAudio(void*) {
   watchdogSubscribe();
   for (;;) {
@@ -996,6 +1010,8 @@ void setup() {
   audio.setVolume(gConfig.volume);
 
   setupWifi();
+  if (Config::STA_SSID[0] != 0) (void)wifiSta.connect(Config::STA_SSID, Config::STA_PASSWORD);
+  (void)mqtt.begin();
   web.begin();
 
   const bool usbAudioOk = audio.usbStart();
@@ -1004,6 +1020,7 @@ void setup() {
   tasksOk &= (xTaskCreatePinnedToCore(taskGnss, "GNSS", 4096, nullptr, 3, &hGnss, 1) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskLoRa, "LoRa", 12288, nullptr, 4, &hLoRa, 1) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskLoRaWAN, "LoRaWAN", 8192, nullptr, 4, &hLoRaWAN, 1) == pdPASS);
+  tasksOk &= (xTaskCreatePinnedToCore(taskNet, "Net", 4096, nullptr, 2, &hNet, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskAudio, "Audio", 8192, nullptr, 5, &hAudio, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskWeb, "Web", 6144, nullptr, 2, &hWeb, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskHealth, "Health", 4096, nullptr, 1, nullptr, 0) == pdPASS);

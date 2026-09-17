@@ -1,10 +1,11 @@
 #include "BleProvisioning.h"
 
 bool BleProvisioning::begin(const String&) {
-  // TODO: implement NimBLE-Arduino provisioning service for WiFi + LoRaWAN.
-  // Never expose existing credentials in advertisements or unauthenticated reads.
+  // Provisioning is intentionally not advertised as available until the
+  // authenticated NimBLE service is actually implemented. Returning true from
+  // this scaffold would make callers treat an unprovisioned service as ready.
   provisioned_ = false;
-  return true;
+  return false;
 }
 
 void BleProvisioning::task() {

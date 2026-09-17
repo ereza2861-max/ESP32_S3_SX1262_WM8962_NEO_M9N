@@ -1,5 +1,7 @@
 # LoRa Rev-C Level-3: selective ACK/window and routing metrics
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Level-3 routing documentation describes the protocol/design target; it is not a record of field validation. See `docs/PROJECT_STATUS.md`.
+
 This revision keeps the authenticated LoRa envelope unchanged (packet v2). The
 voice reliability changes are carried inside the existing encrypted payload of
 `LORA_TYPE_VOICE_ACK`.

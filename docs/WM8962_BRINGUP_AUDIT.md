@@ -1,5 +1,7 @@
 # WM8962 final register-by-register bring-up audit
 
+> **Hardware status (2026-09-17):** No node is operating and the PCB has not been fabricated. Statements about Rev-C/PCB bring-up are design targets or pending validation, not evidence of production hardware. See `docs/PROJECT_STATUS.md`.
+
 This audit is aligned with the Cirrus Logic WM8962 Rev 4.4 datasheet. The
 firmware target is ESP32-S3-WROOM-1-N16R8 (16 MiB Quad SPI flash + 8 MiB
 Octal SPI PSRAM), with 44.1 kHz / 16-bit I2S with the WM8962 as BCLK/LRCLK master,

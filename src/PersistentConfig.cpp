@@ -14,7 +14,7 @@ RuntimeConfig gConfig{
     70,
     Config::AUDIO_SOURCE_WM8962_MIC,
     1.0f,
-    Config::LORA_DEFAULT_CALLSIGN,
+    Config::DEVICE_CALLSIGN,
     Config::LORA_KEY_HEX,
     Config::AP_SSID,
     Config::AP_PASSWORD,

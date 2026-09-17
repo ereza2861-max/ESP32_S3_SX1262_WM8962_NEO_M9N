@@ -7,5 +7,5 @@ public:
   void task();
 
 private:
-  // TODO: selective-repeat bitmap/timeout state for LORA_TYPE_TEXT_ACK.
+  bool enabled_ = false;
 };

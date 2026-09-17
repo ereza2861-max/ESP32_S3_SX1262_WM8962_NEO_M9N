@@ -1,5 +1,7 @@
 # FieldRadio ESP32-S3 security provisioning
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Provisioning procedures are development/design workflows and are not evidence of deployed production hardware. See `docs/PROJECT_STATUS.md`.
+
 The firmware now reserves an NVS key partition and enables the ESP-IDF flash/NVS
 encryption configuration in `sdkconfig.defaults`. This protects the existing
 `Preferences` values (including Wi-Fi credentials and the LoRa key) only after

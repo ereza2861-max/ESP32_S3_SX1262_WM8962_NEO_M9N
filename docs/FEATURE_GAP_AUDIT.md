@@ -1,5 +1,7 @@
 # Rev-C feature-gap audit and implementation gates
 
+> **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Rev-C is a pre-fabrication candidate; pin rolling remains acceptable until fabrication is explicitly recorded. See `docs/PROJECT_STATUS.md`.
+
 The firmware target is ESP32-S3-WROOM-1-N16R8 (16 MiB Quad SPI flash + 8 MiB Octal SPI PSRAM).
 
 This patch implements only features that can be made deterministic from the supplied
