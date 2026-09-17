@@ -62,9 +62,12 @@ without the real signing key, eFuse provisioning procedure, and recovery/update 
 Do not turn these on merely because a compile-time placeholder exists.
 
 ### HTTPS
-The current WebServer is plaintext HTTP. Password hashing protects credentials at rest
-but does not protect HTTP Basic credentials on the network. HTTPS requires a TLS-capable
-server plus certificate/private-key provisioning. It is intentionally not fabricated here.
+The WebUI now uses the IDF5-compatible HTTPS server on port 443 and refuses to fall back
+to plaintext HTTP when certificate material is missing. Device-specific certificate and
+private-key DER files are provisioned locally and validated before the firmware embeds
+them. A self-signed certificate is suitable for lab use; production deployments should
+use a controlled CA/device-certificate process and the Secure Boot/flash-encryption
+profile described in `docs/SECURITY_PROVISIONING.md`.
 
 ### LoRa fragmentation, voice ACK, store-and-forward, mesh routing
 These require a protocol-versioned packet format and persistent queue semantics. The

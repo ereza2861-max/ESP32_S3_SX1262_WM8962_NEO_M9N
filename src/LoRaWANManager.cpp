@@ -13,7 +13,10 @@ namespace {
 constexpr char NVS_NS[] = "fieldradio";
 constexpr char NVS_NONCES_KEY[] = "lw_nonces";
 constexpr char NVS_NONCES_VERSION_KEY[] = "lw_nonce_v";
+constexpr char NVS_SESSION_KEY[] = "lw_session";
+constexpr char NVS_SESSION_VERSION_KEY[] = "lw_session_v";
 constexpr uint8_t NVS_NONCES_VERSION = 1;
+constexpr uint8_t NVS_SESSION_VERSION = 1;
 }
 
 LoRaWANManager::LoRaWANManager(LoRaManager& p2p) : p2p_(p2p) {}
@@ -86,6 +89,12 @@ bool LoRaWANManager::begin() {
 
 bool LoRaWANManager::parseEui(const String& value, uint64_t& out) const {
   if (value.length() != 16) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F')))
+      return false;
+  }
   char* end = nullptr;
   const unsigned long long parsed = strtoull(value.c_str(), &end, 16);
   if (!end || *end != '\0') return false;
@@ -142,6 +151,34 @@ bool LoRaWANManager::saveNonces() {
   const size_t v = prefs.putUChar(NVS_NONCES_VERSION_KEY, NVS_NONCES_VERSION);
   prefs.end();
   return n == RADIOLIB_LORAWAN_NONCES_BUF_SIZE && v == sizeof(uint8_t);
+}
+
+bool LoRaWANManager::loadSession() {
+  if (!node_) return false;
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, true)) return false;
+  const uint8_t version = prefs.getUChar(NVS_SESSION_VERSION_KEY, 0);
+  if (version != NVS_SESSION_VERSION) {
+    prefs.end();
+    return false;
+  }
+  uint8_t buffer[RADIOLIB_LORAWAN_SESSION_BUF_SIZE] = {};
+  const size_t got = prefs.getBytes(NVS_SESSION_KEY, buffer, sizeof(buffer));
+  prefs.end();
+  if (got != sizeof(buffer)) return false;
+  return node_->setBufferSession(buffer) == RADIOLIB_ERR_NONE;
+}
+
+bool LoRaWANManager::saveSession() {
+  if (!node_) return false;
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, false)) return false;
+  const uint8_t* buffer = node_->getBufferSession();
+  const size_t n = prefs.putBytes(NVS_SESSION_KEY, buffer,
+                                  RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+  const size_t v = prefs.putUChar(NVS_SESSION_VERSION_KEY, NVS_SESSION_VERSION);
+  prefs.end();
+  return n == RADIOLIB_LORAWAN_SESSION_BUF_SIZE && v == sizeof(uint8_t);
 }
 
 void LoRaWANManager::setError(const String& message) {
@@ -206,9 +243,18 @@ bool LoRaWANManager::startActivation(uint8_t mode) {
     // root keys. RadioLib performs the join MIC/session-key derivation.
     st = node_->beginOTAA(joinEui, devEui, appKey, appKey);
     if (st == RADIOLIB_ERR_NONE) {
+      // A persisted session lets RadioLib resume without resetting FCntUp/FCntDown.
+      // If the session is absent or stale, activateOTAA() will establish a new one.
+      (void)loadSession();
       LoRaWANJoinEvent_t joinEvent{};
       st = node_->activateOTAA(&joinEvent);
-      (void)saveNonces();
+      // DevNonce is advanced as soon as a JoinRequest is transmitted, even when
+      // the join is rejected. Persist it on every activation attempt.
+      if (!saveNonces()) {
+        setError("LoRaWAN nonce persistence failed");
+        connectRequested_ = false;
+        return false;
+      }
     }
   } else {
     uint8_t nwkKey[16] = {};
@@ -223,11 +269,24 @@ bool LoRaWANManager::startActivation(uint8_t mode) {
     // LoRaWAN 1.0.x has one NwkSKey. RadioLib's 1.1-compatible ABP API
     // accepts the same key for FNwkSIntKey, SNwkSIntKey and NwkSEncKey.
     st = node_->beginABP(devAddr, nwkKey, nwkKey, nwkKey, appSKey);
-    if (st == RADIOLIB_ERR_NONE) st = node_->activateABP();
+    if (st == RADIOLIB_ERR_NONE) {
+      (void)loadSession();
+      st = node_->activateABP();
+    }
   }
 
-  if (st != RADIOLIB_ERR_NONE) {
+  const bool activationOk =
+      st == RADIOLIB_ERR_NONE ||
+      st == RADIOLIB_LORAWAN_NEW_SESSION ||
+      st == RADIOLIB_LORAWAN_SESSION_RESTORED;
+  if (!activationOk) {
     setError("Activation failed: " + String(st));
+    return false;
+  }
+
+  if (!saveSession()) {
+    setError("LoRaWAN session persistence failed");
+    connectRequested_ = false;
     return false;
   }
 
@@ -388,6 +447,13 @@ bool LoRaWANManager::performUplink(uint8_t fPort, const uint8_t* data,
     setError("Uplink failed: " + String(st));
     return false;
   }
+  // RadioLib updates FCntUp/FCntDown in its session buffer during sendReceive().
+  // Persist it before allowing another uplink so a reboot cannot reuse a frame counter.
+  if (!saveSession()) {
+    setError("LoRaWAN session persistence failed");
+    connectRequested_ = false;
+    return false;
+  }
   ++uplinkCount_;
   if (downLen) captureDownlink(down, downLen, &eventDown);
   updateState();
@@ -449,6 +515,12 @@ void LoRaWANManager::task() {
     if (startActivation(mode)) {
       connectRequested_ = false;
       retryDelayMs_ = Config::LORAWAN_JOIN_RETRY_MIN_MS;
+    } else if (!connectRequested_) {
+      // A persistence failure is fail-closed: retrying could reuse a DevNonce
+      // or LoRaWAN frame counter that was not durably committed.
+      (void)p2p_.resumeFromLoRaWAN();
+      updateState();
+      return;
     } else {
       state_ = LoRaWANState::Rejoining;
       retryDelayMs_ = min<uint32_t>(

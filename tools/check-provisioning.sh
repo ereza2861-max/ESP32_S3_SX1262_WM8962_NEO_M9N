@@ -48,14 +48,22 @@ web_user = macro("FIELDRADIO_WEB_USER")
 web_password = macro("FIELDRADIO_WEB_PASSWORD")
 lora_key = macro("FIELDRADIO_LORA_KEY_HEX")
 
-if not ap_ssid or len(ap_ssid) > 32:
-    raise SystemExit("ERROR: FIELDRADIO_AP_SSID is missing or longer than 32 bytes.")
-if not ap_password or not 8 <= len(ap_password) <= 63:
-    raise SystemExit("ERROR: FIELDRADIO_AP_PASSWORD must be 8..63 characters.")
-if not web_user or len(web_user) > 32:
-    raise SystemExit("ERROR: FIELDRADIO_WEB_USER is missing or longer than 32 characters.")
-if not web_password or not 8 <= len(web_password) <= 63:
-    raise SystemExit("ERROR: FIELDRADIO_WEB_PASSWORD must be 8..63 characters.")
+def byte_len(value):
+    return len(value.encode("utf-8"))
+
+for name, value, minimum, maximum in (
+    ("FIELDRADIO_AP_SSID", ap_ssid, 1, 32),
+    ("FIELDRADIO_AP_PASSWORD", ap_password, 8, 63),
+    ("FIELDRADIO_WEB_USER", web_user, 1, 32),
+    ("FIELDRADIO_WEB_PASSWORD", web_password, 8, 63),
+):
+    if not minimum <= byte_len(value) <= maximum:
+        raise SystemExit(f"ERROR: {name} must be {minimum}..{maximum} UTF-8 bytes.")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise SystemExit(f"ERROR: {name} contains a control character.")
+    if any(c in value for c in '\\\"'):
+        raise SystemExit(f"ERROR: {name} may not contain backslash or double-quote characters.")
+
 if ap_password == web_password:
     raise SystemExit("ERROR: AP and WebUI passwords must be different.")
 if not lora_key or not re.fullmatch(r"[0-9A-Fa-f]{32}", lora_key):

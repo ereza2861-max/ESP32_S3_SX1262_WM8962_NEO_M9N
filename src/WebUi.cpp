@@ -594,9 +594,23 @@ setInterval(refreshLw,2000);refreshLw();setInterval(refreshScan,3000);setInterva
 
 bool WebUi::sameOrigin() {
   const String origin = server_.header("Origin");
-  if (origin.isEmpty()) return false;
-  const String expected = String("https://") + WiFi.softAPIP().toString();
-  return origin == expected;
+  if (origin.isEmpty() || !origin.startsWith("https://")) return false;
+
+  // Accept the actual HTTPS Host as well as the AP IP. The UI certificate has
+  // both SANs, so rejecting the DNS host here would make all state-changing
+  // controls fail when the user opens https://fieldradio.local/.
+  const String host = server_.header("Host");
+  const String apOrigin = String("https://") + WiFi.softAPIP().toString();
+  if (origin == apOrigin) return true;
+
+  if (!host.isEmpty()) {
+    String expected = String("https://") + host;
+    // HTTPS uses port 443 by default; keep an explicit :443 equivalent.
+    if (expected.endsWith(":443"))
+      expected.remove(expected.length() - 4);
+    return origin == expected;
+  }
+  return false;
 }
 
 bool WebUi::rateLimit(uint32_t& last, uint32_t interval) {
@@ -2555,6 +2569,25 @@ void WebUi::handleConfig() {
     return true;
   };
 
+  auto validHex32 = [](const String& raw) {
+    if (raw.length() != 32) return false;
+    for (size_t i = 0; i < raw.length(); ++i) {
+      const char c = raw[i];
+      if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+            (c >= 'A' && c <= 'F')))
+        return false;
+    }
+    return true;
+  };
+  auto validPassword = [](const String& raw) {
+    if (raw.length() < 8 || raw.length() > 63) return false;
+    for (size_t i = 0; i < raw.length(); ++i) {
+      const uint8_t c = static_cast<uint8_t>(raw[i]);
+      if (c < 0x20 || c == 0x7F || c == '\\' || c == '"') return false;
+    }
+    return true;
+  };
+
   if (server_.hasArg("freq")) {
     const String raw = server_.arg("freq");
     char* end = nullptr;
@@ -2634,10 +2667,11 @@ void WebUi::handleConfig() {
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
-      candidate.loraKeyHex.length() != 32 ||
-      candidate.apPassword.length() > 63 || candidate.webPassword.length() > 63 ||
+      !validHex32(candidate.loraKeyHex) ||
+      !validPassword(candidate.apPassword) ||
+      (!candidate.webPassword.isEmpty() && !validPassword(candidate.webPassword)) ||
       candidate.apSsid.isEmpty() || candidate.webUser.isEmpty() ||
-      candidate.apPassword.length() < 8 || !candidate.webPasswordConfigured() ||
+      !candidate.webPasswordConfigured() ||
       (!candidate.webPassword.isEmpty() && candidate.apPassword == candidate.webPassword)) {
     server_.send(400, "text/plain", "invalid configuration");
     return;

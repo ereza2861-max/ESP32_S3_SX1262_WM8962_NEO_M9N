@@ -37,7 +37,9 @@ The generated lab certificate defaults to:
 - IP SAN: `192.168.4.1`
 - validity: 825 days
 
-These defaults match the current ESP32 SoftAP address/name assumptions. If the
+The IP SAN matches the default ESP32 SoftAP address. The DNS SAN is only useful when
+`fieldradio.local` is resolvable by the client (for example through local DNS, mDNS,
+or a hosts entry); the firmware does not itself provide DNS name resolution. If the
 deployment changes the address or DNS name, regenerate the certificate with:
 
 ```text

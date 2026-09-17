@@ -85,11 +85,14 @@ private:
   uint8_t manualLen_ = 0;
   uint8_t manualPayload_[Config::LORAWAN_MAX_PAYLOAD] = {};
   bool manualConfirmed_ = false;
+  uint8_t currentDataRate_ = 0;
 
   const LoRaWANBand_t* bandForProfile(RegionalProfile rp) const;
   bool recreateNode();
   bool loadNonces();
   bool saveNonces();
+  bool loadSession();
+  bool saveSession();
   bool parseEui(const String& value, uint64_t& out) const;
   bool parseKey(const String& value, uint8_t out[16]) const;
   bool parseDevAddr(const uint8_t in[4], uint32_t& out) const;

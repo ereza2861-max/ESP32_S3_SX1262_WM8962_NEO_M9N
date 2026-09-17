@@ -26,7 +26,11 @@ regulatory material. AS923-2's LoRaWAN default channels are in the
 5. Press **Connect** or use `lw connect` on the serial console.
 6. For ABP, provide DevAddr, NwkSKey and AppSKey and select ABP.
 
-Credentials are stored in the `fieldradio` NVS namespace. Production builds
+Credentials and the RadioLib persistence buffers are stored in the `fieldradio`
+NVS namespace. The firmware persists the LoRaWAN Nonces buffer after every
+activation attempt (including rejected OTAA joins) and persists the Session
+buffer after activation and every successful uplink. This is required so
+DevNonce and frame counters are not reused after a reset. Production builds
 must use ESP-IDF NVS encryption together with flash encryption. The firmware
 prints a warning if `CONFIG_NVS_ENCRYPTION` is not enabled and never prints
 the credential values.

@@ -50,5 +50,5 @@ in RAM only when it is supplied/configured at runtime because HTTP Basic authent
 requires the password for verification. This is **not** transport encryption.
 
 For production, pair this with the Secure Boot/flash-encryption provisioning flow and
-replace plaintext HTTP with a TLS-capable server/certificate policy before exposing the
-WebUI beyond a trusted local link.
+use a device-specific CA-issued certificate policy. The current WebUI transport is
+HTTPS-only when provisioned; it deliberately does not fall back to plaintext HTTP.

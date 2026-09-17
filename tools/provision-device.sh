@@ -75,18 +75,25 @@ else
 import re
 import sys
 ssid, appass, webuser, webpass, key = sys.argv[1:]
-if not ssid or len(ssid) > 32:
-    raise SystemExit("ERROR: AP SSID must be 1..32 characters.")
-if not 8 <= len(appass) <= 63:
-    raise SystemExit("ERROR: AP password must be 8..63 characters.")
-if not webuser or len(webuser) > 32:
-    raise SystemExit("ERROR: WebUI username must be 1..32 characters.")
-if not 8 <= len(webpass) <= 63:
-    raise SystemExit("ERROR: WebUI password must be 8..63 characters.")
+
+def byte_len(value):
+    return len(value.encode("utf-8"))
+
+for name, value, minimum, maximum in (
+    ("AP SSID", ssid, 1, 32),
+    ("AP password", appass, 8, 63),
+    ("WebUI username", webuser, 1, 32),
+    ("WebUI password", webpass, 8, 63),
+):
+    if not minimum <= byte_len(value) <= maximum:
+        raise SystemExit(f"ERROR: {name} must be {minimum}..{maximum} UTF-8 bytes.")
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise SystemExit(f"ERROR: {name} contains a control character.")
+    if any(c in value for c in '\\"'):
+        raise SystemExit(f"ERROR: {name} may not contain backslash or double-quote characters when stored in LocalConfig.h.")
+
 if appass == webpass:
     raise SystemExit("ERROR: AP and WebUI passwords must be different.")
-if any(c in value for value in (ssid, appass, webuser, webpass) for c in '\\\"'):
-    raise SystemExit("ERROR: credentials may not contain backslash or double-quote characters when stored in LocalConfig.h.")
 if not re.fullmatch(r"[0-9A-Fa-f]{32}", key):
     raise SystemExit("ERROR: LoRa key must be exactly 32 hexadecimal characters.")
 PY
@@ -118,6 +125,25 @@ if [ -e "$SECRETS/web_tls_cert.der" ] || [ -e "$SECRETS/web_tls_key.der" ]; then
     exit 0
   fi
 fi
+
+python3 - "$TLS_DNS" "$TLS_IP" "$TLS_DAYS" <<'PY'
+import ipaddress
+import re
+import sys
+
+dns, ip, days = sys.argv[1:]
+if not 1 <= len(dns.encode("utf-8")) <= 253 or not re.fullmatch(
+    r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*",
+    dns,
+):
+    raise SystemExit("ERROR: FIELDRADIO_TLS_DNS is not a valid DNS name.")
+try:
+    ipaddress.ip_address(ip)
+except ValueError:
+    raise SystemExit("ERROR: FIELDRADIO_TLS_IP is not a valid IP address.")
+if not days.isdigit() or not 1 <= int(days) <= 825:
+    raise SystemExit("ERROR: FIELDRADIO_TLS_DAYS must be an integer from 1 to 825.")
+PY
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM

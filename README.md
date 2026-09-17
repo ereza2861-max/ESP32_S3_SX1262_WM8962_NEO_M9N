@@ -75,7 +75,7 @@ known limitations.
 - WAV playback 44.1 kHz stereo 16-bit.
 - USB Audio Class (UAC) stereo speaker + microphone ke WM8962.
 - Rekam WAV dengan source yang dapat dipilih: WM8962 MIC atau USB Audio; recording WM8962 MIC tidak lagi diblokir hanya karena USB Audio sedang aktif.
-- Wi-Fi AP + HTTP dashboard.
+- Wi-Fi AP + HTTPS dashboard (port 443; requires provisioned TLS material).
 - Basic-auth untuk endpoint web.
 - Safe path validation untuk file deletion/playback.
 - FreeRTOS task separation.
