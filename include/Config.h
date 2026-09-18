@@ -38,12 +38,30 @@ constexpr uint16_t WEB_PORT = 443;
 
 // SX1262 / legal regional setting must be changed to the frequency allowed
 // by the local radio regulations and the actual RF matching network.
-constexpr float LORA_FREQ_MHZ = 923.0f;
-constexpr float LORA_BW_KHZ = 125.0f;
-constexpr uint8_t LORA_SF = 7;
-constexpr uint8_t LORA_CR = 5;
-constexpr uint8_t LORA_SYNC_WORD = 0x12;
-constexpr int8_t LORA_POWER_DBM = 14;
+#ifndef FIELDRADIO_LORA_FREQ_MHZ
+#define FIELDRADIO_LORA_FREQ_MHZ 923.0f
+#endif
+#ifndef FIELDRADIO_LORA_BW_KHZ
+#define FIELDRADIO_LORA_BW_KHZ 125.0f
+#endif
+#ifndef FIELDRADIO_LORA_SF
+#define FIELDRADIO_LORA_SF 7
+#endif
+#ifndef FIELDRADIO_LORA_CR
+#define FIELDRADIO_LORA_CR 5
+#endif
+#ifndef FIELDRADIO_LORA_POWER_DBM
+#define FIELDRADIO_LORA_POWER_DBM 14
+#endif
+#ifndef FIELDRADIO_LORA_SYNC_WORD
+#define FIELDRADIO_LORA_SYNC_WORD 0x12
+#endif
+constexpr float LORA_FREQ_MHZ = FIELDRADIO_LORA_FREQ_MHZ;
+constexpr float LORA_BW_KHZ = FIELDRADIO_LORA_BW_KHZ;
+constexpr uint8_t LORA_SF = FIELDRADIO_LORA_SF;
+constexpr uint8_t LORA_CR = FIELDRADIO_LORA_CR;
+constexpr int8_t LORA_POWER_DBM = FIELDRADIO_LORA_POWER_DBM;
+constexpr uint8_t LORA_SYNC_WORD = FIELDRADIO_LORA_SYNC_WORD;
 // 0 V selects the SX1262 crystal/XTAL path in RadioLib. Change only if the
 // actual PCB routes a TCXO to the radio reference input.
 constexpr float LORA_TCXO_VOLTAGE = 0.0f;
@@ -184,7 +202,7 @@ constexpr uint32_t LORA_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t HEALTH_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t LOG_PERSIST_PERIOD_MS = 5000UL;
 constexpr uint32_t RANGE_TEST_PERIOD_MS = 5000UL;
-constexpr uint8_t CONFIG_VERSION = 4;
+constexpr uint8_t CONFIG_VERSION = 5;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
 constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;
@@ -214,6 +232,11 @@ constexpr bool LORA_USE_AES_GCM = true;
 constexpr uint8_t LORA_PROTOCOL_VERSION_GCM = 4;
 constexpr uint8_t LORA_TYPE_FRAG_DATA = 7;
 constexpr uint8_t LORA_TYPE_FRAG_ACK = 8;
+constexpr uint8_t LORA_TYPE_SENSOR_TELEMETRY = 9;
+constexpr uint32_t SENSOR_REPORT_PERIOD_MS = 60000UL;
+constexpr float SENSOR_REPORT_DELTA_THRESHOLD = 0.02f;
+constexpr size_t SENSOR_LORA_MAX_PAYLOAD = 40;
+constexpr size_t SENSOR_LORA_QUEUE_DEPTH = 16;
 constexpr uint8_t LORA_FRAGMENT_WINDOW_SIZE = 8;
 constexpr uint32_t LORA_FRAGMENT_ACK_TIMEOUT_MS = 1500UL;
 
@@ -282,6 +305,101 @@ constexpr uint32_t DEEP_SLEEP_IDLE_MS = 300000;
 
 // Watchdog.
 constexpr uint32_t TASK_WDT_TIMEOUT_MS = 10000;
+
+// BLE sensor-reader parameters. These are compile-time build parameters.
+// Assumption: the external ATmega328 sensor node advertises the custom GATT
+// service and implements the v1 contract in SensorProtocol.h.
+#ifndef SENSOR_READER_ENABLED
+#define SENSOR_READER_ENABLED 1
+#endif
+#ifndef SENSOR_TRANSPORT
+#define SENSOR_TRANSPORT 0
+#endif
+#ifndef SENSOR_MAX_NODES
+#define SENSOR_MAX_NODES 2
+#endif
+#ifndef SENSOR_MAX_SENSORS_PER_NODE
+#define SENSOR_MAX_SENSORS_PER_NODE 8
+#endif
+#ifndef SENSOR_SCAN_INTERVAL_MS
+#define SENSOR_SCAN_INTERVAL_MS 5000UL
+#endif
+#ifndef SENSOR_SCAN_WINDOW_MS
+#define SENSOR_SCAN_WINDOW_MS 80U
+#endif
+#ifndef SENSOR_SCAN_DURATION_MS
+#define SENSOR_SCAN_DURATION_MS 1500UL
+#endif
+#ifndef SENSOR_CONNECT_TIMEOUT_MS
+#define SENSOR_CONNECT_TIMEOUT_MS 5000UL
+#endif
+#ifndef SENSOR_TASK_PERIOD_MS
+#define SENSOR_TASK_PERIOD_MS 500UL
+#endif
+#ifndef SENSOR_NODE_EVICTION_MS
+#define SENSOR_NODE_EVICTION_MS 600000UL
+#endif
+#ifndef SENSOR_MTU
+#define SENSOR_MTU 128U
+#endif
+#ifndef SENSOR_ACTIVE_SCAN
+#define SENSOR_ACTIVE_SCAN 1
+#endif
+#ifndef SENSOR_REQUIRE_ENCRYPTION
+#define SENSOR_REQUIRE_ENCRYPTION 0
+#endif
+#ifndef BLE_PAIRING_ENABLED
+#define BLE_PAIRING_ENABLED 1
+#endif
+#ifndef BLE_PAIRING_PASSKEY_DERIVATION_LABEL
+#define BLE_PAIRING_PASSKEY_DERIVATION_LABEL "FieldRadio-BLE-Pair-v1"
+#endif
+#ifndef BLE_PAIRING_MAX_FAILURES
+#define BLE_PAIRING_MAX_FAILURES 3
+#endif
+constexpr uint8_t BLE_MAX_BONDS = 8;
+#ifndef BLE_PAIRING_BLOCK_MS
+#define BLE_PAIRING_BLOCK_MS 60000UL
+#endif
+#ifndef SENSOR_KEEP_AWAKE
+#define SENSOR_KEEP_AWAKE 1
+#endif
+
+enum class SensorTransport : uint8_t {
+  BLE_NIMBLE_GATT = 0,
+};
+constexpr bool SENSOR_READER_ENABLED_VALUE = SENSOR_READER_ENABLED != 0;
+constexpr SensorTransport SENSOR_TRANSPORT_VALUE =
+    static_cast<SensorTransport>(SENSOR_TRANSPORT);
+constexpr size_t SENSOR_MAX_NODES_VALUE = SENSOR_MAX_NODES;
+constexpr size_t SENSOR_MAX_SENSORS_PER_NODE_VALUE = SENSOR_MAX_SENSORS_PER_NODE;
+constexpr uint32_t SENSOR_SCAN_INTERVAL_MS_VALUE = SENSOR_SCAN_INTERVAL_MS;
+constexpr uint16_t SENSOR_SCAN_WINDOW_MS_VALUE = SENSOR_SCAN_WINDOW_MS;
+constexpr uint32_t SENSOR_SCAN_DURATION_MS_VALUE = SENSOR_SCAN_DURATION_MS;
+constexpr uint32_t SENSOR_CONNECT_TIMEOUT_MS_VALUE = SENSOR_CONNECT_TIMEOUT_MS;
+constexpr uint32_t SENSOR_TASK_PERIOD_MS_VALUE = SENSOR_TASK_PERIOD_MS;
+constexpr uint32_t SENSOR_NODE_EVICTION_MS_VALUE = SENSOR_NODE_EVICTION_MS;
+constexpr uint16_t SENSOR_MTU_VALUE = SENSOR_MTU;
+constexpr bool SENSOR_ACTIVE_SCAN_VALUE = SENSOR_ACTIVE_SCAN != 0;
+constexpr bool SENSOR_REQUIRE_ENCRYPTION_VALUE = SENSOR_REQUIRE_ENCRYPTION != 0;
+constexpr bool BLE_PAIRING_ENABLED_VALUE = BLE_PAIRING_ENABLED != 0;
+constexpr uint8_t BLE_PAIRING_MAX_FAILURES_VALUE = BLE_PAIRING_MAX_FAILURES;
+constexpr uint32_t BLE_PAIRING_BLOCK_MS_VALUE = BLE_PAIRING_BLOCK_MS;
+constexpr bool SENSOR_KEEP_AWAKE_VALUE = SENSOR_KEEP_AWAKE != 0;
+static_assert(SENSOR_TRANSPORT == 0,
+              "SENSOR_TRANSPORT currently supports only NimBLE GATT (0)");
+static_assert(SENSOR_MAX_NODES >= 1 && SENSOR_MAX_NODES <= 3,
+              "SENSOR_MAX_NODES must be 1..3 with the default NimBLE connection budget");
+static_assert(SENSOR_MAX_SENSORS_PER_NODE >= 1 && SENSOR_MAX_SENSORS_PER_NODE <= 16,
+              "SENSOR_MAX_SENSORS_PER_NODE must be 1..16");
+static_assert(SENSOR_SCAN_WINDOW_MS > 0 && SENSOR_SCAN_WINDOW_MS <= SENSOR_SCAN_INTERVAL_MS,
+              "SENSOR_SCAN_WINDOW_MS must be <= SENSOR_SCAN_INTERVAL_MS");
+static_assert(SENSOR_MTU >= 23 && SENSOR_MTU <= 247,
+              "SENSOR_MTU must be 23..247 for the v1 GATT contract");
+static_assert(BLE_MAX_BONDS >= 1 && BLE_MAX_BONDS <= 8,
+              "BLE_MAX_BONDS must be 1..8");
+static_assert(BLE_PAIRING_MAX_FAILURES >= 1,
+              "BLE_PAIRING_MAX_FAILURES must be non-zero");
 
 // MQTT/STA integration. Set these in ignored LocalConfig.h for a deployment.
 #ifndef FIELDRADIO_STA_SSID

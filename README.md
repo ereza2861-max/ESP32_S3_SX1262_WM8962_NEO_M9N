@@ -63,7 +63,7 @@ must enable NVS encryption + flash encryption.
 
 The existing Wi-Fi AP is intentionally retained because it allows direct
 phone/tablet access when the device is deployed without a router. The
-optional STA/MQTT path is only a scaffold; STA-only provisioning would create
+optional STA/MQTT path is intentionally not the BLE Sensor Reader transport; STA-only provisioning would create
 a router dependency.
 
 See `docs/LORAWAN.md` for provisioning, regional notes, payload format and

@@ -18,7 +18,7 @@
 | LoRaWAN Class A | Implemented/provisionable | RF/regulatory and network validation remain pending |
 | GNSS PPS GPIO9 + 12-hour sync | Implemented in firmware | Hardware PPS validation pending |
 | MAX17048 polling + ADC fallback | Implemented in firmware | Hardware/I2C validation pending |
-| BLE provisioning | **Scaffold / not implemented** | `BleProvisioning` belum membuat service provisioning |
+| BLE Sensor Reader | **Implemented / hardware-validation pending** | NimBLE central membaca descriptor + notification sensor dinamis; perlu node BLE GATT nyata untuk validasi lapangan |
 | Wi-Fi STA | **Partial / scaffold** | Manager/reconnect path ada, tetapi provisioning/configuration workflow end-to-end belum tersedia |
 | MQTT | **Partial / scaffold, not production-secure** | Manager ada, tetapi TLS trust/configuration dan end-to-end provisioning belum lengkap; port 8883 tidak boleh dianggap TLS hanya karena nomor port |
 | X25519/ECDH key rotation | **Scaffold / not implemented** | Belum ada protokol rotasi kunci end-to-end |

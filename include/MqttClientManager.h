@@ -1,7 +1,10 @@
 #pragma once
 #include <Arduino.h>
+#include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 class MqttClientManager {
 public:
@@ -9,20 +12,43 @@ public:
   bool connect(const String& host, uint16_t port,
                const String& user, const String& pass);
   bool publish(const String& topic, const String& payload, bool retained = false);
+  bool publishSensorData(uint32_t nodeId, const char* nodeName,
+                         uint16_t sensorId, const char* sensorName,
+                         const char* unit, float value, uint8_t quality,
+                         int16_t rssi, uint64_t timestampMs);
   void task();
   bool isConnected() const { return connected_ && client_.connected(); }
 
 private:
-  WiFiClientSecure net_;
-  PubSubClient client_{net_};
+  struct SensorSample {
+    uint32_t nodeId = 0;
+    uint16_t sensorId = 0;
+    float value = 0.0f;
+    uint8_t quality = 0;
+    int16_t rssi = -127;
+    uint64_t timestampMs = 0;
+    char nodeName[25] = {};
+    char sensorName[25] = {};
+    char unit[13] = {};
+  };
+  static_assert(sizeof(SensorSample) <= 128, "SensorSample queue item exceeds 128 bytes");
+
+  WiFiClient plain_;
+  WiFiClientSecure secure_;
+  PubSubClient client_;
+  bool useTls_ = false;
   bool connected_ = false;
   String host_;
   String user_;
   String pass_;
+  QueueHandle_t sensorQueue_ = nullptr;
+  StaticQueue_t sensorQueueStruct_{};
+  uint8_t sensorQueueStorage_[16 * sizeof(SensorSample)]{};
   uint16_t port_ = 1883;
   uint32_t nextRetryMs_ = 0;
   uint32_t retryDelayMs_ = 5000;
   bool loadCredentials();
   bool timeSynchronized() const;
   String topic(const char* leaf) const;
+  bool publishSensorSample(const SensorSample& sample);
 };

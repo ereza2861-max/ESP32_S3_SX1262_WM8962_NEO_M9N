@@ -35,6 +35,9 @@ public:
   bool cancelSOS();
   bool manualTune(float freqMHz);
   bool sendVoiceFrame();
+  bool sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,
+                           float value, uint8_t quality,
+                           uint64_t timestampMs);
   bool applyConfig();
   void updateSourceId();
   // Arms SX1262 duty-cycle RX before MCU deep sleep. Returns false if the

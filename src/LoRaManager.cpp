@@ -7,6 +7,7 @@
 #include "Telemetry.h"
 #include "StorageManager.h"
 #include "RadioArbiter.h"
+#include "SensorTelemetry.h"
 #include <esp_system.h>
 #include <Preferences.h>
 #include <mbedtls/aes.h>
@@ -4331,6 +4332,24 @@ bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination)
 
   }
   return true;
+}
+
+bool LoRaManager::sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,
+                                        float value, uint8_t quality,
+                                        uint64_t timestampMs) {
+  RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
+  if (!radioGuard.ok()) return false;
+  if (!ready_ || nodeId == 0 || sensorId == 0 || !isfinite(value)) return false;
+
+  uint8_t payload[Config::SENSOR_LORA_MAX_PAYLOAD] = {};
+  if (SensorTelemetry::serializeSensorTelemetry(payload, nodeId, sensorId, value,
+                                                  quality, timestampMs) !=
+      Config::SENSOR_LORA_MAX_PAYLOAD) return false;
+  // Keep the sensor record as an opaque binary payload. transmitHopped() adds
+  // the authenticated routing envelope and consumes the normal duty budget.
+  const String binary(reinterpret_cast<const char*>(payload),
+                      Config::SENSOR_LORA_MAX_PAYLOAD);
+  return transmitHopped(binary, Config::LORA_TYPE_SENSOR_TELEMETRY, 0);
 }
 
 bool LoRaManager::sendPosition() {

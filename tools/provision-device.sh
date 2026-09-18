@@ -69,6 +69,38 @@ else
   mqtt_user="${FIELDRADIO_MQTT_USERNAME:-}"
   mqtt_password="${FIELDRADIO_MQTT_PASSWORD:-}"
 
+  # ASSUMPTION: radio overrides are applied only when at least one LoRa radio
+  # environment variable is supplied; missing fields retain the Config.h defaults.
+  lora_override_enabled=0
+  if [ -n "${FIELDRADIO_LORA_FREQ_MHZ:-}" ] ||
+     [ -n "${FIELDRADIO_LORA_BW_KHZ:-}" ] ||
+     [ -n "${FIELDRADIO_LORA_SF:-}" ] ||
+     [ -n "${FIELDRADIO_LORA_CR:-}" ] ||
+     [ -n "${FIELDRADIO_LORA_POWER_DBM:-}" ] ||
+     [ -n "${FIELDRADIO_LORA_SYNC_WORD:-}" ]; then
+    lora_override_enabled=1
+    LORA_FREQ_MHZ=${FIELDRADIO_LORA_FREQ_MHZ:-923.0}
+    LORA_BW_KHZ=${FIELDRADIO_LORA_BW_KHZ:-125.0}
+    LORA_SF=${FIELDRADIO_LORA_SF:-7}
+    LORA_CR=${FIELDRADIO_LORA_CR:-5}
+    LORA_POWER_DBM=${FIELDRADIO_LORA_POWER_DBM:-14}
+    LORA_SYNC_WORD=${FIELDRADIO_LORA_SYNC_WORD:-0x12}
+  fi
+
+  lorawan_requested=0
+  if [ -n "${FIELDRADIO_LORAWAN_ENABLED:-}" ] ||
+     [ -n "${FIELDRADIO_LORAWAN_MODE:-}" ] ||
+     [ -n "${FIELDRADIO_LORAWAN_REGION:-}" ] ||
+     [ -n "${FIELDRADIO_LORAWAN_JOIN_EUI:-}" ] ||
+     [ -n "${FIELDRADIO_LORAWAN_APP_KEY:-}" ]; then
+    lorawan_requested=1
+    LORAWAN_ENABLED=${FIELDRADIO_LORAWAN_ENABLED:-0}
+    LORAWAN_MODE=${FIELDRADIO_LORAWAN_MODE:-0}
+    LORAWAN_REGION=${FIELDRADIO_LORAWAN_REGION:-1}
+    LORAWAN_JOIN_EUI=${FIELDRADIO_LORAWAN_JOIN_EUI:-}
+    LORAWAN_APP_KEY=${FIELDRADIO_LORAWAN_APP_KEY:-}
+  fi
+
   lora_key="${FIELDRADIO_LORA_KEY_HEX:-}"
   if [ -z "$lora_key" ] && [ -t 0 ]; then
     printf '%s' "LoRa AES-128 key (32 hex chars, blank=generate): "
@@ -78,10 +110,11 @@ else
     lora_key="$(openssl rand -hex 16)"
   fi
 
-  python3 - "$ap_ssid" "$ap_password" "$web_user" "$web_password" "$lora_key" "$sta_ssid" "$sta_password" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_password" <<'PY'
+  python3 - "$ap_ssid" "$ap_password" "$web_user" "$web_password" "$lora_key" "$sta_ssid" "$sta_password" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_password" "$lora_override_enabled" "${LORA_FREQ_MHZ:-}" "${LORA_BW_KHZ:-}" "${LORA_SF:-}" "${LORA_CR:-}" "${LORA_POWER_DBM:-}" "${LORA_SYNC_WORD:-}" <<'PY'
+import math
 import re
 import sys
-ssid, appass, webuser, webpass, key, sta_ssid, sta_pass, mqtt_host, mqtt_port, mqtt_user, mqtt_pass = sys.argv[1:]
+ssid, appass, webuser, webpass, key, sta_ssid, sta_pass, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, lora_enabled, lora_freq, lora_bw, lora_sf, lora_cr, lora_power, lora_sync = sys.argv[1:]
 
 def byte_len(value):
     return len(value.encode("utf-8"))
@@ -113,6 +146,29 @@ if len(mqtt_user) > 128 or len(mqtt_pass) > 128:
     raise SystemExit("ERROR: MQTT credentials must be <=128 characters.")
 if not re.fullmatch(r"[0-9A-Fa-f]{32}", key):
     raise SystemExit("ERROR: LoRa key must be exactly 32 hexadecimal characters.")
+
+if lora_enabled == "1":
+    try:
+        freq = float(lora_freq)
+        bw = float(lora_bw)
+        sf = int(lora_sf, 10)
+        cr = int(lora_cr, 10)
+        power = int(lora_power, 10)
+        sync_word = int(lora_sync, 0)
+    except ValueError:
+        raise SystemExit("ERROR: invalid LoRa radio override value.")
+    if not math.isfinite(freq) or not 920.0 <= freq <= 923.0:
+        raise SystemExit("ERROR: LoRa frequency must be 920.0..923.0 MHz.")
+    if not math.isfinite(bw) or not 7.8 <= bw <= 250.0:
+        raise SystemExit("ERROR: LoRa bandwidth must be 7.8..250.0 kHz.")
+    if not 5 <= sf <= 12:
+        raise SystemExit("ERROR: LoRa spreading factor must be 5..12.")
+    if not 5 <= cr <= 8:
+        raise SystemExit("ERROR: LoRa coding rate must be 5..8.")
+    if not 2 <= power <= 17:
+        raise SystemExit("ERROR: LoRa power must be 2..17 dBm.")
+    if not 0 <= sync_word <= 0xFF:
+        raise SystemExit("ERROR: LoRa sync word must be 0x00..0xFF.")
 PY
 
   tmp="$(mktemp)"
@@ -138,9 +194,24 @@ PY
 #define FIELDRADIO_MQTT_TOPIC_ROOT "${FIELDRADIO_MQTT_TOPIC_ROOT:-fieldradio}"
 #define FIELDRADIO_MQTT_SERVER_NAME "${FIELDRADIO_MQTT_SERVER_NAME:-broker.emqx.io}"
 EOF
+  if [ "$lora_override_enabled" = "1" ]; then
+    cat >>"$tmp" <<LORA
+#define FIELDRADIO_LORA_FREQ_MHZ  $LORA_FREQ_MHZ
+#define FIELDRADIO_LORA_BW_KHZ    $LORA_BW_KHZ
+#define FIELDRADIO_LORA_SF        $LORA_SF
+#define FIELDRADIO_LORA_CR        $LORA_CR
+#define FIELDRADIO_LORA_POWER_DBM $LORA_POWER_DBM
+#define FIELDRADIO_LORA_SYNC_WORD $LORA_SYNC_WORD
+LORA
+  fi
   mv -f "$tmp" "$LOCAL_CONFIG"
   trap - EXIT HUP INT TERM
   echo "Created include/LocalConfig.h (ignored by Git)."
+fi
+
+if [ "${lorawan_requested:-0}" = "1" ]; then
+  echo "LoRaWAN environment settings were supplied; they are not written to LocalConfig.h."
+  echo "Configure LoRaWAN via the WebUI after boot."
 fi
 
 if [ -e "$SECRETS/web_tls_cert.der" ] || [ -e "$SECRETS/web_tls_key.der" ]; then
@@ -148,7 +219,7 @@ if [ -e "$SECRETS/web_tls_cert.der" ] || [ -e "$SECRETS/web_tls_key.der" ]; then
     rm -f "$SECRETS/web_tls_cert.der" "$SECRETS/web_tls_key.der"
   else
     echo "Keeping existing TLS DER material."
-    "$ROOT/tools/check-provisioning.sh"
+    sh "$ROOT/tools/check-provisioning.sh"
     exit 0
   fi
 fi
@@ -190,7 +261,7 @@ openssl pkey -in "$tmpdir/web_tls_key.pem" -outform DER \
   -out "$SECRETS/web_tls_key.der"
 
 chmod 600 "$SECRETS/web_tls_cert.der" "$SECRETS/web_tls_key.der"
-"$ROOT/tools/check-provisioning.sh"
+sh "$ROOT/tools/check-provisioning.sh"
 echo "TLS provisioning complete. Private key remains only in ignored local files."
 echo "Build with: make build"
 echo "Flash with: make upload [UPLOAD_PORT=/dev/ttyUSB0]"

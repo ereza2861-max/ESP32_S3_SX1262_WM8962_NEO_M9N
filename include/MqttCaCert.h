@@ -1,5 +1,10 @@
 #pragma once
 
+#if __has_include("generated/MqttCaCert.h")
+#include "generated/MqttCaCert.h"
+#else
+#define MQTT_CA_CUSTOM 0
+
 // Public trust anchor for broker.emqx.io as documented by EMQX.
 // This is a public certificate, not a private key or device credential.
 static const char MQTT_BROKER_ROOT_CA[] PROGMEM = R"EOF(
@@ -26,3 +31,4 @@ pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl
 MrY=
 -----END CERTIFICATE-----
 )EOF";
+#endif

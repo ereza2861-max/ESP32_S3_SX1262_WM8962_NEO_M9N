@@ -30,7 +30,8 @@ struct RuntimeConfig {
   String lorawanAppSKey;
   uint8_t lorawanDevAddr[4] = {};
   uint8_t lorawanFPort = Config::LORAWAN_DEFAULT_FPORT;
-  uint16_t lorawanUplinkPeriodSec = Config::LORAWAN_UPLINK_PERIOD_SEC_DEFAULT;      // 0=low 8k mono, 1=medium 16k mono, 2=high 44.1k stereo
+  uint16_t lorawanUplinkPeriodSec = Config::LORAWAN_UPLINK_PERIOD_SEC_DEFAULT;
+  bool blePairingEnabled = Config::BLE_PAIRING_ENABLED_VALUE;
 
   void load();
   bool migrate();

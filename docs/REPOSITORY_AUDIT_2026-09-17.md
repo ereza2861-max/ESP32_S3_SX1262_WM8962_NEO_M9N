@@ -8,16 +8,17 @@ repository workflow. The bundled `.pio` build directory was excluded from source
 
 ## Findings
 
-### 1. BLE provisioning was a false-positive readiness signal — fixed
+### 1. BLE provisioning scaffold was replaced by the BLE Sensor Reader
 
-`BleProvisioning::begin()` was a stub but returned `true`. A future caller could therefore
-interpret the unimplemented service as initialized. The patch changes the scaffold to
-return `false` until the authenticated NimBLE provisioning service exists.
+The old provisioning facade has been replaced by `BleSensorReader` + `SensorReader`, which
+implements the NimBLE GATT central role, dynamic descriptor discovery, notifications,
+pairing, validation, and forwarding queues. The remaining validation requirement is a
+real BLE GATT sensor node; Bluetooth Classic HC-06/SPP is not compatible.
 
 ### 2. BLE is not the only incomplete/scaffold area
 
 The repository contains:
-- BLE provisioning: stub.
+- BLE Sensor Reader: implemented; hardware interoperability testing remains.
 - Wi-Fi STA: partial manager/reconnect implementation without an end-to-end provisioning UI/workflow.
 - MQTT: partial manager with no TLS transport/trust configuration and plaintext credential storage in
   its dedicated NVS namespace.
@@ -60,7 +61,7 @@ provisioning) and the repository preflight.
 ## Recommended next gates
 
 1. Freeze the pin map only when fabrication is explicitly approved/recorded.
-2. Implement authenticated BLE provisioning, or remove the scaffold from production builds.
+2. Validate the BLE Sensor Reader against the real ATmega328 + BLE-GATT module sensor-node implementation.
 3. Complete STA/MQTT provisioning and TLS trust handling before treating MQTT as production-ready.
 4. Add hardware-backed integration tests for PPS, I2C gauge, radio wake, audio clocks and sleep/wake.
 5. Keep Secure Boot/flash encryption as an explicit manufacturing procedure with recovery/update policy.

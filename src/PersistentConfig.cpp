@@ -196,6 +196,7 @@ void RuntimeConfig::load() {
     memcpy(savedLwDevAddr, lorawanDevAddr, sizeof(savedLwDevAddr));
   const uint8_t savedLwFPort = prefs.getUChar("lw_fport", lorawanFPort);
   const uint16_t savedLwPeriod = prefs.getUShort("lw_period", lorawanUplinkPeriodSec);
+  const bool savedBlePairing = prefs.getBool("ble_pair", blePairingEnabled);
   prefs.end();
 
   RuntimeConfig candidate = *this;
@@ -228,6 +229,12 @@ void RuntimeConfig::load() {
   memcpy(candidate.lorawanDevAddr, savedLwDevAddr, sizeof(candidate.lorawanDevAddr));
   candidate.lorawanFPort = savedLwFPort;
   candidate.lorawanUplinkPeriodSec = savedLwPeriod;
+  candidate.blePairingEnabled = savedBlePairing;
+  if (version == 4) {
+    // v4 had no BLE pairing field. Keep legacy values and initialize the
+    // pairing flag from the compile-time default; no passkey is migrated.
+    candidate.blePairingEnabled = Config::BLE_PAIRING_ENABLED_VALUE;
+  }
 
   if (candidate.validRadio()) {
     loraFreqMHz = candidate.loraFreqMHz;
@@ -264,6 +271,7 @@ void RuntimeConfig::load() {
     lorawanFPort = candidate.lorawanFPort;
     lorawanUplinkPeriodSec = candidate.lorawanUplinkPeriodSec;
   }
+  blePairingEnabled = candidate.blePairingEnabled;
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
   uint8_t passwordSaltCheck[PASSWORD_SALT_BYTES] = {};
   if (hexDecode(candidate.webPasswordSaltHex, passwordSaltCheck, sizeof(passwordSaltCheck)) &&
@@ -277,6 +285,8 @@ void RuntimeConfig::load() {
   // Runtime memory may temporarily contain the password because HTTP Basic
   // authentication still needs the cleartext value until the next reboot.
   if (!webPassword.isEmpty()) {
+    (void)save();
+  } else if (version == 4) {
     (void)save();
   } else if (version != CONFIG_VERSION && webPasswordConfigured()) {
     (void)save();
@@ -327,7 +337,8 @@ bool RuntimeConfig::save() const {
             prefs.putString("lw_appskey", lorawanAppSKey) > 0 &&
             prefs.putBytes("lw_devaddr", lorawanDevAddr, sizeof(lorawanDevAddr)) == sizeof(lorawanDevAddr) &&
             prefs.putUChar("lw_fport", lorawanFPort) > 0 &&
-            prefs.putUShort("lw_period", lorawanUplinkPeriodSec) > 0;
+            prefs.putUShort("lw_period", lorawanUplinkPeriodSec) > 0 &&
+            prefs.putBool("ble_pair", blePairingEnabled);
   if (ok) {
     uint8_t salt[PASSWORD_SALT_BYTES] = {};
     uint8_t hash[32] = {};

@@ -26,6 +26,8 @@
 #include "StorageManager.h"
 #include "WebUi.h"
 #include "PersistentConfig.h"
+#include "BleSensorReader.h"
+#include "SensorTelemetry.h"
 #include <Adafruit_NeoPixel.h>
 
 GnssManager gnss;
@@ -38,6 +40,7 @@ StorageManager storage;
 ESPWebServerSecure server(Config::WEB_PORT);
 WebUi web(server);
 FuelGaugeMax17048 fuelGauge;
+BleSensorReader bleSensorReader;
 
 static uint32_t lastStatus = 0;
 static uint32_t lastReport = 0;
@@ -59,7 +62,7 @@ constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0, hbLoRaWAN = 0;
-static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr, hNet = nullptr;
+static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr, hNet = nullptr, hBleSensor = nullptr, hSensorForward = nullptr;
 static uint32_t bootCount = 0;
 static Adafruit_NeoPixel rgb(1, Board::LED_RGB, NEO_GRB + NEO_KHZ800);
 static uint32_t lastBatteryHealthPersist = 0;
@@ -514,6 +517,11 @@ static bool shouldDeepSleep(uint32_t now) {
     busy = gState.ptt || gState.sos || gState.recording ||
            gState.playing || gState.usbAudioActive;
   }
+  // A continuously enabled BLE sensor gateway must not enter automatic deep
+  // sleep or it would silently stop collecting external sensor nodes.
+  const bool sensorKeepAwake = Config::SENSOR_READER_ENABLED_VALUE &&
+                               Config::SENSOR_KEEP_AWAKE_VALUE;
+  busy = busy || sensorKeepAwake;
 
   if (critical) {
     if (!criticalBatterySince) criticalBatterySince = now;
@@ -678,6 +686,60 @@ static void taskWeb(void*) {
   }
 }
 
+static void taskBleSensor(void*) {
+  watchdogSubscribe();
+  for (;;) {
+    esp_task_wdt_reset();
+    bleSensorReader.task();
+    esp_task_wdt_reset();
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
+static void taskSensorForward(void*) {
+  watchdogSubscribe();
+  struct ReportState {
+    uint32_t nodeId = 0;
+    uint16_t sensorId = 0;
+    float value = NAN;
+    uint32_t lastReportMs = 0;
+    bool valid = false;
+  } states[Config::SENSOR_MAX_NODES_VALUE * Config::SENSOR_MAX_SENSORS_PER_NODE_VALUE]{};
+
+  for (;;) {
+    esp_task_wdt_reset();
+    SensorReader::SensorSample sample{};
+    if (bleSensorReader.sensorReader().popSensorForLoRa(sample, 0)) {
+      ReportState* state = nullptr;
+      ReportState* freeState = nullptr;
+      for (auto& candidate : states) {
+        if (candidate.valid && candidate.nodeId == sample.nodeId &&
+            candidate.sensorId == sample.sensorId) {
+          state = &candidate;
+          break;
+        }
+        if (!candidate.valid && !freeState) freeState = &candidate;
+      }
+      if (!state) state = freeState;
+      if (state && SensorTelemetry::shouldReportSensor(
+              state->valid ? state->value : NAN, sample.value,
+              state ? state->lastReportMs : 0, millis(),
+              Config::SENSOR_REPORT_DELTA_THRESHOLD,
+              Config::SENSOR_REPORT_PERIOD_MS)) {
+        if (lora.sendSensorTelemetry(sample.nodeId, sample.sensorId, sample.value,
+                                     sample.quality, sample.timestampMs)) {
+          state->nodeId = sample.nodeId;
+          state->sensorId = sample.sensorId;
+          state->value = sample.value;
+          state->lastReportMs = millis();
+          state->valid = true;
+        }
+      }
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+  }
+}
 
 static void handlePhysicalControls(uint32_t now) {
   static uint32_t modeChordSince = 0;
@@ -1016,6 +1078,12 @@ void setup() {
 
   const bool usbAudioOk = audio.usbStart();
 
+  bool bleOk = true;
+#if SENSOR_READER_ENABLED
+  bleOk = bleSensorReader.begin(String("FieldRadio-SensorGateway"));
+  if (!bleOk) Serial.println("WARN: BLE sensor reader initialisation deferred/retry enabled");
+#endif
+
   bool tasksOk = true;
   tasksOk &= (xTaskCreatePinnedToCore(taskGnss, "GNSS", 4096, nullptr, 3, &hGnss, 1) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskLoRa, "LoRa", 12288, nullptr, 4, &hLoRa, 1) == pdPASS);
@@ -1023,6 +1091,13 @@ void setup() {
   tasksOk &= (xTaskCreatePinnedToCore(taskNet, "Net", 4096, nullptr, 2, &hNet, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskAudio, "Audio", 8192, nullptr, 5, &hAudio, 0) == pdPASS);
   tasksOk &= (xTaskCreatePinnedToCore(taskWeb, "Web", 6144, nullptr, 2, &hWeb, 0) == pdPASS);
+#if SENSOR_READER_ENABLED
+  // BLE GATT control task: prio 2, core 0. NimBLE owns its internal
+  // host/controller tasks; this task only drives scan/connect/recovery.
+  tasksOk &= (xTaskCreatePinnedToCore(taskBleSensor, "BleSensor", 6144, nullptr, 2, &hBleSensor, 0) == pdPASS);
+  // Forwarding is isolated from BLE callbacks and runs on core 1.
+  tasksOk &= (xTaskCreatePinnedToCore(taskSensorForward, "SensorForward", 4096, nullptr, 2, &hSensorForward, 1) == pdPASS);
+#endif
   tasksOk &= (xTaskCreatePinnedToCore(taskHealth, "Health", 4096, nullptr, 1, nullptr, 0) == pdPASS);
 
   if (!tasksOk) {
@@ -1036,8 +1111,8 @@ void setup() {
     StateLock lock(gState);
     if (lock.ok()) wifiOk = gState.wifiReady;
   }
-  Serial.printf("SD=%d GNSS=%d LoRa=%d LoRaWAN=%d Audio=%d USB=%d WiFi=%d\n",
-                sdOk, gpsOk, loraOk, lorawanOk, audioOk, usbAudioOk, wifiOk);
+  Serial.printf("SD=%d GNSS=%d LoRa=%d LoRaWAN=%d Audio=%d USB=%d WiFi=%d BLE-Sensor=%d\n",
+                sdOk, gpsOk, loraOk, lorawanOk, audioOk, usbAudioOk, wifiOk, bleOk);
 }
 
 void loop() {
@@ -1065,7 +1140,8 @@ void loop() {
     StateLock lock(gState);
     if (lock.ok()) activePower = gState.ptt || gState.sos || gState.recording ||
         gState.playing || gState.usbAudioActive || gState.rxActive ||
-        gState.wifiReady || gState.lorawanJoining || gState.lorawanJoined;
+        gState.wifiReady || gState.lorawanJoining || gState.lorawanJoined ||
+        (Config::SENSOR_READER_ENABLED_VALUE && Config::SENSOR_KEEP_AWAKE_VALUE);
   }
   setPowerProfile(activePower);
   manageWifi(now);

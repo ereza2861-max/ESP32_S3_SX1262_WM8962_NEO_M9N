@@ -2664,6 +2664,13 @@ void WebUi::handleConfig() {
   if (server_.hasArg("lora_key")) candidate.loraKeyHex = server_.arg("lora_key");
   if (server_.hasArg("ap_password")) candidate.apPassword = server_.arg("ap_password");
   if (server_.hasArg("web_password")) candidate.webPassword = server_.arg("web_password");
+  if (server_.hasArg("ble_pairing")) {
+    const String raw = server_.arg("ble_pairing");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid BLE pairing setting"); return;
+    }
+    candidate.blePairingEnabled = raw == "1";
+  }
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
@@ -2706,7 +2713,7 @@ void WebUi::handleConfig() {
   lora.updateSourceId();
   auditConfigChange(previous, gConfig, "web");
   server_.send(200, "text/plain",
-               "Configuration saved; audio source updated; WiFi credential changes apply after reboot");
+               "Configuration saved; BLE pairing and WiFi credential changes apply after reboot");
 }
 
 void WebUi::handleConfigExport() {
@@ -2718,6 +2725,7 @@ void WebUi::handleConfigExport() {
   j += ",\"sync\":" + String(c.loraSyncWord) + ",\"power\":" + String(c.loraPowerDbm);
   j += ",\"volume\":" + String(c.volume) + ",\"audio_source\":" + String(c.audioRecordSource);
   j += ",\"record_quality\":" + String(c.audioRecordQuality);
+  j += ",\"ble_pairing\":" + String(c.blePairingEnabled ? "true" : "false");
   j += ",\"battery_calibration\":" + String(c.batteryCalibration, 5);
   j += ",\"callsign\":\"" + jsonEscape(c.callsign) + "\"";
   // Secrets are deliberately omitted; exporting them into browser downloads is
