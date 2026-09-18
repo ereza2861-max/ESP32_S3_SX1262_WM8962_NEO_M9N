@@ -40,7 +40,7 @@ jobs:
           path: |
             ~/.platformio/.cache
             ~/.cache/pip
-          key: ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini', 'sdkconfig.defaults', 'src/idf_component.yml') }}
+          key: ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini', 'sensor_node_esp32c3/platformio.ini', 'sdkconfig.defaults', 'src/idf_component.yml', 'shared/SensorProtocol.h') }}
           restore-keys: |
             ${{ runner.os }}-platformio-
 
@@ -87,11 +87,17 @@ jobs:
             --std=c++17 --language=c++ --suppress=missingIncludeSystem \
             -I include src
 
-      - name: Build ESP32-S3 firmware
+      - name: Build ESP32-S3 gateway firmware
         shell: bash
         run: |
           set -o pipefail
           make ci-build 2>&1 | tee build.log
+
+      - name: Build ESP32-C3 sensor-node firmware
+        shell: bash
+        run: |
+          set -o pipefail
+          make sensor-node-build 2>&1 | tee sensor-node-build.log
 
       - name: Collect CI diagnostics
         if: always()
@@ -125,6 +131,7 @@ jobs:
           name: esp32-s3-build-log-${{ github.sha }}
           path: |
             build.log
+            sensor-node-build.log
             ci-context.txt
           if-no-files-found: error
           retention-days: 14
@@ -155,6 +162,37 @@ jobs:
 
           echo "=== Firmware artifacts ==="
           find artifacts -type f -print
+
+      - name: Collect sensor-node firmware artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_DIR="sensor_node_esp32c3/.pio/build/esp32-c3-devkitm-1"
+          test -d "$BUILD_DIR"
+          mkdir -p sensor-node-artifacts
+
+          find "$BUILD_DIR" \
+            -type f \
+            \( \
+              -name 'firmware.bin' \
+              -o -name 'bootloader.bin' \
+              -o -name 'partitions.bin' \
+              -o -name 'firmware.elf' \
+              -o -name 'firmware.map' \
+            \) \
+            -print \
+            -exec cp {} sensor-node-artifacts/ \;
+
+          find sensor-node-artifacts -type f -print
+
+      - name: Upload sensor-node firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: esp32-c3-sensor-node-${{ github.sha }}
+          path: sensor-node-artifacts/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4

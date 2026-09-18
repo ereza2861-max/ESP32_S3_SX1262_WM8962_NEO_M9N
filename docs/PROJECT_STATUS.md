@@ -20,7 +20,7 @@
 | MAX17048 polling + ADC fallback | Implemented in firmware | Hardware/I2C validation pending |
 | BLE Sensor Reader | **Implemented / hardware-validation pending** | NimBLE central membaca descriptor + notification sensor dinamis; perlu node BLE GATT nyata untuk validasi lapangan |
 | Wi-Fi STA | **Partial / scaffold** | Manager/reconnect path ada, tetapi provisioning/configuration workflow end-to-end belum tersedia |
-| MQTT | **Partial / scaffold, not production-secure** | Manager ada, tetapi TLS trust/configuration dan end-to-end provisioning belum lengkap; port 8883 tidak boleh dianggap TLS hanya karena nomor port |
+| MQTT | **Production security workflow implemented (FASE 3)** | Credential provisioning, production-build separation, TLS handshake timeout, CA verification, audit logging, rotation/warning controls are present; deployment still requires the documented production provisioning workflow |
 | X25519/ECDH key rotation | **Scaffold / not implemented** | Belum ada protokol rotasi kunci end-to-end |
 | Fragment selective-repeat / full SACK | **Partial** | Wire primitives/ACK path ada, full production window semantics masih tertunda |
 | Secure Boot + flash encryption production provisioning | **Procedure only** | Sengaja tidak diaktifkan otomatis |

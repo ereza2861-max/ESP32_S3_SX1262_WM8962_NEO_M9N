@@ -14,8 +14,8 @@ PIO_ARGS ?=
 PROJECT_PATH := $(abspath $(PROJECT_DIR))
 PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 
-.PHONY: all build build-log ci-build clean upload monitor provision check-provisioning \
-        preflight check-secrets download-artifacts download-build-log download-ci auth-help info help
+.PHONY: all build build-log ci-build sensor-node-build clean upload monitor provision check-provisioning \
+        preflight check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci auth-help info help
 
 GH ?= gh
 CI_WORKFLOW ?= compile.yml
@@ -43,6 +43,11 @@ ci-build:
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
 	$(PIO_RUN)
 
+sensor-node-build:
+	@set -eu; \
+	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
+	$(PIO) -d "$(PROJECT_PATH)/sensor_node_esp32c3" run -e esp32-c3-devkitm-1
+
 build-log: check-provisioning
 	@set -o pipefail; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
@@ -55,6 +60,14 @@ download-artifacts:
 	mkdir -p "$(ARTIFACT_DIR)"; \
 	$(GH) run download "$$run_id" --repo "$$( $(GH) repo view --json nameWithOwner --jq .nameWithOwner )" \
 		--name "esp32-s3-firmware-$(CI_COMMIT)" --dir "$(ARTIFACT_DIR)"
+
+download-sensor-node-artifacts:
+	@$(gh_check); \
+	run_id="$(call gh_run_id)"; \
+	test -n "$$run_id" || { echo "ERROR: Tidak ditemukan CI run untuk commit $(CI_COMMIT)."; exit 1; }; \
+	mkdir -p "$(ARTIFACT_DIR)"; \
+	$(GH) run download "$$run_id" --repo "$$( $(GH) repo view --json nameWithOwner --jq .nameWithOwner )" \
+		--name "esp32-c3-sensor-node-$(CI_COMMIT)" --dir "$(ARTIFACT_DIR)"
 
 download-build-log:
 	@$(gh_check); \
@@ -70,7 +83,12 @@ download-ci:
 	if $(MAKE) download-artifacts CI_RUN_ID="$(CI_RUN_ID)" CI_COMMIT="$(CI_COMMIT)" CI_WORKFLOW="$(CI_WORKFLOW)" ARTIFACT_DIR="$(ARTIFACT_DIR)"; then \
 		echo "CI firmware artifact berhasil diunduh."; \
 	else \
-		echo "WARN: firmware artifact tidak tersedia (misalnya karena compile gagal). Compile log tetap tersedia di $(ARTIFACT_DIR)."; \
+		echo "WARN: gateway firmware artifact tidak tersedia (misalnya karena compile gagal)."; \
+	fi; \
+	if $(MAKE) download-sensor-node-artifacts CI_RUN_ID="$(CI_RUN_ID)" CI_COMMIT="$(CI_COMMIT)" CI_WORKFLOW="$(CI_WORKFLOW)" ARTIFACT_DIR="$(ARTIFACT_DIR)"; then \
+		echo "CI sensor-node artifact berhasil diunduh."; \
+	else \
+		echo "WARN: sensor-node firmware artifact tidak tersedia."; \
 	fi
 
 clean:
@@ -114,12 +132,14 @@ help:
 	@echo ""
 	@echo "  make build                 Build firmware locally"
 	@echo "  make build-log             Build firmware and save output to build.log"
-	@echo "  make download-artifacts    Download firmware artifacts from CI for HEAD"
+	@echo "  make download-artifacts    Download ESP32-S3 gateway firmware artifacts from CI for HEAD"
+	@echo "  make download-sensor-node-artifacts  Download ESP32-C3 sensor-node artifacts"
 	@echo "  make download-build-log    Download the CI compile log for HEAD"
 	@echo "  make download-ci           Download compile log, then firmware artifacts (best effort on failed builds)"
 	@echo "  make download-build-log CI_RUN_ID=<id>  Download log from a specific Actions run"
 	@echo "  make download-artifacts CI_RUN_ID=<id> Download firmware from a specific Actions run"
-	@echo "  make ci-build              Same build entry point used by CI"
+	@echo "  make ci-build              Same gateway build entry point used by CI"
+	@echo "  make sensor-node-build     Build the ESP32-C3 BLE sensor-node firmware"
 	@echo "  make clean                 Clean PlatformIO build output"
 	@echo "  make provision             Create local credentials and a device TLS certificate"
 	@echo "  make check-provisioning     Validate local credentials and TLS material"
@@ -137,5 +157,7 @@ security-profile:
 	@test -f "$(SECURE_BOOT_SIGNING_KEY)" || (echo "ERROR: signing key not found"; exit 2)
 	@cp -f sdkconfig.secure.defaults sdkconfig
 	@printf '\\nCONFIG_SECURE_BOOT_SIGNING_KEY="%s"\\n' "$(SECURE_BOOT_SIGNING_KEY)" >> sdkconfig
-	@echo "Production security sdkconfig prepared."
-	@echo "Review sdkconfig and docs/SECURITY_PROVISIONING.md before flashing."
+	@printf '\\n# Production mode: Release flash encryption; secure UART download.\\nCONFIG_SECURE_FLASH_ENCRYPTION_MODE_RELEASE=y\\nCONFIG_SECURE_ENABLE_SECURE_ROM_DL_MODE=y\\n' >> sdkconfig
+	@echo "Production security sdkconfig prepared for ESP32-S3."
+	@echo "This target only prepares build configuration; it does not burn eFuses or flash hardware."
+	@echo "Review docs/PRODUCTION.md and use tools/provision.sh for the manufacturing workflow."

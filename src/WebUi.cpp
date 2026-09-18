@@ -2198,43 +2198,43 @@ void WebUi::handleMqttProvision() {
   const String pass = server_.arg("pass");
   if (host.isEmpty() || host.length() > 253 || rawPort.isEmpty() ||
       rawPort.length() > 5 || user.length() > 128 || pass.length() > 128) {
-    server_.send(400, "application/json", "{"ok":false,"error":"invalid MQTT credentials"}");
+    server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid MQTT credentials\"}");
     return;
   }
   uint32_t port = 0;
   for (size_t i = 0; i < rawPort.length(); ++i) {
     if (rawPort[i] < '0' || rawPort[i] > '9') {
-      server_.send(400, "application/json", "{"ok":false,"error":"invalid MQTT port"}");
+      server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid MQTT port\"}");
       return;
     }
     port = port * 10U + static_cast<uint32_t>(rawPort[i] - '0');
   }
   if (port == 0 || port > 65535U || host.indexOf('|') >= 0 ||
       user.indexOf('|') >= 0 || pass.indexOf('|') >= 0) {
-    server_.send(400, "application/json", "{"ok":false,"error":"invalid MQTT credentials"}");
+    server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid MQTT credentials\"}");
     return;
   }
-#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
   if (port == 1883) {
-    server_.send(400, "application/json", "{"ok":false,"error":"plaintext MQTT disabled in production"}");
+    server_.send(400, "application/json", "{\"ok\":false,\"error\":\"plaintext MQTT disabled in production\"}");
     return;
   }
 #endif
   if (!mqtt.provisionCredentials(host, static_cast<uint16_t>(port), user, pass)) {
-    server_.send(503, "application/json", "{"ok":false,"error":"MQTT provisioning failed"}");
+    server_.send(503, "application/json", "{\"ok\":false,\"error\":\"MQTT provisioning failed\"}");
     return;
   }
-  server_.send(200, "application/json", "{"ok":true,"provisioned":true}");
+  server_.send(200, "application/json", "{\"ok\":true,\"provisioned\":true}");
 }
 
 void WebUi::handleMqttStatus() {
   static uint32_t lastMqttStatusMs = 0;
   if (!rateLimit(lastMqttStatusMs, Config::WEB_RATE_LIMIT_MS)) return;
-  String j = "{"ok":true,"provisioned":";
+  String j = "{\"ok\":true,\"provisioned\":";
   j += mqtt.credentialsProvisioned() ? "true" : "false";
-  j += ","connected":";
+  j += ",\"connected\":";
   j += mqtt.isConnected() ? "true" : "false";
-  j += ","passwordRotationWarning":";
+  j += ",\"passwordRotationWarning\":";
   j += mqtt.passwordRotationWarning() ? "true" : "false";
   j += "}";
   server_.sendHeader("Cache-Control", "no-store");

@@ -118,6 +118,31 @@ dan level/clock audio tetap harus divalidasi pada PCB final.
 
 This variant targets the ESP32-S3-WROOM-1-N16R8 module (16 MiB Quad SPI flash + 8 MiB Octal SPI PSRAM). The no-OTA partition table allocates the full remaining flash after the bootloader/table region to a single factory application (`0x10000..0xFFFFFF`). PlatformIO is explicitly configured for QIO flash + OPI PSRAM, a 16 MiB flash image, and the matching maximum application size. The build is compile-time pinned to this module variant.
 
+## BLE Sensor Node processor
+
+The repository contains a separate **ESP32-C3 DevKitM-1** BLE sensor-node
+firmware under `sensor_node_esp32c3/`. It is not the gateway processor and must
+not be provisioned with the ESP32-S3 production script.
+
+The canonical sensor-node documentation is `docs/SENSOR_NODE.md`. The root CI
+builds both processors so a gateway-only green build cannot hide a broken
+sensor-node firmware.
+
+Repository layout:
+
+```text
+.
+├── include/                  ESP32-S3 gateway headers
+├── src/                      ESP32-S3 gateway firmware
+├── shared/                   Gateway/sensor-node wire contract
+├── sensor_node_esp32c3/      ESP32-C3 BLE sensor-node PlatformIO project
+├── test/                     Native and HIL tests
+├── tools/                    Provisioning and repository checks
+├── docs/                     Canonical and historical project documentation
+├── platformio.ini            ESP32-S3 gateway build
+└── Makefile                  Common build/provisioning entry points
+```
+
 ## Build
 
 PlatformIO is the single build backend for both local development and GitHub Actions.

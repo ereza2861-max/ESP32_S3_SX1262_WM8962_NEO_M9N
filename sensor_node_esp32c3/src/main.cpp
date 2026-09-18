@@ -13,12 +13,37 @@ Preferences prefs;
 String nodeName;
 size_t configuredSensorCount = SensorNodeConfig::EXAMPLE_SENSOR_COUNT;
 
+bool validBatteryPin(int pin) {
+  // ESP32-C3 ADC1 is GPIO0..4. GPIO2 is a strapping pin and is excluded.
+  return pin >= 0 && pin <= 4 && pin != 2;
+}
+
+bool validDigitalPin(int pin) {
+  // Keep the interactive provisioning command away from boot straps, VDD_SPI,
+  // flash pins and USB-JTAG. BME280 already owns GPIO8/9.
+  switch (pin) {
+    case 0:
+    case 1:
+    case 3:
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+    case 10:
+    case 20:
+    case 21:
+      return true;
+    default:
+      return false;
+  }
+}
+
 void printHelp() {
   Serial.println("Commands:");
   Serial.println("  name <node-name>        set node name (max 24 bytes)");
   Serial.println("  sensors <0..5>          set example sensor count");
-  Serial.println("  pin battery <gpio>      set ADC battery GPIO");
-  Serial.println("  pin digital <gpio>      set button/reed GPIO");
+  Serial.println("  pin battery <gpio>      set ADC1 battery GPIO (0,1,3,4)");
+  Serial.println("  pin digital <gpio>      set safe digital GPIO");
   Serial.println("  show                    show current provisioning");
   Serial.println("  save                    save provisioning to NVS and reboot");
   Serial.println("  help");
@@ -33,10 +58,19 @@ void loadProvisioning() {
   configuredSensorCount = std::min<size_t>(
       prefs.getUChar("count", static_cast<uint8_t>(SensorNodeConfig::EXAMPLE_SENSOR_COUNT)),
       SensorNodeConfig::EXAMPLE_SENSOR_COUNT);
-  SensorsExample::setBatteryAdcPin(
-      prefs.getInt("batpin", SensorNodeConfig::BATTERY_ADC_PIN));
-  SensorsExample::setDigitalPin(
-      prefs.getInt("digpin", SensorNodeConfig::DIGITAL_SENSOR_PIN));
+  const int batteryPin =
+      prefs.getInt("batpin", SensorNodeConfig::BATTERY_ADC_PIN);
+  const int digitalPin =
+      prefs.getInt("digpin", SensorNodeConfig::DIGITAL_SENSOR_PIN);
+  if (!validBatteryPin(batteryPin) || !validDigitalPin(digitalPin) ||
+      batteryPin == digitalPin) {
+    Serial.println("WARN: invalid persisted pin map; restoring safe defaults");
+    SensorsExample::setBatteryAdcPin(SensorNodeConfig::BATTERY_ADC_PIN);
+    SensorsExample::setDigitalPin(SensorNodeConfig::DIGITAL_SENSOR_PIN);
+  } else {
+    SensorsExample::setBatteryAdcPin(batteryPin);
+    SensorsExample::setDigitalPin(digitalPin);
+  }
   prefs.end();
 }
 
@@ -95,14 +129,28 @@ void handleCommand(String line) {
   }
   if (line.startsWith("pin battery ")) {
     const int pin = line.substring(12).toInt();
-    if (pin < 0) { Serial.println("ERROR: invalid GPIO"); return; }
+    if (!validBatteryPin(pin)) {
+      Serial.println("ERROR: battery GPIO must be ADC1 GPIO0,1,3,4");
+      return;
+    }
+    if (pin == SensorsExample::digitalPin()) {
+      Serial.println("ERROR: battery GPIO conflicts with digital GPIO");
+      return;
+    }
     SensorsExample::setBatteryAdcPin(pin);
     Serial.println("OK: battery GPIO staged");
     return;
   }
   if (line.startsWith("pin digital ")) {
     const int pin = line.substring(12).toInt();
-    if (pin < 0) { Serial.println("ERROR: invalid GPIO"); return; }
+    if (!validDigitalPin(pin)) {
+      Serial.println("ERROR: digital GPIO is reserved, strapping, USB-JTAG, or unavailable");
+      return;
+    }
+    if (pin == SensorsExample::batteryAdcPin()) {
+      Serial.println("ERROR: digital GPIO conflicts with battery GPIO");
+      return;
+    }
     SensorsExample::setDigitalPin(pin);
     Serial.println("OK: digital GPIO staged");
     return;

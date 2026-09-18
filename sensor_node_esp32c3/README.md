@@ -13,10 +13,13 @@ The canonical wire contract is `../shared/SensorProtocol.h`; do not create a sec
 | Battery divider ADC | GPIO4 |
 | Button/reed input | GPIO5 to GND, internal pull-up |
 
-For a real battery divider, verify the divider ratio and ADC attenuation before
-shipping. Never expose a voltage above the ESP32-C3 ADC/input limits.
+The firmware uses calibrated `analogReadMilliVolts()` with 11 dB attenuation for
+the battery ADC and applies `BATTERY_DIVIDER_RATIO` in software. Never expose a
+voltage above the ESP32-C3 ADC/input limits. GPIO2 is excluded because it is a
+strapping pin; interactive provisioning also rejects flash/USB-JTAG/strapping
+GPIOs.
 
-The example registers up to four sensors: temperature, humidity, pressure, battery voltage,
+The example registers up to five sensors: temperature, humidity, pressure, battery voltage,
 and a digital/reed input. The registry itself supports eight descriptors.
 
 ## GATT contract

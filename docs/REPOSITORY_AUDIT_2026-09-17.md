@@ -20,11 +20,12 @@ real BLE GATT sensor node; Bluetooth Classic HC-06/SPP is not compatible.
 The repository contains:
 - BLE Sensor Reader: implemented; hardware interoperability testing remains.
 - Wi-Fi STA: partial manager/reconnect implementation without an end-to-end provisioning UI/workflow.
-- MQTT: partial manager with no TLS transport/trust configuration and plaintext credential storage in
-  its dedicated NVS namespace.
+- MQTT: production security provisioning from FASE 3 is now present; deployment still depends on the
+  documented credential/TLS provisioning workflow.
 - X25519/ECDH key rotation: documented but not implemented.
 - Full selective-repeat/SACK fragmentation semantics: still incomplete.
-- Secure Boot/flash-encryption production provisioning: documented procedure, intentionally not automatic.
+- Secure Boot/flash-encryption production provisioning: FASE 5 manufacturing workflow is being added;
+  it remains intentionally explicit and does not burn eFuses during a normal development build.
 - HIL/factory/fuzz/native unit testing: incomplete.
 
 The audit therefore does **not** classify BLE as the sole remaining scaffold.

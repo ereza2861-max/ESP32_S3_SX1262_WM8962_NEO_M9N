@@ -162,7 +162,7 @@ static const char* wakeupCauseName(esp_sleep_wakeup_cause_t cause) {
 }
 
 static void enforceProductionSecurity() {
-#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (defined(CONFIG_SECURE_BOOT_V2_ENABLED) && defined(CONFIG_SECURE_FLASH_ENC_ENABLED) && CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
 #ifndef CONFIG_SECURE_BOOT_V2_ENABLED
 #define CONFIG_SECURE_BOOT_V2_ENABLED 0
 #endif

@@ -29,7 +29,10 @@ uint32_t loadOrCreatePasskey() {
 class ServerSecurityCallbacks final : public NimBLEServerCallbacks {
 public:
   void onConnect(NimBLEServer*, NimBLEConnInfo& connInfo) override {
-    if (gServer) gServer->setClientConnected(true);
+    // Do not mark the peer usable until link security has completed. The
+    // notification characteristic has no encrypted property in NimBLE-Arduino,
+    // so connection state itself is the final gate against pre-auth telemetry.
+    if (gServer) gServer->setClientConnected(false);
     if (!connInfo.isEncrypted()) {
       const bool started = NimBLEDevice::startSecurity(connInfo.getConnHandle());
       if (!started) Serial.println("WARN: failed to start BLE security");
@@ -46,9 +49,14 @@ public:
   }
 
   void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
+    const bool secure = connInfo.isEncrypted() && connInfo.isAuthenticated();
     Serial.printf("BLE authentication %s: %s\n",
-                  connInfo.isEncrypted() ? "OK" : "FAILED",
+                  secure ? "OK" : "FAILED",
                   connInfo.getAddress().toString().c_str());
+    if (gServer) gServer->setClientConnected(secure);
+    if (!secure && gBleServer) {
+      gBleServer->disconnect(connInfo);
+    }
   }
 };
 
@@ -86,6 +94,7 @@ bool BleSensorServer::begin(const String& nodeName, SensorRegistry& registry) {
   server_ = NimBLEDevice::createServer();
   if (!server_) return false;
   server_->setCallbacks(&gSecurityCallbacks);
+  gBleServer = server_;
   server_->advertiseOnDisconnect(true);
 
   service_ = server_->createService(SensorProtocol::SERVICE_UUID);

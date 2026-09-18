@@ -17,6 +17,12 @@
 #include <SD.h>
 #include "AppState.h"
 #include "StorageManager.h"
+#ifndef CONFIG_SECURE_BOOT_V2_ENABLED
+#define CONFIG_SECURE_BOOT_V2_ENABLED 0
+#endif
+#ifndef CONFIG_SECURE_FLASH_ENC_ENABLED
+#define CONFIG_SECURE_FLASH_ENC_ENABLED 0
+#endif
 
 extern StorageManager storage;
 
@@ -188,7 +194,7 @@ bool MqttClientManager::loadCredentials() {
   passwordProvisionedEpoch_ = static_cast<time_t>(prefs.getLong64("pass_epoch", 0));
   prefs.end();
 
-#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
   if (!credentialsProvisioned_ || blob.isEmpty()) return false;
 #else
   if (!credentialsProvisioned_ || blob.isEmpty()) {
@@ -199,7 +205,11 @@ bool MqttClientManager::loadCredentials() {
     return !host_.isEmpty() && port_ != 0;
   }
 #endif
-  return decryptCredentials(blob);
+  if (!decryptCredentials(blob)) return false;
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
+  if (port_ == 1883) return false;
+#endif
+  return true;
 }
 
 bool MqttClientManager::saveCredentials() {
@@ -223,7 +233,7 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
   if (host.isEmpty() || host.length() > 253 || port == 0 ||
       user.length() > 128 || pass.length() > 128 ||
       host.indexOf('|') >= 0 || user.indexOf('|') >= 0 || pass.indexOf('|') >= 0) return false;
-#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
   if (port == 1883) return false;
 #endif
   host_ = host; port_ = port; user_ = user; pass_ = pass;
@@ -232,7 +242,7 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
   plain_.stop();
   secure_.stop();
   useTls_ = port_ != 1883;
-#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
   if (port_ == 1883) return false;
 #endif
   if (useTls_) {

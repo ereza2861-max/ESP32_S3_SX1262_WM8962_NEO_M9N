@@ -39,8 +39,11 @@ namespace SensorsExample {
 bool begin(const PinConfig& pins) {
   gBatteryPin = pins.batteryAdcPin;
   gDigitalPin = pins.digitalPin;
-  pinMode(gDigitalPin, INPUT_PULLUP);
-  if (gBatteryPin >= 0) analogReadResolution(12);
+  if (gDigitalPin >= 0) pinMode(gDigitalPin, INPUT_PULLUP);
+  if (gBatteryPin >= 0) {
+    analogReadResolution(12);
+    analogSetPinAttenuation(gBatteryPin, ADC_11db);
+  }
 
   Wire.begin(SensorNodeConfig::BME280_SDA_PIN, SensorNodeConfig::BME280_SCL_PIN);
   gBmeReady = gBme280.begin(SensorNodeConfig::BME280_ADDRESS, &Wire);
@@ -99,10 +102,13 @@ void sample(SensorRegistry& registry) {
   }
 
   if (registry.find(4) >= 0 && gBatteryPin >= 0) {
-    const int raw = analogRead(gBatteryPin);
-    const float voltage = (static_cast<float>(raw) / 4095.0f) * 3.3f *
+    const uint32_t millivolts = analogReadMilliVolts(gBatteryPin);
+    const float voltage = (static_cast<float>(millivolts) / 1000.0f) *
                           SensorNodeConfig::BATTERY_DIVIDER_RATIO;
-    registry.updateValue(4, voltage, SensorProtocol::QUALITY_VALID);
+    const auto quality = millivolts == 0U
+                             ? SensorProtocol::QUALITY_STALE
+                             : SensorProtocol::QUALITY_VALID;
+    registry.updateValue(4, voltage, quality);
   }
 
   if (registry.find(5) >= 0 && gDigitalPin >= 0) {
@@ -111,8 +117,17 @@ void sample(SensorRegistry& registry) {
   }
 }
 
-void setBatteryAdcPin(int pin) { gBatteryPin = pin; }
-void setDigitalPin(int pin) { gDigitalPin = pin; }
+void setBatteryAdcPin(int pin) {
+  gBatteryPin = pin;
+  if (gBatteryPin >= 0) {
+    analogReadResolution(12);
+    analogSetPinAttenuation(gBatteryPin, ADC_11db);
+  }
+}
+void setDigitalPin(int pin) {
+  gDigitalPin = pin;
+  if (gDigitalPin >= 0) pinMode(gDigitalPin, INPUT_PULLUP);
+}
 int batteryAdcPin() { return gBatteryPin; }
 int digitalPin() { return gDigitalPin; }
 
