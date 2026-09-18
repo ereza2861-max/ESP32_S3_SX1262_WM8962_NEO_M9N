@@ -4,11 +4,34 @@ SensorRegistry::SensorRegistry(size_t maxNodes, size_t maxSensorsPerNode)
     : maxNodes_(maxNodes > MAX_SUPPORTED_NODES ? MAX_SUPPORTED_NODES : maxNodes),
       maxSensorsPerNode_(maxSensorsPerNode > MAX_SUPPORTED_SENSORS_PER_NODE
                              ? MAX_SUPPORTED_SENSORS_PER_NODE
-                             : maxSensorsPerNode) {}
+                             : maxSensorsPerNode)
+#ifdef ARDUINO
+      , mutex_(xSemaphoreCreateRecursiveMutex())
+#endif
+      {}
+
+bool SensorRegistry::lock(TickType_t timeout) const {
+#ifdef ARDUINO
+  return mutex_ && xSemaphoreTakeRecursive(mutex_, timeout) == pdTRUE;
+#else
+  (void)timeout;
+  mutex_.lock();
+  return true;
+#endif
+}
+
+void SensorRegistry::unlock() const {
+#ifdef ARDUINO
+  if (mutex_) (void)xSemaphoreGiveRecursive(mutex_);
+#else
+  mutex_.unlock();
+#endif
+}
 
 bool SensorRegistry::upsertNode(const SensorProtocol::BleAddress& address,
                                 const char* name, int8_t rssi, uint32_t nowMs,
                                 size_t& nodeIndex) {
+  if (!lock()) return false;
   const int existing = findNode(address);
   if (existing >= 0) {
     nodeIndex = static_cast<size_t>(existing);
@@ -19,22 +42,19 @@ bool SensorRegistry::upsertNode(const SensorProtocol::BleAddress& address,
       std::strncpy(n.name, name, sizeof(n.name) - 1);
       n.name[sizeof(n.name) - 1] = '\0';
     }
+    unlock();
     return true;
   }
   if (nodeCount_ >= maxNodes_) {
     bool foundHole = false;
     for (size_t i = 0; i < maxNodes_; ++i) {
-      if (!nodes_[i].allocated) {
-        nodeIndex = i;
-        foundHole = true;
-        break;
-      }
+      if (!nodes_[i].allocated) { nodeIndex = i; foundHole = true; break; }
     }
-    if (!foundHole) return false;
+    if (!foundHole) { unlock(); return false; }
   } else {
     nodeIndex = 0;
     while (nodeIndex < maxNodes_ && nodes_[nodeIndex].allocated) ++nodeIndex;
-    if (nodeIndex >= maxNodes_) return false;
+    if (nodeIndex >= maxNodes_) { unlock(); return false; }
   }
   ++nodeCount_;
   Node& n = nodes_[nodeIndex];
@@ -49,75 +69,96 @@ bool SensorRegistry::upsertNode(const SensorProtocol::BleAddress& address,
     std::strncpy(n.name, name, sizeof(n.name) - 1);
     n.name[sizeof(n.name) - 1] = '\0';
   }
+  unlock();
   return true;
 }
 
 bool SensorRegistry::markConnected(size_t nodeIndex, bool connected, uint32_t nowMs) {
-  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) return false;
+  if (!lock()) return false;
+  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) { unlock(); return false; }
   nodes_[nodeIndex].connected = connected;
   nodes_[nodeIndex].lastSeenMs = nowMs;
+  unlock();
   return true;
 }
 
 bool SensorRegistry::evictDisconnected(uint32_t nowMs, uint32_t ttlMs, size_t& nodeIndex) {
+  if (!lock()) return false;
   for (size_t i = 0; i < maxNodes_; ++i) {
     if (nodes_[i].allocated && !nodes_[i].connected &&
         nowMs - nodes_[i].lastSeenMs >= ttlMs) {
       nodes_[i] = {};
       --nodeCount_;
       nodeIndex = i;
+      unlock();
       return true;
     }
   }
+  unlock();
   return false;
 }
 
+bool SensorRegistry::forgetNode(size_t nodeIndex) {
+  if (!lock()) return false;
+  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) { unlock(); return false; }
+  nodes_[nodeIndex] = {};
+  if (nodeCount_ > 0) --nodeCount_;
+  unlock();
+  return true;
+}
+
 bool SensorRegistry::clearDescriptors(size_t nodeIndex) {
-  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) return false;
+  if (!lock()) return false;
+  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) { unlock(); return false; }
   nodes_[nodeIndex].sensorCount = 0;
   for (size_t i = 0; i < MAX_SUPPORTED_SENSORS_PER_NODE; ++i) {
     nodes_[nodeIndex].descriptors[i] = {};
     nodes_[nodeIndex].values[i] = {};
     nodes_[nodeIndex].valueValid[i] = false;
   }
+  unlock();
   return true;
 }
 
 bool SensorRegistry::upsertDescriptor(
     size_t nodeIndex, const SensorProtocol::SensorDescriptor& descriptor) {
+  if (!lock()) return false;
   if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated ||
-      !SensorProtocol::validDescriptor(descriptor)) return false;
+      !SensorProtocol::validDescriptor(descriptor)) { unlock(); return false; }
   Node& n = nodes_[nodeIndex];
   const int existing = findSensor(nodeIndex, descriptor.id);
-  if (existing >= 0) {
-    n.descriptors[existing] = descriptor;
-    return true;
-  }
-  if (n.sensorCount >= maxSensorsPerNode_) return false;
+  if (existing >= 0) { n.descriptors[existing] = descriptor; unlock(); return true; }
+  if (n.sensorCount >= maxSensorsPerNode_) { unlock(); return false; }
   n.descriptors[n.sensorCount] = descriptor;
   n.values[n.sensorCount] = {};
   n.valueValid[n.sensorCount] = false;
   ++n.sensorCount;
+  unlock();
   return true;
 }
 
 bool SensorRegistry::updateValue(size_t nodeIndex,
                                  const SensorProtocol::SensorValue& value,
                                  uint32_t nowMs) {
+  if (!lock()) return false;
   if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated ||
-      !SensorProtocol::validValue(value)) return false;
+      !SensorProtocol::validValue(value)) { unlock(); return false; }
   const int sensor = findSensor(nodeIndex, value.id);
-  if (sensor < 0) return false;
+  if (sensor < 0) { unlock(); return false; }
   Node& n = nodes_[nodeIndex];
   n.values[sensor] = value;
   n.valueValid[sensor] = true;
   n.lastSeenMs = nowMs;
+  unlock();
   return true;
 }
 
 size_t SensorRegistry::sensorCount(size_t nodeIndex) const {
-  return nodeIndex < MAX_SUPPORTED_NODES && nodes_[nodeIndex].allocated
-             ? nodes_[nodeIndex].sensorCount : 0;
+  if (!lock()) return 0;
+  const size_t count = nodeIndex < MAX_SUPPORTED_NODES && nodes_[nodeIndex].allocated
+                         ? nodes_[nodeIndex].sensorCount : 0;
+  unlock();
+  return count;
 }
 
 const SensorRegistry::Node* SensorRegistry::node(size_t nodeIndex) const {
@@ -141,16 +182,42 @@ const SensorProtocol::SensorValue* SensorRegistry::value(
 }
 
 int SensorRegistry::findNode(const SensorProtocol::BleAddress& address) const {
+  if (!lock()) return -1;
   for (size_t i = 0; i < MAX_SUPPORTED_NODES; ++i) {
-    if (nodes_[i].allocated && nodes_[i].address == address) return static_cast<int>(i);
+    if (nodes_[i].allocated && nodes_[i].address == address) { unlock(); return static_cast<int>(i); }
   }
+  unlock();
   return -1;
 }
 
 int SensorRegistry::findSensor(size_t nodeIndex, uint16_t sensorId) const {
-  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) return -1;
+  if (!lock()) return -1;
+  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) { unlock(); return -1; }
   for (size_t i = 0; i < nodes_[nodeIndex].sensorCount; ++i) {
-    if (nodes_[nodeIndex].descriptors[i].id == sensorId) return static_cast<int>(i);
+    if (nodes_[nodeIndex].descriptors[i].id == sensorId) { unlock(); return static_cast<int>(i); }
   }
+  unlock();
   return -1;
+}
+
+bool SensorRegistry::snapshot(Snapshot* out, size_t capacity, size_t& count) const {
+  count = 0;
+  if (!out || capacity == 0 || !lock()) return false;
+  const size_t limit = maxNodes_ < capacity ? maxNodes_ : capacity;
+  for (size_t i = 0; i < limit; ++i) {
+    if (!nodes_[i].allocated) continue;
+    out[count].index = i;
+    out[count].node = nodes_[i];
+    ++count;
+  }
+  unlock();
+  return true;
+}
+
+bool SensorRegistry::snapshotNode(size_t nodeIndex, Node& out) const {
+  if (!lock()) return false;
+  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) { unlock(); return false; }
+  out = nodes_[nodeIndex];
+  unlock();
+  return true;
 }

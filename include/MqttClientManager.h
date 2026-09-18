@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
@@ -11,6 +12,10 @@ public:
   bool begin();
   bool connect(const String& host, uint16_t port,
                const String& user, const String& pass);
+  bool provisionCredentials(const String& host, uint16_t port,
+                            const String& user, const String& pass);
+  bool credentialsProvisioned() const { return credentialsProvisioned_; }
+  bool passwordRotationWarning() const;
   bool publish(const String& topic, const String& payload, bool retained = false);
   bool publishSensorData(uint32_t nodeId, const char* nodeName,
                          uint16_t sensorId, const char* sensorName,
@@ -48,6 +53,12 @@ private:
   uint32_t nextRetryMs_ = 0;
   uint32_t retryDelayMs_ = 5000;
   bool loadCredentials();
+  bool saveCredentials();
+  bool encryptCredentials(String& envelope) const;
+  bool decryptCredentials(const String& envelope);
+  void auditEvent(const char* event, int mqttState = 0);
+  bool credentialsProvisioned_ = false;
+  time_t passwordProvisionedEpoch_ = 0;
   bool timeSynchronized() const;
   String topic(const char* leaf) const;
   bool publishSensorSample(const SensorSample& sample);

@@ -7,6 +7,7 @@
 #include "LoRaWANManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
+#include "BleSensorReader.h"
 #include <cstring>
 #include <WiFi.h>
 #include <SD.h>
@@ -265,6 +266,8 @@ extern StorageManager storage;
 extern LoRaManager lora;
 extern LoRaWANManager lorawan;
 extern AudioManager audio;
+extern BleSensorReader bleSensorReader;
+static SensorReader::SensorNodeSnapshot gSensorSnapshots[SensorRegistry::MAX_SUPPORTED_NODES]{};
 
 static const char INDEX_HTML[] PROGMEM = R"HTML(
 <!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
@@ -274,7 +277,7 @@ body.light{background:#f5f5f5;color:#111} body.light .card{border-color:#bbb} bo
 .card{border:1px solid #444;border-radius:8px;padding:12px;margin:8px 0}
 @media(max-width:600px){body{padding:8px}.card{padding:8px}button,input,select{width:100%;box-sizing:border-box;margin:3px 0}table{font-size:.8rem;display:block;overflow-x:auto}}
 button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:10px;overflow:auto}
-.battery-low{outline:3px solid orange}.battery-critical{outline:4px solid red}
+.battery-low{outline:3px solid orange}.battery-critical{outline:4px solid red}.sensor-badge{padding:2px 5px;border-radius:4px;font-size:.75rem;border:1px solid #777}.sensor-badge.q0{background:#164d25}.sensor-badge:not(.q0){background:#6a4b00}
 </style></head><body class="__THEME_CLASS__"><h1 id=title>FieldRadio</h1><label>Language <select id=lang onchange="setLang()"><option value="en">EN</option><option value="id">ID</option></select></label>
 <div class=card>
 <button onclick="ptt(1)">PTT ON</button><button onclick="ptt(0)">PTT OFF</button>
@@ -346,6 +349,9 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 </tr></thead><tbody id=scantbody></tbody></table></div>
 <div id=hopsummary></div>
 </div>
+<div class=card id=sensorPanel><h3>BLE Sensor Nodes</h3>
+<table><thead><tr><th>Node</th><th>Address</th><th>RSSI</th><th>Sensors</th><th>Last Seen</th><th>Status</th><th>Actions</th></tr></thead><tbody id=sensorNodesBody></tbody></table>
+<div id=sensorDetail></div></div>
 <div class=card><button onclick="toggleTheme()">Dark/light</button><button onclick="showTrack()">Track</button><span id=toast></span></div>
 <div class=card id=trackPanel style="display:none"><h3>Track</h3>
 <label>From epoch <input id=trackFrom type=number value="0"></label>
@@ -363,6 +369,14 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <script>
 const CSRF_TOKEN='__CSRF_TOKEN__';
 let trackMap=null,trackLayer=null;
+function sensorBadge(q){let a=[];if(q&1)a.push('STALE');if(q&2)a.push('RANGE');if(q&4)a.push('GW-TS');if(q&8)a.push('BAD-TS');if(q&16)a.push('LINK');return `<span class="sensor-badge q${q}">${a.length?a.join(' '):'VALID'}</span>`}
+function sensorEscape(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+async function sensorAction(id,action){if(!confirm(action==='forget'?'Forget this sensor node?':'Reconnect this sensor node?'))return;try{const r=await fetch(`/api/sensors/${action}?id=${encodeURIComponent(id)}`,{method:'POST',headers:{'X-CSRF-Token':CSRF_TOKEN}});toast(await r.text());await refreshSensorNodes()}catch(e){toast('Sensor action failed')}}
+async function refreshSensorDetail(id){try{const n=await (await fetch('/api/sensors/nodes?id='+encodeURIComponent(id))).json();if(!n.ok){sensorDetail.textContent=n.error||'Node unavailable';return}let h=`<h4>Node ${n.id} — ${sensorEscape(n.name||'(unnamed)')}</h4><table><thead><tr><th>ID</th><th>Name</th><th>Unit</th><th>Value</th><th>Timestamp</th><th>Quality</th></tr></thead><tbody>`;for(const x of n.sensors||[]){h+=`<tr><td>${x.id}</td><td>${sensorEscape(x.name)}</td><td>${sensorEscape(x.unit)}</td><td>${x.valueValid?x.value:'—'}</td><td>${x.timestamp||'—'}</td><td>${sensorBadge(x.quality)}</td></tr>`}sensorDetail.dataset.nodeId=String(n.id);sensorDetail.innerHTML=h+'</tbody></table>'}catch(e){toast('Sensor detail failed')}}
+async function refreshSensorNodes(){try{const a=await (await fetch('/api/sensors/nodes')).json();sensorNodesBody.innerHTML=(a.nodes||[]).map(n=>`<tr><td><button onclick="refreshSensorDetail(${n.id})">${n.id}</button></td><td>${sensorEscape(n.address)}</td><td>${n.rssi}</td><td>${n.sensorCount}</td><td>${n.lastSeenMs} ms</td><td>${n.connected?'CONNECTED':'OFFLINE'}</td><td><button onclick="sensorAction(${n.id},'refresh')">Refresh</button><button onclick="sensorAction(${n.id},'refresh')">Reconnect</button><button onclick="sensorAction(${n.id},'forget')">Forget</button></td></tr>`).join('')}catch(e){toast('Sensor inventory failed')}}
+async function refreshSensorLive(){try{const a=await (await fetch('/api/sensors/live')).json();if(a.nodes) for(const n of a.nodes){const open=document.getElementById('sensorDetail');if(open.dataset.nodeId==n.id) await refreshSensorDetail(n.id)}}catch(e){}}
+refreshSensorNodes();setInterval(refreshSensorNodes,5000);setInterval(refreshSensorLive,2000);
+
 async function j(u,o={}){o.headers=Object.assign({},o.headers||{},o.method&&o.method.toUpperCase()!=='GET'?{'X-CSRF-Token':CSRF_TOKEN}:{});let r=await fetch(u,o);return await r.text()}
 function toast(t){document.getElementById('toast').textContent=t;setTimeout(()=>document.getElementById('toast').textContent='',2500)}
 async function setLang(){const c=document.getElementById('lang').value;localStorage.setItem('fieldradio-lang',c);try{await fetch('/api/lang?set='+c)}catch(e){};document.getElementById('title').textContent=c==='id'?'FieldRadio':'FieldRadio'}
@@ -896,6 +910,14 @@ void WebUi::begin() {
   server_.on("/api/selftest/result", HTTP_GET, [this]{ if (auth()) handleSelfTestResult(); });
   server_.on("/api/lang", HTTP_GET, [this]{ if (auth()) handleLang(); });
   server_.on("/api/neighbors", HTTP_GET, [this]{ if (auth()) handleNeighbors(); });
+  server_.on("/api/sensors/nodes", HTTP_GET, [this]{ if (auth()) {
+    if (server_.hasArg("id")) handleSensorNodeDetail(); else handleSensorNodes();
+  }});
+  server_.on("/api/sensors/live", HTTP_GET, [this]{ if (auth()) handleSensorLive(); });
+  server_.on("/api/sensors/forget", HTTP_POST, [this]{ if (auth()) handleSensorForget(); });
+  server_.on("/api/sensors/refresh", HTTP_POST, [this]{ if (auth()) handleSensorRefresh(); });
+  server_.on("/api/mqtt/provision", HTTP_POST, [this]{ if (auth()) handleMqttProvision(); });
+  server_.on("/api/mqtt/status", HTTP_GET, [this]{ if (auth()) handleMqttStatus(); });
   server_.on("/api/routes", HTTP_GET, [this]{ if (auth()) handleRoutes(); });
   server_.on("/api/capture/start", HTTP_POST, [this]{ if (auth()) handleCaptureStart(); });
   server_.on("/api/capture/stop", HTTP_POST, [this]{ if (auth()) handleCaptureStop(); });
@@ -2071,6 +2093,150 @@ void WebUi::handleAuthStats() {
              ",\"blockedUntilMs\":" + String(authBlockedUntilMs_) +
              ",\"windowStartMs\":" + String(authFailureWindowStartMs_) +
              ",\"csrfFailures\":" + String(csrfFailures_) + "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
+}
+
+static String sensorAddressJson(const SensorProtocol::BleAddress& address) {
+  static const char hex[] = "0123456789ABCDEF";
+  String out;
+  out.reserve(18);
+  for (int i = 5; i >= 0; --i) {
+    if (i != 5) out += ':';
+    out += hex[address.bytes[i] >> 4];
+    out += hex[address.bytes[i] & 0x0F];
+  }
+  return out;
+}
+
+static String sensorNodeJson(size_t index, const SensorRegistry::Node& node, bool includeValues) {
+  String j = "{\"id\":" + String(index) + ",\"address\":\"" + sensorAddressJson(node.address) +
+             "\",\"name\":\"" + jsonEscape(String(node.name)) + "\",\"rssi\":" + String(node.rssi) +
+             ",\"connected\":" + String(node.connected ? "true" : "false") +
+             ",\"lastSeenMs\":" + String(node.lastSeenMs) + ",\"sensorCount\":" + String(node.sensorCount);
+  if (includeValues) {
+    j += ",\"sensors\":[";
+    for (size_t i = 0; i < node.sensorCount; ++i) {
+      if (i) j += ',';
+      const auto& d = node.descriptors[i];
+      const auto& v = node.values[i];
+      j += "{\"id\":" + String(d.id) + ",\"name\":\"" + jsonEscape(String(d.name)) +
+           "\",\"unit\":\"" + jsonEscape(String(d.unit)) + "\",\"valueValid\":" +
+           String(node.valueValid[i] ? "true" : "false") + ",\"value\":" +
+           (node.valueValid[i] ? String(v.value, 6) : String("null")) +
+           ",\"timestamp\":" + (node.valueValid[i] ? String(v.timestamp) : String("null")) +
+           ",\"quality\":" + String(node.valueValid[i] ? v.quality : 0) + "}";
+    }
+    j += ']';
+  }
+  return j + '}';
+}
+
+void WebUi::handleSensorNodes() {
+  if (!rateLimit(lastSensorNodesMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  size_t count = 0;
+  if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) {
+    server_.send(503, "application/json", "{\"ok\":false,\"error\":\"sensor snapshot unavailable\"}"); return;
+  }
+  String j = "{\"ok\":true,\"nodes\":[";
+  for (size_t i = 0; i < count; ++i) { if (i) j += ','; j += sensorNodeJson(gSensorSnapshots[i].index, gSensorSnapshots[i].node, false); }
+  server_.sendHeader("Cache-Control", "no-store"); server_.send(200, "application/json", j + "]}");
+}
+
+void WebUi::handleSensorNodeDetail() {
+  if (!rateLimit(lastSensorNodesMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String raw = server_.arg("id");
+  if (raw.isEmpty()) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"missing id\"}"); return; }
+  const long id = raw.toInt();
+  if (id < 0 || id >= static_cast<long>(SensorRegistry::MAX_SUPPORTED_NODES)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
+  SensorRegistry::Node node{};
+  if (!bleSensorReader.sensorReader().snapshotNode(static_cast<size_t>(id), node)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
+  server_.sendHeader("Cache-Control", "no-store"); server_.send(200, "application/json", "{\"ok\":true," + sensorNodeJson(static_cast<size_t>(id), node, true).substring(1));
+}
+
+void WebUi::handleSensorLive() {
+  if (!rateLimit(lastSensorLiveMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  size_t count = 0;
+  if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) { server_.send(503, "application/json", "{\"ok\":false}"); return; }
+  String j = "{\"ok\":true,\"nodes\":[";
+  for (size_t i = 0; i < count; ++i) { if (i) j += ','; j += sensorNodeJson(gSensorSnapshots[i].index, gSensorSnapshots[i].node, true); }
+  server_.sendHeader("Cache-Control", "no-store"); server_.send(200, "application/json", j + "]}");
+}
+
+bool parseSensorNodeId(ESPWebServerSecure& server, size_t& id) {
+  const String raw = server.arg("id");
+  if (raw.isEmpty()) return false;
+  const long value = raw.toInt();
+  if (value < 0 || value >= static_cast<long>(SensorRegistry::MAX_SUPPORTED_NODES)) return false;
+  id = static_cast<size_t>(value); return true;
+}
+
+void WebUi::handleSensorForget() {
+  if (!rateLimit(lastSensorActionMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  size_t id = 0;
+  if (!parseSensorNodeId(server_, id)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
+  if (!bleSensorReader.sensorReader().requestForgetNode(id)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
+  server_.send(202, "application/json", "{\"ok\":true,\"queued\":true}");
+}
+
+void WebUi::handleSensorRefresh() {
+  if (!rateLimit(lastSensorActionMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  size_t id = 0;
+  if (!parseSensorNodeId(server_, id)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
+  if (!bleSensorReader.sensorReader().requestRefreshNode(id)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
+  server_.send(202, "application/json", "{\"ok\":true,\"queued\":true}");
+}
+
+
+
+void WebUi::handleMqttProvision() {
+  static uint32_t lastMqttProvisionMs = 0;
+  if (!rateLimit(lastMqttProvisionMs, Config::WEB_RATE_LIMIT_MS)) return;
+  const String host = server_.arg("host");
+  const String rawPort = server_.arg("port");
+  const String user = server_.arg("user");
+  const String pass = server_.arg("pass");
+  if (host.isEmpty() || host.length() > 253 || rawPort.isEmpty() ||
+      rawPort.length() > 5 || user.length() > 128 || pass.length() > 128) {
+    server_.send(400, "application/json", "{"ok":false,"error":"invalid MQTT credentials"}");
+    return;
+  }
+  uint32_t port = 0;
+  for (size_t i = 0; i < rawPort.length(); ++i) {
+    if (rawPort[i] < '0' || rawPort[i] > '9') {
+      server_.send(400, "application/json", "{"ok":false,"error":"invalid MQTT port"}");
+      return;
+    }
+    port = port * 10U + static_cast<uint32_t>(rawPort[i] - '0');
+  }
+  if (port == 0 || port > 65535U || host.indexOf('|') >= 0 ||
+      user.indexOf('|') >= 0 || pass.indexOf('|') >= 0) {
+    server_.send(400, "application/json", "{"ok":false,"error":"invalid MQTT credentials"}");
+    return;
+  }
+#if defined(FIELDRADIO_PRODUCTION_BUILD)
+  if (port == 1883) {
+    server_.send(400, "application/json", "{"ok":false,"error":"plaintext MQTT disabled in production"}");
+    return;
+  }
+#endif
+  if (!mqtt.provisionCredentials(host, static_cast<uint16_t>(port), user, pass)) {
+    server_.send(503, "application/json", "{"ok":false,"error":"MQTT provisioning failed"}");
+    return;
+  }
+  server_.send(200, "application/json", "{"ok":true,"provisioned":true}");
+}
+
+void WebUi::handleMqttStatus() {
+  static uint32_t lastMqttStatusMs = 0;
+  if (!rateLimit(lastMqttStatusMs, Config::WEB_RATE_LIMIT_MS)) return;
+  String j = "{"ok":true,"provisioned":";
+  j += mqtt.credentialsProvisioned() ? "true" : "false";
+  j += ","connected":";
+  j += mqtt.isConnected() ? "true" : "false";
+  j += ","passwordRotationWarning":";
+  j += mqtt.passwordRotationWarning() ? "true" : "false";
+  j += "}";
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", j);
 }

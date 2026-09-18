@@ -3,6 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#ifdef ARDUINO
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#else
+#include <mutex>
+using TickType_t = uint32_t;
+#endif
 
 class SensorRegistry {
 public:
@@ -30,6 +37,13 @@ public:
   bool markConnected(size_t nodeIndex, bool connected, uint32_t nowMs);
   bool clearDescriptors(size_t nodeIndex);
   bool evictDisconnected(uint32_t nowMs, uint32_t ttlMs, size_t& nodeIndex);
+  bool forgetNode(size_t nodeIndex);
+  struct Snapshot {
+    size_t index = 0;
+    Node node{};
+  };
+  bool snapshot(Snapshot* out, size_t capacity, size_t& count) const;
+  bool snapshotNode(size_t nodeIndex, Node& out) const;
   bool upsertDescriptor(size_t nodeIndex, const SensorProtocol::SensorDescriptor& descriptor);
   bool updateValue(size_t nodeIndex, const SensorProtocol::SensorValue& value, uint32_t nowMs);
 
@@ -48,4 +62,16 @@ private:
   size_t maxSensorsPerNode_;
   size_t nodeCount_ = 0;
   Node nodes_[MAX_SUPPORTED_NODES]{};
+#ifdef ARDUINO
+  mutable SemaphoreHandle_t mutex_ = nullptr;
+#else
+  mutable std::recursive_mutex mutex_;
+#endif
+
+#ifdef ARDUINO
+  bool lock(TickType_t timeout = portMAX_DELAY) const;
+#else
+  bool lock(TickType_t timeout = 0) const;
+#endif
+  void unlock() const;
 };

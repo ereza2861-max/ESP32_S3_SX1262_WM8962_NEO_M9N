@@ -9,6 +9,7 @@
 // callbacks never perform network or radio I/O.
 class SensorReader {
 public:
+  using SensorNodeSnapshot = SensorRegistry::Snapshot;
   bool begin(const String& gatewayName);
   void task();
   bool isEnabled() const;
@@ -18,6 +19,13 @@ public:
   const SensorRegistry& registry() const { return registry_; }
   bool enqueueSensorForLoRa(const struct SensorSample& sample);
   bool popSensorForLoRa(struct SensorSample& sample, TickType_t timeout = 0);
+
+  // UI-facing copy-out APIs. They never expose registry pointers and hold the
+  // registry mutex only for the memcpy-sized snapshot operation.
+  bool snapshotNodes(SensorNodeSnapshot* out, size_t capacity, size_t& count) const;
+  bool snapshotNode(size_t nodeIndex, SensorRegistry::Node& out) const;
+  bool requestForgetNode(size_t nodeIndex);
+  bool requestRefreshNode(size_t nodeIndex);
 
 public:
   struct SensorSample {
@@ -34,4 +42,6 @@ private:
   StaticQueue_t sensorQueueStruct_{};
   uint8_t sensorQueueStorage_[Config::SENSOR_LORA_QUEUE_DEPTH * sizeof(SensorSample)]{};
   bool initialized_ = false;
+  volatile bool forgetRequested_[SensorRegistry::MAX_SUPPORTED_NODES]{};
+  volatile bool refreshRequested_[SensorRegistry::MAX_SUPPORTED_NODES]{};
 };

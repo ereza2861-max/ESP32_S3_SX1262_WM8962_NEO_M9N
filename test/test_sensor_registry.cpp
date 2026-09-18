@@ -112,6 +112,31 @@ void test_connection_state_and_clear() {
   assert(!registry.node(node)->connected);
 }
 
+
+void test_snapshot_and_forget() {
+  SensorRegistry registry(2, 2);
+  SensorProtocol::BleAddress address{{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, 1};
+  size_t node = 99;
+  assert(registry.upsertNode(address, "snapshot-node", -42, 1234, node));
+  assert(registry.upsertDescriptor(node, makeDescriptor(11, "temperature")));
+
+  SensorRegistry::Snapshot snapshots[2]{};
+  size_t count = 0;
+  assert(registry.snapshot(snapshots, 2, count));
+  assert(count == 1);
+  assert(snapshots[0].index == node);
+  assert(std::strcmp(snapshots[0].node.name, "snapshot-node") == 0);
+  assert(snapshots[0].node.sensorCount == 1);
+  assert(snapshots[0].node.descriptors[0].id == 11);
+
+  SensorRegistry::Node copy{};
+  assert(registry.snapshotNode(node, copy));
+  assert(copy.rssi == -42);
+  assert(registry.forgetNode(node));
+  assert(registry.nodeCount() == 0);
+  assert(!registry.snapshotNode(node, copy));
+}
+
 void test_sensor_delta_encoding() {
   assert(SensorTelemetry::shouldReportSensor(100.0f, 102.1f, 1000, 2000, 0.02f, 60000));
   assert(!SensorTelemetry::shouldReportSensor(100.0f, 101.0f, 1000, 2000, 0.02f, 60000));
@@ -153,6 +178,7 @@ int main() {
   test_limits_and_invalid_descriptor();
   test_eviction_reclaims_disconnected_node();
   test_connection_state_and_clear();
+  test_snapshot_and_forget();
   test_sensor_delta_encoding();
   test_sensor_lora_payload_serialize();
   return 0;

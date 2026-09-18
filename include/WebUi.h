@@ -27,6 +27,9 @@ private:
   uint32_t lastSosMs_ = 0;
   uint32_t lastPttMs_ = 0;
   uint32_t lastConfigMs_ = 0;
+  uint32_t lastSensorNodesMs_ = 0;
+  uint32_t lastSensorLiveMs_ = 0;
+  uint32_t lastSensorActionMs_ = 0;
   File uploadFile_;
   String uploadPath_;
   size_t uploadBytes_ = 0;
@@ -133,4 +136,9 @@ private:
   void handleLogExport();
   void handleForwardStats();
   void handleAuthStats();
+  void handleSensorNodes();
+  void handleSensorNodeDetail();
+  void handleSensorLive();
+  void handleSensorForget();
+  void handleSensorRefresh();
 };

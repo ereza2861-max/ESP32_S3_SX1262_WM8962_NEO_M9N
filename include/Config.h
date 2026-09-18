@@ -156,6 +156,26 @@ constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
 constexpr uint32_t WEB_POST_CSRF_TOKEN_BYTES = 16;
 constexpr uint32_t LORA_REKEY_PERIOD_SEC = 86400UL;
 constexpr uint32_t LORA_REPLAY_TIME_WINDOW_SEC = 300UL;
+// X25519/ECDH session-key rotation is deliberately disabled until the
+// interoperability/bring-up work is complete. Enable only with
+// -DFIELDRADIO_LORA_ECDH_REKEY_ENABLED=1 after both peers implement the same
+// wire format and key lifecycle.
+#ifndef FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+#define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 0
+#endif
+constexpr bool LORA_ECDH_REKEY_ENABLED =
+    FIELDRADIO_LORA_ECDH_REKEY_ENABLED != 0;
+static_assert(FIELDRADIO_LORA_ECDH_REKEY_ENABLED == 0 ||
+              FIELDRADIO_LORA_ECDH_REKEY_ENABLED == 1,
+              "FIELDRADIO_LORA_ECDH_REKEY_ENABLED must be 0 or 1");
+constexpr uint32_t LORA_ECDH_KEY_RETENTION_SEC =
+    2UL * LORA_REKEY_PERIOD_SEC;
+constexpr uint8_t LORA_ECDH_PROTOCOL_VERSION = 1;
+constexpr uint8_t LORA_ECDH_BEACON_MAGIC = 0xE2;
+constexpr size_t LORA_ECDH_PUBLIC_KEY_BYTES = 32;
+constexpr size_t LORA_ECDH_BEACON_BYTES =
+    1U + 1U + sizeof(uint32_t) +
+    LORA_ECDH_PUBLIC_KEY_BYTES + LORA_ECDH_PUBLIC_KEY_BYTES;
 
 // Replay persistence backend. FRAM is the production backend; the NVS
 // journal is retained as an automatic fallback when FRAM is absent.
@@ -307,8 +327,8 @@ constexpr uint32_t DEEP_SLEEP_IDLE_MS = 300000;
 constexpr uint32_t TASK_WDT_TIMEOUT_MS = 10000;
 
 // BLE sensor-reader parameters. These are compile-time build parameters.
-// Assumption: the external ATmega328 sensor node advertises the custom GATT
-// service and implements the v1 contract in SensorProtocol.h.
+// The external ESP32-C3 sensor node advertises the custom GATT service and
+// implements the v1 contract in shared/SensorProtocol.h.
 #ifndef SENSOR_READER_ENABLED
 #define SENSOR_READER_ENABLED 1
 #endif
@@ -438,6 +458,14 @@ constexpr uint32_t STA_RETRY_MAX_MS = 300000UL;
 #endif
 #ifndef FIELDRADIO_MQTT_SERVER_NAME
 #define FIELDRADIO_MQTT_SERVER_NAME "broker.emqx.io"
+#endif
+#if defined(FIELDRADIO_PRODUCTION_BUILD)
+#undef FIELDRADIO_MQTT_HOST
+#define FIELDRADIO_MQTT_HOST ""
+#undef FIELDRADIO_MQTT_USERNAME
+#define FIELDRADIO_MQTT_USERNAME ""
+#undef FIELDRADIO_MQTT_PASSWORD
+#define FIELDRADIO_MQTT_PASSWORD ""
 #endif
 constexpr char MQTT_HOST[] = FIELDRADIO_MQTT_HOST;
 constexpr uint16_t MQTT_PORT = FIELDRADIO_MQTT_PORT;

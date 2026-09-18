@@ -1,0 +1,5 @@
+pytest>=8,<9
+bleak>=0.22
+requests>=2.31
+pyserial>=3.5
+paho-mqtt>=2.0

@@ -408,6 +408,24 @@ bool SensorReader::begin(const String& gatewayName) {
 void SensorReader::task() {
   if (!initialized_ || !Config::SENSOR_READER_ENABLED_VALUE || !gScan) return;
 
+  // WebUI actions are consumed by the BLE task; the HTTP handler never tears
+  // down a NimBLE client or mutates the registry directly.
+  for (size_t nodeIndex = 0; nodeIndex < Config::SENSOR_MAX_NODES_VALUE; ++nodeIndex) {
+    if (forgetRequested_[nodeIndex]) {
+      for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+        if (gSlots[i].inUse && gSlots[i].nodeIndex == nodeIndex) cleanupSlot(gSlots[i], true);
+      }
+      (void)registry_.forgetNode(nodeIndex);
+      forgetRequested_[nodeIndex] = false;
+      refreshRequested_[nodeIndex] = false;
+    } else if (refreshRequested_[nodeIndex]) {
+      for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+        if (gSlots[i].inUse && gSlots[i].nodeIndex == nodeIndex) cleanupSlot(gSlots[i], true);
+      }
+      refreshRequested_[nodeIndex] = false;
+    }
+  }
+
   for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
     ClientSlot& slot = gSlots[i];
     if (!slot.inUse) continue;
@@ -446,6 +464,28 @@ bool SensorReader::popSensorForLoRa(SensorSample& sample, TickType_t timeout) {
   return sensorQueue_ && xQueueReceive(sensorQueue_, &sample, timeout) == pdTRUE;
 }
 
+bool SensorReader::snapshotNodes(SensorNodeSnapshot* out, size_t capacity, size_t& count) const {
+  return registry_.snapshot(out, capacity, count);
+}
+
+bool SensorReader::snapshotNode(size_t nodeIndex, SensorRegistry::Node& out) const {
+  return registry_.snapshotNode(nodeIndex, out);
+}
+
+bool SensorReader::requestForgetNode(size_t nodeIndex) {
+  SensorRegistry::Node node{};
+  if (nodeIndex >= SensorRegistry::MAX_SUPPORTED_NODES || !registry_.snapshotNode(nodeIndex, node)) return false;
+  forgetRequested_[nodeIndex] = true;
+  return true;
+}
+
+bool SensorReader::requestRefreshNode(size_t nodeIndex) {
+  SensorRegistry::Node node{};
+  if (nodeIndex >= SensorRegistry::MAX_SUPPORTED_NODES || !registry_.snapshotNode(nodeIndex, node)) return false;
+  refreshRequested_[nodeIndex] = true;
+  return true;
+}
+
 bool SensorReader::isEnabled() const { return Config::SENSOR_READER_ENABLED_VALUE; }
 
 bool SensorReader::hasConnectedNode() const {
@@ -461,6 +501,10 @@ bool SensorReader::hasConnectedNode() const {
 bool SensorReader::begin(const String&) { return false; }
 bool SensorReader::enqueueSensorForLoRa(const SensorSample&) { return false; }
 bool SensorReader::popSensorForLoRa(SensorSample&, TickType_t) { return false; }
+bool SensorReader::snapshotNodes(SensorNodeSnapshot*, size_t, size_t& count) const { count = 0; return false; }
+bool SensorReader::snapshotNode(size_t, SensorRegistry::Node&) const { return false; }
+bool SensorReader::requestForgetNode(size_t) { return false; }
+bool SensorReader::requestRefreshNode(size_t) { return false; }
 void SensorReader::task() {}
 bool SensorReader::isEnabled() const { return false; }
 bool SensorReader::hasConnectedNode() const { return false; }

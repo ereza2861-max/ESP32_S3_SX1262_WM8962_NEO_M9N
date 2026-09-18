@@ -9,6 +9,7 @@
 #include "ReplayStore.h"
 #include "RfDetector.h"
 #include "RadioArbiter.h"
+#include "LoRaEcdhRekey.h"
 
 struct ChannelScanResult {
   float freqMHz = 0.0f;
