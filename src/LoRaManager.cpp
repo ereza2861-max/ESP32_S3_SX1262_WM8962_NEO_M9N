@@ -28,7 +28,7 @@ constexpr uint8_t PACKET_MAGIC = 0xF1;
 constexpr size_t PACKET_HEADER_V1 = 1 + 1 + 1 + 2 + 4;
 constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
 constexpr size_t PACKET_HEADER_V3 = PACKET_HEADER_V2 + 1 + sizeof(uint32_t);
-constexpr size_t PACKET_HEADER_V4 = PACKET_HEADER_V2 + 8;
+constexpr size_t PACKET_HEADER_V4 = PACKET_HEADER_V2 + 8; // V2 nonce 4B -> V4 nonce 12B
 constexpr size_t PACKET_HEADER_V5 = Config::LORA_ECDH_V5_HEADER_BYTES;
 static_assert(PACKET_HEADER_V5 == PACKET_HEADER_V3 + 1,
               "V5 header must be V3 header plus key_epoch_delta");
@@ -499,8 +499,56 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
   }
 #endif
   uint8_t key[16];
-  if (!plain || !loadKey(key) ||
-      len + PACKET_HEADER_V2 + PACKET_TAG > Config::LORA_MAX_PACKET)
+  if (!plain || !loadKey(key))
+    return false;
+
+  if (Config::LORA_USE_AES_GCM) {
+    if (len + PACKET_HEADER_V4 + PACKET_TAG > Config::LORA_MAX_PACKET)
+      return false;
+
+    uint8_t nonce[12] = {};
+    for (size_t i = 0; i < sizeof(nonce); i += sizeof(uint32_t)) {
+      const uint32_t randomWord = esp_random();
+      memcpy(nonce + i, &randomWord,
+             min(sizeof(randomWord), sizeof(nonce) - i));
+    }
+
+    const uint8_t ttl = Config::LORA_INITIAL_TTL;
+    packet.reserve(PACKET_HEADER_V4 + len + PACKET_TAG);
+    packet += static_cast<char>(PACKET_MAGIC);
+    packet += static_cast<char>(Config::LORA_PROTOCOL_VERSION_GCM);
+    packet += static_cast<char>(type);
+    packet += static_cast<char>(seq & 0xFF);
+    packet += static_cast<char>(seq >> 8);
+    for (uint8_t byte : nonce) packet += static_cast<char>(byte);
+    for (uint8_t i = 0; i < sizeof(sourceId_); ++i)
+      packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+    packet += static_cast<char>(ttl);
+
+    uint8_t cipher[Config::LORA_MAX_PACKET] = {};
+    uint8_t tag[PACKET_TAG] = {};
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    const bool ok =
+        mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 128) == 0 &&
+        mbedtls_gcm_crypt_and_tag(
+            &gcm, MBEDTLS_GCM_ENCRYPT, len,
+            nonce, sizeof(nonce),
+            reinterpret_cast<const unsigned char*>(packet.c_str()),
+            PACKET_HEADER_V4, plain, cipher, PACKET_TAG, tag) == 0;
+    if (ok) {
+      for (size_t i = 0; i < len; ++i) packet += static_cast<char>(cipher[i]);
+      for (uint8_t byte : tag) packet += static_cast<char>(byte);
+    }
+    mbedtls_gcm_free(&gcm);
+    mbedtls_platform_zeroize(key, sizeof(key));
+    mbedtls_platform_zeroize(nonce, sizeof(nonce));
+    mbedtls_platform_zeroize(cipher, sizeof(cipher));
+    mbedtls_platform_zeroize(tag, sizeof(tag));
+    return ok;
+  }
+
+  if (len + PACKET_HEADER_V2 + PACKET_TAG > Config::LORA_MAX_PACKET)
     return false;
 
   const uint32_t nonce = esp_random();

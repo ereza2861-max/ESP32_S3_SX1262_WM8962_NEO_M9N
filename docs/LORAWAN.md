@@ -90,7 +90,7 @@ the existing AP provisioning path.
 
 ## Known limitations / TODO
 
-- AES-GCM P2P wire version 4 is enabled for the primary P2P packet path.
+- AES-GCM P2P wire version 4 is the primary P2P packet path; legacy V2/V3 decoding remains for compatibility.
 - X25519/ECDH key rotation is scaffolded only.
 - Wi-Fi STA and MQTT contain partial/scaffold integration and are not production-secure end-to-end; BLE Sensor Reader is implemented as a NimBLE GATT central; it is independent of LoRaWAN provisioning. The external sensor must be BLE GATT compatible; legacy Bluetooth transports are not supported.
 - Fragment payloads use a dedicated `LORA_TYPE_FRAG_DATA` wire type and the existing authenticated ACK path. Full 8-frame bitmap Selective Repeat remains a follow-up item.
