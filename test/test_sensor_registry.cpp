@@ -27,16 +27,29 @@ void test_add_and_deduplicate_node() {
   SensorProtocol::BleAddress address{{1, 2, 3, 4, 5, 6}, 1};
   size_t index = 99;
 
-  assert(registry.upsertNode(address, "ATmega-01", -55, 10, index));
+  assert(registry.upsertNode(address, "sensor-node-01", -55, 10, index));
   assert(index == 0);
   assert(registry.nodeCount() == 1);
 
-  assert(registry.upsertNode(address, "ATmega-01-renamed", -50, 20, index));
+  assert(registry.upsertNode(address, "sensor-node-01-renamed", -50, 20, index));
   assert(index == 0);
   assert(registry.nodeCount() == 1);
   assert(registry.node(0) != nullptr);
-  assert(std::strcmp(registry.node(0)->name, "ATmega-01-renamed") == 0);
+  assert(std::strcmp(registry.node(0)->name, "sensor-node-01-renamed") == 0);
   assert(registry.node(0)->rssi == -50);
+}
+
+void test_identity_rpa_maps_to_same_node() {
+  SensorRegistry registry(2, 1);
+  SensorProtocol::BleAddress identity{{1, 2, 3, 4, 5, 6}, 0};
+  SensorProtocol::BleAddress rpa{{6, 5, 4, 3, 2, 1}, 1};
+  size_t node = 0;
+  assert(registry.upsertNode(identity, "stable-node", -50, 10, node));
+  assert(registry.setLastRpa(node, rpa));
+  assert(registry.findNode(identity) == static_cast<int>(node));
+  assert(registry.findNode(rpa) == static_cast<int>(node));
+  SensorProtocol::BleAddress unknown{{9, 9, 9, 9, 9, 9}, 1};
+  assert(registry.findNode(unknown) < 0);
 }
 
 void test_descriptor_and_value_lifecycle() {
@@ -174,6 +187,7 @@ void test_sensor_lora_payload_serialize() {
 
 int main() {
   test_add_and_deduplicate_node();
+  test_identity_rpa_maps_to_same_node();
   test_descriptor_and_value_lifecycle();
   test_limits_and_invalid_descriptor();
   test_eviction_reclaims_disconnected_node();

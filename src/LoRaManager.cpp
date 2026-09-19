@@ -13,6 +13,7 @@
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
 #include <mbedtls/gcm.h>
+#include <mbedtls/platform_util.h>
 #include <time.h>
 #include <esp_attr.h>
 #include <SD.h>
@@ -27,6 +28,15 @@ constexpr size_t PACKET_HEADER_V1 = 1 + 1 + 1 + 2 + 4;
 constexpr size_t PACKET_HEADER_V2 = PACKET_HEADER_V1 + 4 + 1;
 constexpr size_t PACKET_HEADER_V3 = PACKET_HEADER_V2 + 1 + sizeof(uint32_t);
 constexpr size_t PACKET_HEADER_V4 = PACKET_HEADER_V2 + 8;
+constexpr size_t PACKET_HEADER_V5 = Config::LORA_ECDH_V5_HEADER_BYTES;
+static_assert(PACKET_HEADER_V5 == PACKET_HEADER_V3 + 1,
+              "V5 header must be V3 header plus key_epoch_delta");
+constexpr size_t PACKET_HEADER_TX =
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+    PACKET_HEADER_V5;
+#else
+    PACKET_HEADER_V2;
+#endif
 constexpr uint8_t ROUTE_EXT_MAGIC = 0xE7;
 constexpr uint8_t ROUTE_EXT_VERSION_V1 = 1;
 constexpr uint8_t ROUTE_EXT_VERSION = 2;
@@ -60,6 +70,10 @@ constexpr uint8_t FORWARD_RECORD_VERSION = 2;
 struct RtcRadioState {
   uint32_t magic;
   uint32_t hopFrame;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  uint32_t ecdhKeyEpoch;
+  bool ecdhActive;
+#endif
   uint16_t sosSeq;
   uint8_t sosRetryCount;
   bool sosAwaitingAck;
@@ -290,8 +304,12 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     // Reject both stale and implausibly future frames. An absolute-difference
     // check alone would allow a forged future timestamp within the window.
     if (packetEpochSec > currentEpoch) {
-      if (packetEpochSec - currentEpoch > Config::LORA_REPLAY_TIME_WINDOW_SEC) return true;
+      if (packetEpochSec - currentEpoch > Config::LORA_REPLAY_TIME_WINDOW_SEC) {
+        ++replayRejects_;
+        return true;
+      }
     } else if (currentEpoch - packetEpochSec > Config::LORA_REPLAY_TIME_WINDOW_SEC) {
+      ++replayRejects_;
       return true;
     }
   }
@@ -334,16 +352,28 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   // may legitimately rewrite the routing extension, but a node must not accept
   // the same origin sequence repeatedly just because the routed payload hash
   // changed; doing so permits replaying alternate authenticated route variants.
-  if (delta == 0) return true;
+  if (delta == 0) {
+    ++replayRejects_;
+    return true;
+  }
 
   const uint16_t age = static_cast<uint16_t>(slot->highestSeq - seq);
   if (age >= Config::LORA_REPLAY_WINDOW_BITS &&
-      age < 0x8000U) return true;
-  if (age >= 0x8000U) return true;
+      age < 0x8000U) {
+    ++replayRejects_;
+    return true;
+  }
+  if (age >= 0x8000U) {
+    ++replayRejects_;
+    return true;
+  }
   const uint8_t clampedAge = static_cast<uint8_t>(
       min<uint16_t>(age, Config::LORA_REPLAY_WINDOW_BITS - 1U));
   const uint32_t bit = 1UL << clampedAge;
-  if (slot->bitmap & bit) return true;
+  if (slot->bitmap & bit) {
+    ++replayRejects_;
+    return true;
+  }
   slot->bitmap |= bit;
   slot->highestPayloadHash = payloadHash;
   slot->seenMs = now;
@@ -436,6 +466,37 @@ uint16_t LoRaManager::crc16(const uint8_t* data, size_t len) {
 
 bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
                                 uint16_t seq, String& packet) {
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  if (type != Config::LORA_TYPE_NEIGHBOR_BEACON) {
+    // DECISION: under flag=1 every data packet is pairwise V5. The peer is
+    // resolved from the authenticated route envelope; broadcast without a
+    // concrete peer has no ECDH session and is rejected rather than downgraded.
+    uint32_t peerSourceId = 0;
+    if (plain && len >= 12 && plain[0] == ROUTE_EXT_MAGIC &&
+        (plain[1] == ROUTE_EXT_VERSION ||
+         plain[1] == ROUTE_EXT_VERSION_V1)) {
+      uint32_t destination = 0;
+      uint32_t nextHop = 0;
+      memcpy(&destination, plain + 4, sizeof(destination));
+      memcpy(&nextHop, plain + 8, sizeof(nextHop));
+      peerSourceId = nextHop != 0 ? nextHop : destination;
+    }
+    if (peerSourceId == 0) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "ECDH peer unsupported";
+      return false;
+    }
+    const uint32_t epochSec =
+        currentEpochSec() != 0 ? currentEpochSec() : ecdhAuthoritativeEpochSec_;
+    if (epochSec == 0)
+      return false;
+    return encryptPacketV5(plain, len, type, seq,
+                           computeHopIndex(hopFrame_), epochSec,
+                           peerSourceId,
+                           Config::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT,
+                           packet);
+  }
+#endif
   uint8_t key[16];
   if (!plain || !loadKey(key) ||
       len + PACKET_HEADER_V2 + PACKET_TAG > Config::LORA_MAX_PACKET)
@@ -482,6 +543,110 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
   return ok;
 }
 
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+bool LoRaManager::encryptPacketV5(const uint8_t* plain, size_t len, uint8_t type,
+                                  uint16_t seq, uint8_t hopIndex,
+                                  uint32_t epochSec, uint32_t peerSourceId,
+                                  uint8_t keyEpochDelta, String& packet) {
+  if (!plain || peerSourceId == 0 || epochSec == 0 ||
+      (keyEpochDelta != Config::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT &&
+       keyEpochDelta != Config::LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS) ||
+      len + PACKET_HEADER_V5 + PACKET_TAG > Config::LORA_MAX_PACKET)
+    return false;
+
+  uint32_t keyEpochSec = 0;
+  if (!LoRaEcdhRekey::sessionEpochForDelta(
+          epochSec, keyEpochDelta, keyEpochSec))
+    return false;
+
+  uint8_t sessionKey[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};
+  bool haveKey = ecdhKeyMaterial_.getSessionKey(
+      peerSourceId, keyEpochSec, sessionKey);
+
+  if (!haveKey) {
+    for (const auto& peer : ecdhPeers_) {
+      if (!peer.valid || peer.sourceId != peerSourceId)
+        continue;
+      const uint32_t peerEpoch = LoRaEcdhRekey::epochNumber(peer.epochSec);
+      if (peerEpoch != LoRaEcdhRekey::epochNumber(keyEpochSec))
+        continue;
+      if (ecdhKeyMaterial_.hasEphemeralKey() &&
+          ecdhKeyMaterial_.ephemeralEpoch() == peerEpoch) {
+        haveKey = ecdhKeyMaterial_.deriveSessionKey(
+            peer.ephemeralPublic, sourceId_, peerSourceId, peer.epochSec) &&
+                  ecdhKeyMaterial_.getSessionKey(
+                      peerSourceId, keyEpochSec, sessionKey);
+      }
+      break;
+    }
+  }
+
+  if (!haveKey) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH session key unavailable";
+    mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
+    return false;
+  }
+
+  const uint32_t nonce = esp_random();
+  const uint8_t ttl = Config::LORA_INITIAL_TTL;
+  packet.reserve(PACKET_HEADER_V5 + len + PACKET_TAG);
+  packet += static_cast<char>(PACKET_MAGIC);
+  packet += static_cast<char>(Config::LORA_PROTOCOL_VERSION_ECDH);
+  packet += static_cast<char>(type);
+  packet += static_cast<char>(seq & 0xFF);
+  packet += static_cast<char>(seq >> 8);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+  packet += static_cast<char>(ttl);
+  packet += static_cast<char>(hopIndex);
+  for (uint8_t i = 0; i < 4; ++i)
+    packet += static_cast<char>((epochSec >> (8 * i)) & 0xFF);
+  packet += static_cast<char>(keyEpochDelta);
+
+  uint8_t iv[16] = {};
+  memcpy(iv, &nonce, sizeof(nonce));
+  memcpy(iv + 4, &seq, sizeof(seq));
+  iv[6] = hopIndex;
+  iv[7] = keyEpochDelta;
+  memcpy(iv + 8, &epochSec, sizeof(epochSec));
+
+  uint8_t streamBlock[16] = {};
+  uint8_t cipher[Config::LORA_MAX_PACKET] = {};
+  size_t ncOff = 0;
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  bool ok = mbedtls_aes_setkey_enc(
+                &aes, sessionKey, LoRaEcdhRekey::AES_KEY_BYTES * 8U) == 0 &&
+            mbedtls_aes_crypt_ctr(&aes, len, &ncOff, iv, streamBlock,
+                                  plain, cipher) == 0;
+  if (ok) {
+    for (size_t i = 0; i < len; ++i)
+      packet += static_cast<char>(cipher[i]);
+    uint8_t tag[32] = {};
+    const mbedtls_md_info_t* md =
+        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    ok = md && mbedtls_md_hmac(
+        md, sessionKey + LoRaEcdhRekey::AES_KEY_BYTES,
+        LoRaEcdhRekey::HMAC_KEY_BYTES,
+        reinterpret_cast<const unsigned char*>(packet.c_str()),
+        PACKET_HEADER_V5 + len, tag, sizeof(tag)) == 0;
+    if (ok)
+      for (size_t i = 0; i < PACKET_TAG; ++i)
+        packet += static_cast<char>(tag[i]);
+    mbedtls_platform_zeroize(tag, sizeof(tag));
+  }
+  mbedtls_aes_free(&aes);
+  mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
+  mbedtls_platform_zeroize(iv, sizeof(iv));
+  mbedtls_platform_zeroize(streamBlock, sizeof(streamBlock));
+  mbedtls_platform_zeroize(cipher, sizeof(cipher));
+  return ok;
+}
+#endif
+
 bool LoRaManager::encryptRoutedPacket(const uint8_t* plain, size_t len, uint8_t type,
                                        uint16_t seq, uint32_t destination,
                                        uint32_t excludeNextHop, String& packet) {
@@ -497,6 +662,32 @@ bool LoRaManager::encryptRoutedPacket(const uint8_t* plain, size_t len, uint8_t 
 bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
                                    uint16_t seq, uint8_t hopIndex, uint32_t epochSec,
                                    String& packet) {
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  if (!LoRaEcdhRekey::ecdhBeaconWireAllowed(3U, type)) {
+    uint32_t peerSourceId = 0;
+    if (plain && len >= 12 && plain[0] == ROUTE_EXT_MAGIC &&
+        (plain[1] == ROUTE_EXT_VERSION ||
+         plain[1] == ROUTE_EXT_VERSION_V1)) {
+      uint32_t destination = 0;
+      uint32_t nextHop = 0;
+      memcpy(&destination, plain + 4, sizeof(destination));
+      memcpy(&nextHop, plain + 8, sizeof(nextHop));
+      peerSourceId = nextHop != 0 ? nextHop : destination;
+    }
+    if (peerSourceId == 0) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "ECDH peer unsupported";
+      return false;
+    }
+    const uint32_t effectiveEpoch =
+        epochSec != 0 ? epochSec : ecdhAuthoritativeEpochSec_;
+    if (effectiveEpoch == 0)
+      return false;
+    return encryptPacketV5(
+        plain, len, type, seq, hopIndex, effectiveEpoch, peerSourceId,
+        Config::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT, packet);
+  }
+#endif
   uint8_t key[16];
   if (!plain || !loadKey(key) ||
       len + PACKET_HEADER_V3 + PACKET_TAG > Config::LORA_MAX_PACKET)
@@ -607,6 +798,115 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
   len = cipherLen;
   return true;
 }
+
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+bool LoRaManager::decryptPacketV5(const String& packet, uint8_t& type,
+                                  uint16_t& seq, uint32_t& sourceId,
+                                  uint8_t& ttl, uint8_t& hopIndex,
+                                  uint32_t& epochSec, uint8_t& keyEpochDelta,
+                                  uint8_t* plain, size_t capacity,
+                                  size_t& len) {
+  len = 0;
+  sourceId = 0;
+  ttl = 0;
+  hopIndex = 0;
+  epochSec = 0;
+  keyEpochDelta = 0;
+  if (packet.length() < PACKET_HEADER_V5 + PACKET_TAG ||
+      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC ||
+      static_cast<uint8_t>(packet[1]) != Config::LORA_PROTOCOL_VERSION_ECDH)
+    return false;
+
+  type = static_cast<uint8_t>(packet[2]);
+  seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
+        (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
+  uint32_t nonce = 0;
+  memcpy(&nonce, packet.c_str() + 5, sizeof(nonce));
+  memcpy(&sourceId, packet.c_str() + 9, sizeof(sourceId));
+  ttl = static_cast<uint8_t>(packet[13]);
+  hopIndex = static_cast<uint8_t>(packet[14]);
+  memcpy(&epochSec, packet.c_str() + 15, sizeof(epochSec));
+  keyEpochDelta = static_cast<uint8_t>(packet[19]);
+
+  if (sourceId == 0 || ttl == 0 || ttl > Config::LORA_INITIAL_TTL ||
+      epochSec == 0 ||
+      (keyEpochDelta != Config::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT &&
+       keyEpochDelta != Config::LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS))
+    return false;
+
+  const uint32_t localEpochSec =
+      currentEpochSec() != 0 ? currentEpochSec() : ecdhAuthoritativeEpochSec_;
+  if (localEpochSec == 0 ||
+      !LoRaEcdhRekey::epochWithinSkew(localEpochSec, epochSec))
+    return false;
+
+  uint32_t keyEpochSec = 0;
+  if (!LoRaEcdhRekey::sessionEpochForDelta(
+          epochSec, keyEpochDelta, keyEpochSec))
+    return false;
+
+  const size_t cipherLen = packet.length() - PACKET_HEADER_V5 - PACKET_TAG;
+  if (!plain || cipherLen > capacity) return false;
+
+  uint8_t sessionKey[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};
+  if (!ecdhKeyMaterial_.getSessionKey(sourceId, keyEpochSec, sessionKey)) {
+    mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
+    return false;
+  }
+
+  uint8_t expected[32] = {};
+  const mbedtls_md_info_t* md =
+      mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  const bool hmacOk = md && mbedtls_md_hmac(
+      md, sessionKey + LoRaEcdhRekey::AES_KEY_BYTES,
+      LoRaEcdhRekey::HMAC_KEY_BYTES,
+      reinterpret_cast<const unsigned char*>(packet.c_str()),
+      PACKET_HEADER_V5 + cipherLen, expected, sizeof(expected)) == 0;
+  if (!hmacOk) {
+    mbedtls_platform_zeroize(expected, sizeof(expected));
+    mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
+    return false;
+  }
+
+  const uint8_t* got =
+      reinterpret_cast<const uint8_t*>(packet.c_str()) +
+      PACKET_HEADER_V5 + cipherLen;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < PACKET_TAG; ++i)
+    diff |= expected[i] ^ got[i];
+  mbedtls_platform_zeroize(expected, sizeof(expected));
+  if (diff != 0) {
+    mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
+    return false;
+  }
+
+  uint8_t iv[16] = {};
+  memcpy(iv, &nonce, sizeof(nonce));
+  memcpy(iv + 4, &seq, sizeof(seq));
+  iv[6] = hopIndex;
+  iv[7] = keyEpochDelta;
+  memcpy(iv + 8, &epochSec, sizeof(epochSec));
+  uint8_t streamBlock[16] = {};
+  size_t ncOff = 0;
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  const bool ok =
+      mbedtls_aes_setkey_enc(
+          &aes, sessionKey, LoRaEcdhRekey::AES_KEY_BYTES * 8U) == 0 &&
+      mbedtls_aes_crypt_ctr(
+          &aes, cipherLen, &ncOff, iv, streamBlock,
+          reinterpret_cast<const unsigned char*>(packet.c_str()) +
+              PACKET_HEADER_V5,
+          plain) == 0;
+  mbedtls_aes_free(&aes);
+  mbedtls_platform_zeroize(sessionKey, sizeof(sessionKey));
+  mbedtls_platform_zeroize(iv, sizeof(iv));
+  mbedtls_platform_zeroize(streamBlock, sizeof(streamBlock));
+  if (!ok) return false;
+  len = cipherLen;
+  return true;
+}
+#endif
 
 uint8_t LoRaManager::computeHopIndex(uint32_t frame) const {
   StateLock lock(gState);
@@ -973,8 +1273,9 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                                   uint8_t wireVersion) {
   if (!forwardQueue_ || !payload || !len || ttl <= 1 ||
       (wireVersion != Config::LORA_PROTOCOL_VERSION &&
-       wireVersion != LORA_PROTOCOL_VERSION_HOP) ||
-      len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG)
+       wireVersion != LORA_PROTOCOL_VERSION_HOP &&
+       wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH) ||
+      len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG)
     return false;
   if (!forwardRateAllowed(sourceId, type)) return false;
 
@@ -995,7 +1296,7 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
   // happen once, immediately before transmission, when the next hop is known.
   // Rewriting it here and again in transmitForward() makes previousHop become
   // this node and causes routeAllowsForward() to reject our own queued packet.
-  if (len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG)
+  if (len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG)
     return false;
 
   ForwardPacket packet{};
@@ -1058,7 +1359,7 @@ bool LoRaManager::persistForwardQueue() {
   }
   for (UBaseType_t i = 0; i < count; ++i) {
     const ForwardPacket& item = items[i];
-    if (!item.len || item.len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG) continue;
+    if (!item.len || item.len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG) continue;
     const uint32_t nonce = esp_random();
     uint8_t iv[16] = {};
     memcpy(iv, &nonce, sizeof(nonce));
@@ -1201,9 +1502,10 @@ bool LoRaManager::loadForwardQueue() {
       }
 
       if (magic != FORWARD_RECORD_MAGIC || ttl == 0 || len == 0 ||
-          len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG ||
+          len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG ||
           (wireVersion != Config::LORA_PROTOCOL_VERSION &&
-           wireVersion != LORA_PROTOCOL_VERSION_HOP)) {
+           wireVersion != LORA_PROTOCOL_VERSION_HOP &&
+           wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH)) {
         validFile = false;
         break;
       }
@@ -1498,7 +1800,7 @@ bool LoRaManager::isPttOrRecording() const {
 
 bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   if (!ready_ || !mutex_ || !forward.len || forward.ttl == 0 ||
-      forward.len > Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG ||
+      forward.len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG ||
       isPttOrRecording())
     return false;
 
@@ -1868,6 +2170,14 @@ bool LoRaManager::validateTextAckHop() const {
   }();
   const uint8_t version = textPendingPacket_.length() > 1
       ? static_cast<uint8_t>(textPendingPacket_[1]) : 0;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  if (version == Config::LORA_PROTOCOL_VERSION_ECDH) {
+    if (textPendingPacket_.length() < PACKET_HEADER_V5) return false;
+    return !hopEnabled ||
+           static_cast<uint8_t>(textPendingPacket_[14]) ==
+               computeHopIndex(hopFrame_);
+  }
+#endif
   if (!hopEnabled) return version != LORA_PROTOCOL_VERSION_HOP;
   if (version != LORA_PROTOCOL_VERSION_HOP ||
       textPendingPacket_.length() < PACKET_HEADER_V3) return false;
@@ -1913,9 +2223,29 @@ void LoRaManager::serviceTextRetry() {
       bool rebuiltNeeded = false;
       uint8_t newHop = computeHopIndex(hopFrame_);
       if (textPendingPacket_.length() >= PACKET_HEADER_V3 &&
-          static_cast<uint8_t>(textPendingPacket_[1]) == LORA_PROTOCOL_VERSION_HOP) {
+          (static_cast<uint8_t>(textPendingPacket_[1]) == LORA_PROTOCOL_VERSION_HOP
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+           || static_cast<uint8_t>(textPendingPacket_[1]) ==
+                  Config::LORA_PROTOCOL_VERSION_ECDH
+#endif
+          )) {
         const uint8_t oldHop = static_cast<uint8_t>(textPendingPacket_[14]);
         rebuiltNeeded = oldHop != newHop;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+        if (rebuiltNeeded &&
+            static_cast<uint8_t>(textPendingPacket_[1]) ==
+                Config::LORA_PROTOCOL_VERSION_ECDH) {
+          uint8_t keyEpochDelta = 0;
+          if (!decryptPacketV5(textPendingPacket_, type, seq, source, ttl,
+                               hop, epoch, keyEpochDelta, plain,
+                               sizeof(plain), plainLen)) {
+            textAwaitingAck_ = false;
+            textAcked_ = false;
+            xSemaphoreGive(textStateMutex_);
+            return;
+          }
+        } else
+#endif
         if (rebuiltNeeded &&
             !decryptPacketV3(textPendingPacket_, type, seq, source, ttl, hop,
                              epoch, plain, sizeof(plain), plainLen)) {
@@ -1939,24 +2269,46 @@ void LoRaManager::serviceTextRetry() {
         // A V2 pending text packet has no hop index. Once hopping is enabled,
         // upgrade it to authenticated V3 rather than retrying it on channel 0.
         String rebuilt;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+        if (!encryptPacket(plain, plainLen, type, seq, rebuilt)) {
+#else
         if (!encryptPacketV3(plain, plainLen, type, seq, newHop,
                              currentEpochSec(), rebuilt)) {
+#endif
           xSemaphoreGive(textStateMutex_);
           return;
         }
         textPendingPacket_ = rebuilt;
       }
     } else if (textPendingPacket_.length() >= PACKET_HEADER_V3 &&
-               static_cast<uint8_t>(textPendingPacket_[1]) == LORA_PROTOCOL_VERSION_HOP) {
-      // Conversely, once hopping is disabled, do not keep a V3 hop index from
-      // the previous mode. Re-authenticate the same origin frame as V2.
+               (static_cast<uint8_t>(textPendingPacket_[1]) == LORA_PROTOCOL_VERSION_HOP
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+                || static_cast<uint8_t>(textPendingPacket_[1]) ==
+                       Config::LORA_PROTOCOL_VERSION_ECDH
+#endif
+               )) {
+      // Conversely, once hopping is disabled, re-authenticate the same origin
+      // frame with a zero hop index. V5 remains V5 when ECDH is enabled.
       uint8_t plain[Config::LORA_MAX_PACKET] = {};
       uint8_t type = 0, ttl = 0, hop = 0;
       uint16_t seq = 0;
       uint32_t source = 0, epoch = 0;
       size_t plainLen = 0;
-      if (!decryptPacketV3(textPendingPacket_, type, seq, source, ttl, hop,
-                           epoch, plain, sizeof(plain), plainLen)) {
+      bool decrypted = false;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+      if (static_cast<uint8_t>(textPendingPacket_[1]) ==
+          Config::LORA_PROTOCOL_VERSION_ECDH) {
+        uint8_t keyEpochDelta = 0;
+        decrypted = decryptPacketV5(textPendingPacket_, type, seq, source, ttl,
+                                    hop, epoch, keyEpochDelta, plain,
+                                    sizeof(plain), plainLen);
+      } else
+#endif
+      {
+        decrypted = decryptPacketV3(textPendingPacket_, type, seq, source, ttl,
+                                    hop, epoch, plain, sizeof(plain), plainLen);
+      }
+      if (!decrypted) {
         textAwaitingAck_ = false;
         textAcked_ = false;
         xSemaphoreGive(textStateMutex_);
@@ -2074,6 +2426,97 @@ bool LoRaManager::resumeFromLoRaWAN() {
   return ok;
 }
 
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+bool LoRaManager::processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
+                                    const uint8_t* payload, size_t len) {
+  if (sourceId == 0 || packetEpochSec == 0 || !payload ||
+      len != LoRaEcdhRekey::BEACON_BYTES)
+    return false;
+
+  LoRaEcdhRekey::Beacon beacon{};
+  if (!LoRaEcdhRekey::decodeBeacon(payload, len, beacon))
+    return false;
+
+  const uint32_t localEpochSec = currentEpochSec();
+  if (!LoRaEcdhRekey::authenticatedBeaconValid(
+          beacon, sourceId, packetEpochSec, localEpochSec))
+    return false;
+
+  if (localEpochSec == 0) {
+    // DECISION: the C3 has no absolute RTC/GPS source, so an authenticated
+    // S3 beacon is its temporary epoch authority. Never move backwards and
+    // never accept a jump larger than one epoch.
+    if (ecdhAuthoritativeEpochSec_ != 0) {
+      const uint32_t localEpoch =
+          LoRaEcdhRekey::epochNumber(ecdhAuthoritativeEpochSec_);
+      const uint32_t peerEpoch = LoRaEcdhRekey::epochNumber(beacon.epochSec);
+      const uint32_t delta = localEpoch >= peerEpoch
+          ? localEpoch - peerEpoch
+          : peerEpoch - localEpoch;
+      if (delta > 1U) return false;
+      if (peerEpoch > localEpoch)
+        ecdhAuthoritativeEpochSec_ = beacon.epochSec;
+    } else {
+      ecdhAuthoritativeEpochSec_ = beacon.epochSec;
+    }
+  }
+
+  // DECISION: the existing authenticated V3 HMAC is the trust anchor.
+  // The authenticated sourceId and complete beacon payload bind the static
+  // public key to the already-authenticated node identity.
+  size_t selected = ECDH_PEER_CACHE_SIZE;
+  for (size_t i = 0; i < ECDH_PEER_CACHE_SIZE; ++i) {
+    if (ecdhPeers_[i].valid && ecdhPeers_[i].sourceId == sourceId) {
+      selected = i;
+      break;
+    }
+    if (selected == ECDH_PEER_CACHE_SIZE && !ecdhPeers_[i].valid)
+      selected = i;
+  }
+  if (selected == ECDH_PEER_CACHE_SIZE) {
+    uint32_t oldestAge = 0;
+    for (size_t i = 0; i < ECDH_PEER_CACHE_SIZE; ++i) {
+      const uint32_t age = millis() - ecdhPeers_[i].lastSeenMs;
+      if (i == 0 || age > oldestAge) {
+        oldestAge = age;
+        selected = i;
+      }
+    }
+  }
+
+  EcdhPeerState& peer = ecdhPeers_[selected];
+  if (peer.valid &&
+      memcmp(peer.staticPublic, beacon.staticPublic,
+             LoRaEcdhRekey::PUBLIC_KEY_BYTES) != 0) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH static key changed";
+    return false;
+  }
+
+  peer.sourceId = sourceId;
+  peer.epochSec = beacon.epochSec;
+  memcpy(peer.ephemeralPublic, beacon.ephemeralPublic,
+         LoRaEcdhRekey::PUBLIC_KEY_BYTES);
+  memcpy(peer.staticPublic, beacon.staticPublic,
+         LoRaEcdhRekey::PUBLIC_KEY_BYTES);
+  peer.lastSeenMs = millis();
+  peer.valid = true;
+
+  if (ecdhKeyMaterial_.hasEphemeralKey() &&
+      ecdhKeyMaterial_.ephemeralEpoch() ==
+          LoRaEcdhRekey::epochNumber(beacon.epochSec)) {
+    if (!ecdhKeyMaterial_.deriveSessionKey(
+            beacon.ephemeralPublic, sourceId_, sourceId, beacon.epochSec)) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "ECDH beacon key derivation failed";
+      return false;
+    }
+  }
+  return true;
+}
+
+#endif
+
 bool LoRaManager::begin() {
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
@@ -2083,8 +2526,25 @@ bool LoRaManager::begin() {
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_ = sourceIdFromCallsign(gConfig.callsign);
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  // DECISION: fail closed if ECDH key material cannot be initialized while
+  // the feature flag is enabled; do not start a partially initialized node.
+  if (!ecdhKeyMaterial_.begin(currentEpochSec())) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH key material init failed";
+    return false;
+  }
+  const uint32_t bootEpochSec = currentEpochSec();
+  ecdhKeyEpoch_ = bootEpochSec != 0
+      ? LoRaEcdhRekey::epochNumber(bootEpochSec) : 0;
+  ecdhActive_ = ecdhKeyMaterial_.hasEphemeralKey();
+#endif
   if (rtcRadioState.magic == RTC_RADIO_MAGIC && rtcRadioState.crc == stateCrc(rtcRadioState)) {
     hopFrame_ = rtcRadioState.hopFrame;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+    ecdhKeyEpoch_ = rtcRadioState.ecdhKeyEpoch;
+    ecdhActive_ = rtcRadioState.ecdhActive;
+#endif
     sosSeq_.store(rtcRadioState.sosSeq, std::memory_order_release);
     sosRetryCount_ = rtcRadioState.sosRetryCount;
     sosAwaitingAck_ = rtcRadioState.sosAwaitingAck;
@@ -2198,6 +2658,35 @@ void LoRaManager::serviceVoiceReorder() {
 
 void LoRaManager::task() {
   if (!mutex_ || suspendedForLoRaWAN_.load(std::memory_order_acquire)) return;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  uint32_t ecdhEpochSec = currentEpochSec();
+  if (ecdhEpochSec == 0)
+    ecdhEpochSec = ecdhAuthoritativeEpochSec_;
+
+  if (ecdhEpochSec != 0 && !ecdhKeyMaterial_.ensureEphemeral(ecdhEpochSec)) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH ephemeral key rotation failed";
+  } else if (ecdhEpochSec != 0 && ecdhKeyMaterial_.hasEphemeralKey()) {
+    for (const auto& peer : ecdhPeers_) {
+      if (!peer.valid ||
+          LoRaEcdhRekey::epochNumber(peer.epochSec) !=
+              ecdhKeyMaterial_.ephemeralEpoch())
+        continue;
+
+      uint8_t keyProbe[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};
+      const bool haveKey = ecdhKeyMaterial_.getSessionKey(
+          peer.sourceId, peer.epochSec, keyProbe);
+      mbedtls_platform_zeroize(keyProbe, sizeof(keyProbe));
+      if (!haveKey &&
+          !ecdhKeyMaterial_.deriveSessionKey(
+              peer.ephemeralPublic, sourceId_, peer.sourceId,
+              peer.epochSec)) {
+        StateLock lock(gState);
+        if (lock.ok()) gState.lastError = "ECDH beacon key derivation failed";
+      }
+    }
+  }
+#endif
   RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, 0);
   if (!radioGuard.ok()) return;
   if (adrEnabled_ && millis() - lastAdrMs_ >= Config::ADR_REEVALUATE_MS) {
@@ -2336,6 +2825,27 @@ void LoRaManager::task() {
   serviceSosRetry();
   serviceTextRetry();
   serviceVoiceAckRetry();
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  {
+    const uint32_t epochSec = currentEpochSec();
+    if (epochSec != 0) {
+      const uint32_t epoch = LoRaEcdhRekey::epochNumber(epochSec);
+      if (!ecdhKeyMaterial_.hasEphemeralKey() ||
+          ecdhKeyMaterial_.ephemeralEpoch() != epoch) {
+        if (!ecdhKeyMaterial_.ensureEphemeral(epochSec)) {
+          ecdhActive_ = false;
+          StateLock lock(gState);
+          if (lock.ok()) gState.lastError = "ECDH ephemeral regeneration failed";
+        }
+      }
+      if (ecdhKeyMaterial_.hasEphemeralKey() &&
+          ecdhKeyMaterial_.ephemeralEpoch() == epoch) {
+        ecdhKeyEpoch_ = epoch;
+        ecdhActive_ = true;
+      }
+    }
+  }
+#endif
   serviceNeighborBeacon();
   serviceVoiceReorder();
 
@@ -2455,11 +2965,22 @@ void LoRaManager::task() {
     uint8_t hopIndex = 0;
     uint32_t epochSec = 0;
     bool authenticatedV3 = false;
+    bool authenticatedV5 = false;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+    uint8_t keyEpochDelta = 0;
+#endif
     if (!authenticated) {
-      authenticatedV3 = decryptPacketV3(msg, type, seq, rxSourceId, rxTtl,
-                                        hopIndex, epochSec, plain,
-                                        sizeof(plain), plainLen);
-      if (authenticatedV3) {
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+      authenticatedV5 = decryptPacketV5(
+          msg, type, seq, rxSourceId, rxTtl, hopIndex, epochSec,
+          keyEpochDelta, plain, sizeof(plain), plainLen);
+#endif
+      if (!authenticatedV5) {
+        authenticatedV3 = decryptPacketV3(msg, type, seq, rxSourceId, rxTtl,
+                                          hopIndex, epochSec, plain,
+                                          sizeof(plain), plainLen);
+      }
+      if (authenticatedV5 || authenticatedV3) {
         currentHopIndex_ = hopIndex;
         if (!hopSyncGps_) {
           StateLock hopLock(gState);
@@ -2474,8 +2995,29 @@ void LoRaManager::task() {
         hopLastSyncMs_ = millis();
       }
     }
-    const bool rxAuthenticated = (authenticated || authenticatedV3) &&
-        rxTtl > 0 && rxTtl <= Config::LORA_INITIAL_TTL;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+    const bool ecdhPolicyAccepted =
+        authenticatedV5 ||
+        (authenticatedV3 &&
+         type == Config::LORA_TYPE_NEIGHBOR_BEACON &&
+         processEcdhBeacon(rxSourceId, epochSec, plain, plainLen));
+    if ((authenticated || authenticatedV3 || authenticatedV5) &&
+        !ecdhPolicyAccepted) {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        gState.lastError = (authenticatedV3 &&
+                            type == Config::LORA_TYPE_NEIGHBOR_BEACON)
+            ? "ECDH beacon rejected"
+            : "ECDH peer unsupported";
+      }
+    }
+#else
+    const bool ecdhPolicyAccepted = true;
+#endif
+    const bool rxAuthenticated =
+        (authenticated || authenticatedV3 || authenticatedV5) &&
+        rxTtl > 0 && rxTtl <= Config::LORA_INITIAL_TTL &&
+        ecdhPolicyAccepted;
     // Capture the exact over-the-air frame after authentication has been
     // attempted, but before any routing/decryption buffer is mutated.
     (void)capturePacket(msg, rssi, snr, rxAuthenticated);
@@ -2484,6 +3026,7 @@ void LoRaManager::task() {
     const bool isV4 = authenticated &&
                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION_GCM;
     const bool isV3 = authenticatedV3;
+    const bool isV5 = authenticatedV5;
     uint32_t routeDestination = 0;
     uint32_t routeNextHop = 0;
     uint32_t routePreviousHop = 0;
@@ -2503,8 +3046,9 @@ void LoRaManager::task() {
                                 routeDestination == sourceId_);
     const bool nextHopIsUs = !hasRouteExtension || routeNextHop == 0 ||
                              routeNextHop == sourceId_;
-    const bool duplicateV2 = (isV2 || isV3 || isV4) &&
-        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen), isV3 ? epochSec : 0);
+    const bool duplicateV2 = (isV2 || isV3 || isV4 || isV5) &&
+        seenDedup(rxSourceId, seq, type, hashPayload(plain, plainLen),
+                  (isV3 || isV5) ? epochSec : 0);
     const uint32_t immediatePeer = (hasRouteExtension && routePreviousHop != 0)
         ? routePreviousHop : rxSourceId;
     if (rxAuthenticated) updateNeighborMetric(immediatePeer, rssi, snr);
@@ -2515,7 +3059,8 @@ void LoRaManager::task() {
       recordNeighborTxResult(immediatePeer, true);
     if (hasRouteExtension && routePreviousHop != 0)
       learnRoute(rxSourceId, routePreviousHop, rssi, snr);
-    const bool isForwardable = rxAuthenticated && (isV2 || isV3 || isV4) &&
+    const bool isForwardable =
+        rxAuthenticated && (isV2 || isV3 || isV4 || isV5) &&
         !duplicateV2 && !malformedRouteExtension;
     bool pttOrRecording = false;
     {
@@ -2552,7 +3097,7 @@ void LoRaManager::task() {
         nextHopIsUs && (type == Config::LORA_TYPE_TEXT || type == Config::LORA_TYPE_FRAG_DATA) && textPayloadValid) {
       textAckSeq_ = seq;
       textAckSourceId_ = rxSourceId;
-      textAckHopIndex_ = isV3 ? hopIndex : 0;
+      textAckHopIndex_ = (isV3 || isV5) ? hopIndex : 0;
       textAckPending_ = true;
     }
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_SOS && appPayloadLen > 0) {
@@ -2646,8 +3191,10 @@ void LoRaManager::task() {
         routeAllowsForward(routeDestination, routeNextHop, routePreviousHop);
     if (isForwardable && routeForwardAllowed && rxSourceId != sourceId_ &&
         rxTtl > 1 && plainLen > 0) {
-      (void)enqueueForward(type, seq, rxSourceId, rxTtl, plain, plainLen,
-                            isV3 ? LORA_PROTOCOL_VERSION_HOP : Config::LORA_PROTOCOL_VERSION);
+      (void)enqueueForward(
+          type, seq, rxSourceId, rxTtl, plain, plainLen,
+          isV5 ? Config::LORA_PROTOCOL_VERSION_ECDH :
+          (isV3 ? LORA_PROTOCOL_VERSION_HOP : Config::LORA_PROTOCOL_VERSION));
     }
 
     if (rxAuthenticated) logPacket(false, type, seq, rxSourceId, rssi, snr, rxTtl);
@@ -2800,7 +3347,8 @@ bool LoRaManager::processPendingTx() {
   bool txOk = false;
   const bool pendingHopped =
       pendingTx_.packet.length() >= PACKET_HEADER_V3 &&
-      static_cast<uint8_t>(pendingTx_.packet[1]) == LORA_PROTOCOL_VERSION_HOP;
+      (static_cast<uint8_t>(pendingTx_.packet[1]) == LORA_PROTOCOL_VERSION_HOP ||
+       static_cast<uint8_t>(pendingTx_.packet[1]) == Config::LORA_PROTOCOL_VERSION_ECDH);
   const uint8_t pendingHopIndex = pendingHopped
       ? static_cast<uint8_t>(pendingTx_.packet[14]) : 0;
   if (pendingHopped && !retuneToHopChannelLocked(pendingHopIndex)) {
@@ -2937,10 +3485,17 @@ bool LoRaManager::processPendingTx() {
 }
 
 bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  if (!alreadyEncrypted) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH peer unsupported";
+    return false;
+  }
+#endif
   if (!ready_ || !mutex_ || text.isEmpty() ||
       text.length() > (alreadyEncrypted
           ? Config::LORA_MAX_PACKET
-          : Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG - ROUTE_EXT_BYTES))
+          : Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG - ROUTE_EXT_BYTES))
     return false;
   if (Config::LORA_REQUIRE_ENCRYPTION && gConfig.loraKeyHex.length() != 32)
     return false;
@@ -2976,7 +3531,8 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     const uint8_t wireVersion = static_cast<uint8_t>(packet[1]);
     if (wireVersion != Config::LORA_PROTOCOL_VERSION &&
         wireVersion != LORA_PROTOCOL_VERSION_HOP &&
-        wireVersion != Config::LORA_PROTOCOL_VERSION_GCM)
+        wireVersion != Config::LORA_PROTOCOL_VERSION_GCM &&
+        wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH)
       return false;
     txType = static_cast<uint8_t>(packet[2]);
     txSeq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
@@ -2985,6 +3541,14 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
              packet.length() > 21)
         ? static_cast<uint8_t>(packet[21])
         : static_cast<uint8_t>(packet[13]);
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+    if (wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH &&
+        !LoRaEcdhRekey::ecdhBeaconWireAllowed(wireVersion, txType)) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "ECDH peer unsupported";
+      return false;
+    }
+#endif
   }
 
   if (Config::LORA_LBT_ENABLED) {
@@ -3000,7 +3564,8 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
   const bool hoppedPacket =
       packet.length() >= PACKET_HEADER_V3 &&
-      static_cast<uint8_t>(packet[1]) == LORA_PROTOCOL_VERSION_HOP;
+      (static_cast<uint8_t>(packet[1]) == LORA_PROTOCOL_VERSION_HOP ||
+       static_cast<uint8_t>(packet[1]) == Config::LORA_PROTOCOL_VERSION_ECDH);
   const uint8_t packetHopIndex = hoppedPacket
       ? static_cast<uint8_t>(packet[14]) : 0;
   if (hoppedPacket && !retuneToHopChannelLocked(packetHopIndex)) {
@@ -3094,6 +3659,12 @@ bool LoRaManager::prepareForDeepSleep() {
   if (!radioGuard.ok()) return false;
   rtcRadioState.magic = RTC_RADIO_MAGIC;
   rtcRadioState.hopFrame = hopFrame_;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  // DECISION: persist only ECDH lifecycle metadata in RTC RAM. Ephemeral
+  // private material remains RAM-only and is always regenerated after boot.
+  rtcRadioState.ecdhKeyEpoch = ecdhKeyEpoch_;
+  rtcRadioState.ecdhActive = ecdhActive_;
+#endif
   rtcRadioState.sosSeq = sosSeq_.load(std::memory_order_acquire);
   rtcRadioState.sosRetryCount = sosRetryCount_;
   rtcRadioState.sosAwaitingAck = sosAwaitingAck_;
@@ -3411,6 +3982,33 @@ String LoRaManager::captureDumpJson() const {
   xSemaphoreGive(captureMutex_);
   return out;
 }
+
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+String LoRaManager::ecdhStatusJson() const {
+  size_t peerCount = 0;
+  for (const auto& peer : ecdhPeers_) {
+    if (peer.valid) ++peerCount;
+  }
+  const uint32_t nowEpochSec = currentEpochSec();
+  const uint32_t nowEpoch = nowEpochSec != 0
+      ? LoRaEcdhRekey::epochNumber(nowEpochSec) : 0;
+  return String("{\"enabled\":true,\"active\":") +
+         (ecdhActive_ ? "true" : "false") +
+         ",\"keyEpoch\":" + String(ecdhKeyEpoch_) +
+         ",\"runtimeEpoch\":" + String(nowEpoch) +
+         ",\"authoritativeEpoch\":" +
+         String(ecdhAuthoritativeEpochSec_ != 0
+                    ? LoRaEcdhRekey::epochNumber(ecdhAuthoritativeEpochSec_)
+                    : 0) +
+         ",\"ephemeralEpoch\":" +
+         String(ecdhKeyMaterial_.ephemeralEpoch()) +
+         ",\"peerCount\":" + String(peerCount) + "}";
+}
+#else
+String LoRaManager::ecdhStatusJson() const {
+  return "{\"enabled\":false}";
+}
+#endif
 
 bool LoRaManager::setAdrEnabled(bool enabled) {
   adrEnabled_ = enabled;
@@ -4007,6 +4605,36 @@ void LoRaManager::serviceNeighborBeacon() {
   }
   if (!ready_ || now - lastNeighborBeaconMs_ < Config::LORA_NEIGHBOR_BEACON_PERIOD_MS)
     return;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  const uint32_t epochSec = currentEpochSec();
+  if (epochSec == 0 || !ecdhKeyMaterial_.hasEphemeralKey())
+    return;
+
+  LoRaEcdhRekey::Beacon ecdhBeacon{};
+  ecdhBeacon.epochSec = epochSec;
+  memcpy(ecdhBeacon.ephemeralPublic, ecdhKeyMaterial_.ephemeralPublic(),
+         LoRaEcdhRekey::PUBLIC_KEY_BYTES);
+  memcpy(ecdhBeacon.staticPublic, ecdhKeyMaterial_.longTermPublic(),
+         LoRaEcdhRekey::PUBLIC_KEY_BYTES);
+  ecdhBeacon.valid = true;
+
+  uint8_t payload[LoRaEcdhRekey::BEACON_BYTES] = {};
+  if (LoRaEcdhRekey::encodeBeacon(
+          ecdhBeacon, payload, sizeof(payload)) !=
+      LoRaEcdhRekey::BEACON_BYTES)
+    return;
+
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return;
+  String packet;
+  // DECISION: carry the ECDH envelope inside authenticated V3 so the
+  // existing master-key trust anchor binds sourceId to the static key.
+  if (encryptPacketV3(payload, sizeof(payload),
+                      Config::LORA_TYPE_NEIGHBOR_BEACON, seq,
+                      computeHopIndex(hopFrame_), epochSec, packet)) {
+    if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
+  }
+#else
   uint8_t payload[8] = {};
   payload[0] = BEACON_MAGIC;
   payload[1] = Config::LORA_PROTOCOL_VERSION;
@@ -4019,6 +4647,7 @@ void LoRaManager::serviceNeighborBeacon() {
   if (encryptPacket(payload, sizeof(payload), Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
     if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
   }
+#endif
 }
 
 bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, size_t len) {
@@ -4030,7 +4659,7 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
   const uint16_t totalLen = static_cast<uint16_t>(payload[6]) | (static_cast<uint16_t>(payload[7]) << 8);
   if (count == 0 || count > Config::LORA_FRAGMENT_MAX_COUNT || index >= count ||
       totalLen == 0 || totalLen > Config::LORA_FRAGMENT_MAX_BYTES) return false;
-  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_V2 + PACKET_TAG +
+  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_TX + PACKET_TAG +
                                   Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
     return false;
   const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG -
@@ -4280,9 +4909,9 @@ bool LoRaManager::loadFragmentRx() {
 }
 
 bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination) {
-  if (text.length() <= Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG) return false;
+  if (text.length() <= Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG) return false;
   if (text.length() > Config::LORA_FRAGMENT_MAX_BYTES) return false;
-  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_V2 + PACKET_TAG +
+  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_TX + PACKET_TAG +
                                   Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
     return false;
   const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG -

@@ -1,3 +1,4 @@
+// G15: identity-address-first BLE node registry.
 #include "SensorRegistry.h"
 
 SensorRegistry::SensorRegistry(size_t maxNodes, size_t maxSensorsPerNode)
@@ -33,6 +34,7 @@ bool SensorRegistry::upsertNode(const SensorProtocol::BleAddress& address,
                                 size_t& nodeIndex) {
   if (!lock()) return false;
   const int existing = findNode(address);
+  if (existing < 0 && address.type == 1) { unlock(); return false; }
   if (existing >= 0) {
     nodeIndex = static_cast<size_t>(existing);
     Node& n = nodes_[nodeIndex];
@@ -186,8 +188,35 @@ int SensorRegistry::findNode(const SensorProtocol::BleAddress& address) const {
   for (size_t i = 0; i < MAX_SUPPORTED_NODES; ++i) {
     if (nodes_[i].allocated && nodes_[i].address == address) { unlock(); return static_cast<int>(i); }
   }
+  for (size_t i = 0; i < MAX_SUPPORTED_NODES; ++i) {
+    if (nodes_[i].allocated && nodes_[i].hasRPA && nodes_[i].lastRPA == address) {
+      unlock(); return static_cast<int>(i);
+    }
+  }
   unlock();
   return -1;
+}
+
+int SensorRegistry::findNodeByRpa(const SensorProtocol::BleAddress& address) const {
+  if (!lock()) return -1;
+  for (size_t i = 0; i < MAX_SUPPORTED_NODES; ++i) {
+    if (nodes_[i].allocated && nodes_[i].hasRPA && nodes_[i].lastRPA == address) {
+      unlock(); return static_cast<int>(i);
+    }
+  }
+  unlock();
+  return -1;
+}
+
+bool SensorRegistry::setLastRpa(size_t nodeIndex, const SensorProtocol::BleAddress& rpa) {
+  if (!lock()) return false;
+  if (nodeIndex >= MAX_SUPPORTED_NODES || !nodes_[nodeIndex].allocated) {
+    unlock(); return false;
+  }
+  nodes_[nodeIndex].lastRPA = rpa;
+  nodes_[nodeIndex].hasRPA = true;
+  unlock();
+  return true;
 }
 
 int SensorRegistry::findSensor(size_t nodeIndex, uint16_t sensorId) const {

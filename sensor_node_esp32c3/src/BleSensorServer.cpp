@@ -82,6 +82,9 @@ bool BleSensorServer::begin(const String& nodeName, SensorRegistry& registry) {
   nodeName_ = nodeName.length() ? nodeName : SensorNodeConfig::DEFAULT_NODE_NAME;
 
   if (!NimBLEDevice::init(nodeName_.c_str())) return false;
+  // G13/G15: sensor nodes use a stable public identity address. This API is
+  // assumed available in NimBLE-Arduino 2.5.x; verify when changing versions.
+  (void)NimBLEDevice::setOwnAddrType(BLE_OWN_ADDR_PUBLIC);
   NimBLEDevice::setMTU(128);
   NimBLEDevice::setSecurityAuth(SensorNodeConfig::BLE_BONDING,
                                 SensorNodeConfig::BLE_MITM,

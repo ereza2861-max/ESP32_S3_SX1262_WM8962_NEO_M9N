@@ -595,6 +595,12 @@ static void enterDeepSleep() {
 }
 
 
+/* Test/diagnostic entry point; WebUi authentication/CSRF protects the route. */
+void fieldRadioRequestDeepSleep() {
+  enterDeepSleep();
+}
+
+
 static bool credentialsConfigured() {
   // Keep AP and web credentials independent. The AP password is plaintext
   // configuration for the access point; the web password is represented by
@@ -708,8 +714,14 @@ static void taskSensorForward(void*) {
 
   for (;;) {
     esp_task_wdt_reset();
+    { StateLock lock(gState); if (lock.ok()) gState.sensorDropped = bleSensorReader.sensorReader().droppedSamples(); }
     SensorReader::SensorSample sample{};
     if (bleSensorReader.sensorReader().popSensorForLoRa(sample, 0)) {
+      // Keep all network I/O out of the NimBLE notification callback. The BLE
+      // reader only queues a fully self-contained sample; this task owns MQTT.
+      (void)mqtt.publishSensorData(sample.nodeId, sample.nodeName, sample.sensorId,
+                                   sample.sensorName, sample.unit, sample.value,
+                                   sample.quality, sample.rssi, sample.timestampMs);
       ReportState* state = nullptr;
       ReportState* freeState = nullptr;
       for (auto& candidate : states) {
@@ -988,6 +1000,61 @@ static void serviceSerialConsole() {
         Serial.println(ok && lorawan.sendUplink(gConfig.lorawanFPort, payload, hex.length() / 2)
                            ? "LORAWAN: uplink queued" : "LORAWAN: uplink rejected");
       }
+    } else if (line.startsWith("ble passkey ")) {
+      const String rest = line.substring(12);
+      const int sep = rest.indexOf(' ');
+      if (sep <= 0) {
+        Serial.println("BLE: usage ble passkey <addr> <passkey>");
+      } else {
+        String addr = rest.substring(0, sep);
+        String pass = rest.substring(sep + 1);
+        SensorProtocol::BleAddress parsed{};
+        auto hex = [](char c) -> int {
+          if (c >= '0' && c <= '9') return c - '0';
+          if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+          if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+          return -1;
+        };
+        bool valid = addr.length() == 17 && pass.length() == 6;
+        for (size_t i = 0; valid && i < 6; ++i) {
+          const size_t pos = (5U - i) * 3U;
+          if (i < 5 && addr[pos + 2] != ':') { valid = false; break; }
+          const int hi = hex(addr[pos]), lo = hex(addr[pos + 1]);
+          if (hi < 0 || lo < 0) { valid = false; break; }
+          parsed.bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+        }
+        for (size_t i = 0; valid && i < 6; ++i)
+          if (pass[i] < '0' || pass[i] > '9') valid = false;
+        const uint32_t key = pass.toInt();
+        if (!valid || key < 100000U || key > 999999U ||
+            !bleSensorReader.setPeerPasskey(parsed, key))
+          Serial.println("BLE: invalid address/passkey or storage failure");
+        else
+          Serial.println("BLE: peer passkey stored");
+      }
+    } else if (line.startsWith("ble forget ")) {
+      const String addr = line.substring(11);
+      SensorProtocol::BleAddress parsed{};
+      bool valid = addr.length() == 17;
+      auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      for (size_t i = 0; valid && i < 6; ++i) {
+        const size_t pos = (5U - i) * 3U;
+        if (i < 5 && addr[pos + 2] != ':') { valid = false; break; }
+        const int hi = hex(addr[pos]), lo = hex(addr[pos + 1]);
+        if (hi < 0 || lo < 0) { valid = false; break; }
+        parsed.bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+      }
+      if (!valid || !bleSensorReader.forgetPeerPasskey(parsed))
+        Serial.println("BLE: peer not found or invalid address");
+      else
+        Serial.println("BLE: peer forgotten");
+    } else if (line == "ble list") {
+      Serial.println(bleSensorReader.peersJson());
     } else if (line == "reboot") {
       ESP.restart();
     } else if (line == "wipe") {
@@ -1000,7 +1067,7 @@ static void serviceSerialConsole() {
           (unsigned)gState.healthLogCount);
     } else if (line == "help" || line.isEmpty()) {
       Serial.printf("wdt=%lu,%lu,%lu,%lu\n", (unsigned long)gState.wdtResetCounts[0], (unsigned long)gState.wdtResetCounts[1], (unsigned long)gState.wdtResetCounts[2], (unsigned long)gState.wdtResetCounts[3]);
-      Serial.println("commands: status config lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
+      Serial.println("commands: status config ble passkey <addr> <passkey> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
     } else {
       Serial.println("unknown command; type help");
     }

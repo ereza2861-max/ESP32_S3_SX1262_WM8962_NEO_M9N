@@ -1,3 +1,4 @@
+// G15: identity-address-first BLE node registry.
 #pragma once
 #include "SensorProtocol.h"
 #include <cstddef>
@@ -18,6 +19,8 @@ public:
 
   struct Node {
     SensorProtocol::BleAddress address{};
+    SensorProtocol::BleAddress lastRPA{};
+    bool hasRPA = false;
     char name[SensorProtocol::MAX_NODE_NAME_BYTES] = {};
     int8_t rssi = -127;
     uint32_t lastSeenMs = 0;
@@ -54,6 +57,8 @@ public:
   const SensorProtocol::SensorValue* value(size_t nodeIndex, size_t sensorIndex) const;
 
   int findNode(const SensorProtocol::BleAddress& address) const;
+  int findNodeByRpa(const SensorProtocol::BleAddress& address) const;
+  bool setLastRpa(size_t nodeIndex, const SensorProtocol::BleAddress& rpa);
   int findSensor(size_t nodeIndex, uint16_t sensorId) const;
   bool isFull() const { return nodeCount_ >= maxNodes_; }
 

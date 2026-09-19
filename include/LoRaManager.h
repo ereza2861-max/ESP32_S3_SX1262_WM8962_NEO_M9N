@@ -61,6 +61,7 @@ public:
   bool captureStop();
   bool captureActive() const;
   String captureDumpJson() const;
+  String ecdhStatusJson() const;
   bool setAdrEnabled(bool enabled);
   bool adrEnabled() const { return adrEnabled_; }
   uint8_t currentDataRate() const { return currentAdrSf_; }
@@ -71,6 +72,7 @@ public:
   String scheduledMessagesJson() const;
   bool hopSyncUsesGps() const { return hopSyncGps_; }
   uint32_t forwardDrops() const { return forwardDrops_; }
+  uint32_t replayRejects() const { return replayRejects_; }
   uint32_t forwardQueued() const;
   uint32_t forwardLastDropMs() const { return forwardLastDropMs_; }
   uint32_t fragmentEvictions() const { return fragmentEvictions_; }
@@ -180,6 +182,24 @@ private:
   uint32_t txSequenceAbsolute_ = 1;
   uint32_t txSequenceReservedUntil_ = 0;
   uint32_t sourceId_ = 0;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  struct EcdhPeerState {
+    uint32_t sourceId = 0;
+    uint32_t epochSec = 0;
+    uint8_t ephemeralPublic[LoRaEcdhRekey::PUBLIC_KEY_BYTES] = {};
+    uint8_t staticPublic[LoRaEcdhRekey::PUBLIC_KEY_BYTES] = {};
+    uint32_t lastSeenMs = 0;
+    bool valid = false;
+  };
+  static constexpr size_t ECDH_PEER_CACHE_SIZE = 16;
+  LoRaEcdhRekey::KeyMaterial ecdhKeyMaterial_;
+  EcdhPeerState ecdhPeers_[ECDH_PEER_CACHE_SIZE] = {};
+  uint32_t ecdhAuthoritativeEpochSec_ = 0;
+  uint32_t ecdhKeyEpoch_ = 0;
+  bool ecdhActive_ = false;
+  bool processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
+                         const uint8_t* payload, size_t len);
+#endif
   bool adrEnabled_ = false;
   uint8_t currentAdrSf_ = Config::LORA_SF;
   uint32_t lastAdrMs_ = 0;
@@ -198,6 +218,7 @@ private:
   size_t captureNext_ = 0;
   size_t captureCount_ = 0;
   uint32_t captureUntilMs_ = 0;
+  uint32_t replayRejects_ = 0;
   uint32_t dedupHits_ = 0;
   uint32_t dedupMisses_ = 0;
   uint32_t dedupEvictions_ = 0;
@@ -377,6 +398,14 @@ private:
   bool encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type,
                        uint16_t seq, uint8_t hopIndex, uint32_t epochSec,
                        String& packet);
+  bool encryptPacketV5(const uint8_t* plain, size_t len, uint8_t type,
+                       uint16_t seq, uint8_t hopIndex, uint32_t epochSec,
+                       uint32_t peerSourceId, uint8_t keyEpochDelta,
+                       String& packet);
+  bool decryptPacketV5(const String& packet, uint8_t& type, uint16_t& seq,
+                       uint32_t& sourceId, uint8_t& ttl, uint8_t& hopIndex,
+                       uint32_t& epochSec, uint8_t& keyEpochDelta,
+                       uint8_t* plain, size_t capacity, size_t& len);
   bool decryptPacketV3(const String& packet, uint8_t& type, uint16_t& seq,
                        uint32_t& sourceId, uint8_t& ttl, uint8_t& hopIndex,
                        uint32_t& epochSec, uint8_t* plain, size_t capacity,

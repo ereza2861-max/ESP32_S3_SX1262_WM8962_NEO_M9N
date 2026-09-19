@@ -1,3 +1,4 @@
+// G16: per-node BLE passkey provisioning facade.
 #include "BleSensorReader.h"
 #include "Config.h"
 
@@ -26,3 +27,11 @@ bool BleSensorReader::isReady() const { return ready_; }
 bool BleSensorReader::hasConnectedSensorNode() const {
   return ready_ && sensorReader_.hasConnectedNode();
 }
+
+bool BleSensorReader::setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey) {
+  return sensorReader_.setPeerPasskey(address, passkey);
+}
+bool BleSensorReader::forgetPeerPasskey(const SensorProtocol::BleAddress& address) {
+  return sensorReader_.forgetPeerPasskey(address);
+}
+String BleSensorReader::peersJson() const { return sensorReader_.peersJson(); }

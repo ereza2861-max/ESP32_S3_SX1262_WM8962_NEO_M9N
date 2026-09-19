@@ -1,3 +1,4 @@
+// G14/G15/G16: queue saturation, BLE identity resolution, and peer passkey storage.
 #include "SensorReader.h"
 #include "Config.h"
 #include "MqttClientManager.h"
@@ -15,6 +16,9 @@
 #include <cmath>
 #include <string>
 #include <mbedtls/md.h>
+#include <mbedtls/aes.h>
+#include <Preferences.h>
+#include <nvs_flash.h>
 
 namespace {
 constexpr uint64_t MIN_VALID_EPOCH_MS = 1700000000000ULL;
@@ -107,6 +111,134 @@ bool deriveBlePasskey(uint8_t out6[6]) {
   return true;
 }
 
+
+constexpr uint32_t PEER_MAGIC = 0x42504531UL; // BP1
+constexpr size_t PEER_RECORD_BYTES = 64;
+constexpr size_t PEER_MAX = Config::BLE_MAX_BONDS;
+
+struct PeerRecord {
+  uint32_t magic = 0;
+  uint32_t passkey = 0;
+  SensorProtocol::BleAddress identity{};
+  SensorProtocol::BleAddress lastRpa{};
+  char name[SensorProtocol::MAX_NODE_NAME_BYTES]{};
+  uint32_t updatedEpoch = 0;
+  uint32_t crc = 0;
+  uint8_t reserved[PEER_RECORD_BYTES - 4 - 4 - sizeof(SensorProtocol::BleAddress) * 2 -
+                   SensorProtocol::MAX_NODE_NAME_BYTES - 4 - 4]{};
+};
+static_assert(sizeof(PeerRecord) == PEER_RECORD_BYTES, "peer record size");
+
+SemaphoreHandle_t gPeerMutex = nullptr;
+
+bool peerMasterKey(uint8_t key[16]) {
+  if (!key || gConfig.loraKeyHex.length() != 32) return false;
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < 16; ++i) {
+    const int h = hex(gConfig.loraKeyHex[i * 2]);
+    const int l = hex(gConfig.loraKeyHex[i * 2 + 1]);
+    if (h < 0 || l < 0) return false;
+    key[i] = static_cast<uint8_t>((h << 4) | l);
+  }
+  return true;
+}
+
+uint32_t peerCrc(const PeerRecord& in) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(&in);
+  uint32_t h = 2166136261UL;
+  for (size_t i = 0; i < offsetof(PeerRecord, crc); ++i) {
+    h ^= p[i]; h *= 16777619UL;
+  }
+  return h;
+}
+
+bool cryptPeerBuffer(uint8_t* data, size_t len, bool encrypt) {
+  if (!data || (len % 16U) != 0) return false;
+  uint8_t key[16] = {};
+  if (!peerMasterKey(key)) return false;
+  mbedtls_aes_context aes;
+  mbedtls_aes_init(&aes);
+  const int rc = encrypt ? mbedtls_aes_setkey_enc(&aes, key, 128)
+                         : mbedtls_aes_setkey_dec(&aes, key, 128);
+  if (rc != 0) { mbedtls_aes_free(&aes); return false; }
+  for (size_t off = 0; off < len; off += 16U) {
+    uint8_t block[16] = {};
+    std::memcpy(block, data + off, sizeof(block));
+    if (mbedtls_aes_crypt_ecb(&aes, encrypt ? MBEDTLS_AES_ENCRYPT : MBEDTLS_AES_DECRYPT,
+                              block, block) != 0) {
+      mbedtls_aes_free(&aes); return false;
+    }
+    std::memcpy(data + off, block, sizeof(block));
+  }
+  mbedtls_aes_free(&aes);
+  return true;
+}
+
+bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
+  if (!out || !gConfig.loraKeyHex.length()) return false;
+  std::memset(out, 0, sizeof(PeerRecord) * PEER_MAX);
+  Preferences prefs;
+  if (!prefs.begin("ble_peer", true)) return false;
+  uint8_t blob[PEER_RECORD_BYTES * PEER_MAX] = {};
+  const size_t got = prefs.getBytes("peers", blob, sizeof(blob));
+  prefs.end();
+  if (got == 0) return true;
+  if (got != sizeof(blob) || !cryptPeerBuffer(blob, sizeof(blob), false)) return false;
+  for (size_t i = 0; i < PEER_MAX; ++i) {
+    std::memcpy(&out[i], blob + i * PEER_RECORD_BYTES, sizeof(PeerRecord));
+    if (out[i].magic != PEER_MAGIC || out[i].passkey < 100000U ||
+        out[i].passkey > 999999U || out[i].crc != peerCrc(out[i])) out[i] = {};
+  }
+  return true;
+}
+
+bool peerStoreSave(const PeerRecord in[PEER_MAX]) {
+  if (!in) return false;
+  uint8_t blob[PEER_RECORD_BYTES * PEER_MAX] = {};
+  std::memcpy(blob, in, sizeof(blob));
+  if (!cryptPeerBuffer(blob, sizeof(blob), true)) return false;
+  Preferences prefs;
+  if (!prefs.begin("ble_peer", false)) return false;
+  const size_t written = prefs.putBytes("peers", blob, sizeof(blob));
+  prefs.end();
+  return written == sizeof(blob);
+}
+
+String addressText(const SensorProtocol::BleAddress& address) {
+  static const char hex[] = "0123456789ABCDEF";
+  String out;
+  out.reserve(17);
+  for (int i = 5; i >= 0; --i) {
+    if (i != 5) out += ':';
+    out += hex[address.bytes[i] >> 4];
+    out += hex[address.bytes[i] & 0x0F];
+  }
+  return out;
+}
+
+bool isRpa(const SensorProtocol::BleAddress& address) {
+  // BLE random address type 1 is resolvable/private-random in NimBLE's address API.
+  return address.type == 1;
+}
+
+bool peerFresh(uint32_t updatedEpoch) {
+  const time_t now = time(nullptr);
+  return updatedEpoch == 0 || now < 1700000000 || now <= static_cast<time_t>(updatedEpoch) ||
+         static_cast<uint32_t>(now - static_cast<time_t>(updatedEpoch)) <= 3600U;
+}
+
+bool peerMutexLock() {
+  if (!gPeerMutex) gPeerMutex = xSemaphoreCreateMutex();
+  return gPeerMutex && xSemaphoreTake(gPeerMutex, pdMS_TO_TICKS(200)) == pdTRUE;
+}
+void peerMutexUnlock() { if (gPeerMutex) xSemaphoreGive(gPeerMutex); }
+
+
 uint32_t passkeyValue(const uint8_t digits[6]) {
   uint32_t value = 0;
   for (uint8_t i = 0; i < 6; ++i) value = value * 10U + (digits[i] - '0');
@@ -158,12 +290,13 @@ void notifyCallback(NimBLERemoteCharacteristic* characteristic,
       slot.descriptorRefreshRequested = true;
       return;
     }
-    const SensorProtocol::SensorDescriptor* descriptor =
-        gReader->registry().descriptor(
-        slot.nodeIndex, static_cast<size_t>(sensorIndex));
-    if (!descriptor) return;
+    SensorRegistry::Node nodeSnapshot{};
+    if (!gReader->registry().snapshotNode(slot.nodeIndex, nodeSnapshot)) return;
+    if (sensorIndex >= static_cast<int>(nodeSnapshot.sensorCount)) return;
+    const SensorProtocol::SensorDescriptor descriptor =
+        nodeSnapshot.descriptors[static_cast<size_t>(sensorIndex)];
 
-    if (value.value < descriptor->min || value.value > descriptor->max)
+    if (value.value < descriptor.min || value.value > descriptor.max)
       value.quality |= SensorProtocol::QUALITY_OUT_OF_RANGE;
     if (value.timestamp == 0) {
       value.timestamp = gatewayTimestampMs();
@@ -175,29 +308,32 @@ void notifyCallback(NimBLERemoteCharacteristic* characteristic,
     }
     const uint32_t nowMs = millis();
     if (!gReader->registry().updateValue(slot.nodeIndex, value, nowMs)) return;
-    const SensorRegistry::Node* node = gReader->registry().node(slot.nodeIndex);
-    if (!node) return;
-    const SensorProtocol::SensorDescriptor* liveDescriptor =
-        gReader->registry().descriptor(slot.nodeIndex, static_cast<size_t>(sensorIndex));
-    if (!liveDescriptor) return;
+    SensorRegistry::Node liveNode{};
+    if (!gReader->registry().snapshotNode(slot.nodeIndex, liveNode)) return;
+    if (sensorIndex >= static_cast<int>(liveNode.sensorCount)) return;
+    const SensorProtocol::SensorDescriptor& liveDescriptor =
+        liveNode.descriptors[static_cast<size_t>(sensorIndex)];
 
     SensorReader::SensorSample sample{};
-    sample.nodeId = nodeIdFromAddress(node->address);
+    sample.nodeId = nodeIdFromAddress(liveNode.address);
     sample.sensorId = value.id;
     sample.value = value.value;
     sample.quality = value.quality;
     sample.timestampMs = value.timestamp;
+    sample.rssi = liveNode.rssi;
+    std::strncpy(sample.nodeName, liveNode.name, sizeof(sample.nodeName) - 1);
+    std::strncpy(sample.sensorName, liveDescriptor.name, sizeof(sample.sensorName) - 1);
+    std::strncpy(sample.unit, liveDescriptor.unit, sizeof(sample.unit) - 1);
+    // BLE callbacks must remain non-blocking: network/MQTT work is performed
+    // by taskSensorForward after this sample has been queued.
     (void)gReader->enqueueSensorForLoRa(sample);
-    (void)mqtt.publishSensorData(sample.nodeId, node->name, sample.sensorId,
-                                 liveDescriptor->name, liveDescriptor->unit,
-                                 sample.value, sample.quality, node->rssi,
-                                 sample.timestampMs);
     return;
   }
 }
 
 void cleanupSlot(ClientSlot& slot, bool disconnected) {
-  if (gReader->registry().node(slot.nodeIndex) != nullptr) {
+  SensorRegistry::Node nodeSnapshot{};
+  if (gReader->registry().snapshotNode(slot.nodeIndex, nodeSnapshot)) {
     gReader->registry().markConnected(slot.nodeIndex, false, millis());
   }
   NimBLEClient* client = slot.client;
@@ -221,26 +357,37 @@ bool writeDescriptorRequest(ClientSlot& slot, const uint8_t request[3]) {
 
 bool connectDevice(const NimBLEAdvertisedDevice* device) {
   if (!gReader || !device) return false;
-  const SensorProtocol::BleAddress address = toBleAddress(device->getAddress());
+  const SensorProtocol::BleAddress advertised = toBleAddress(device->getAddress());
+  SensorProtocol::BleAddress address{};
+  bool addressIsRpa = false;
+  const char* advertisedName = device->haveName() ? device->getName().c_str() : nullptr;
+  if (!gReader->resolvePeerIdentity(advertised, advertisedName, address, addressIsRpa)) return false;
   if (gConfig.blePairingEnabled && pairingBlocked(address)) return false;
+  if (gConfig.blePairingEnabled) {
+    uint32_t passkey = 0;
+    if (!gReader->getPeerPasskey(address, passkey)) return false;
+    // NimBLE-Arduino exposes a process-wide client passkey; set it immediately
+    // before secureConnection() so no connection can fall back to no security.
+    NimBLEDevice::setSecurityPasskey(passkey);
+    gBlePasskey = passkey;
+  }
   size_t nodeIndex = 0;
   const int existingNode = gReader->registry().findNode(address);
   if (existingNode >= 0) {
     nodeIndex = static_cast<size_t>(existingNode);
     (void)gReader->registry().upsertNode(
-        address, device->haveName() ? device->getName().c_str() : nullptr,
-        device->getRSSI(), millis(), nodeIndex);
+        address, advertisedName, device->getRSSI(), millis(), nodeIndex);
   } else {
-    if (gReader->registry().isFull() &&
+    if (addressIsRpa || gReader->registry().isFull() &&
         !gReader->registry().evictDisconnected(millis(), Config::SENSOR_NODE_EVICTION_MS_VALUE, nodeIndex)) {
       return false;
     }
     if (!gReader->registry().upsertNode(
-            address, device->haveName() ? device->getName().c_str() : nullptr,
-            device->getRSSI(), millis(), nodeIndex)) {
+            address, advertisedName, device->getRSSI(), millis(), nodeIndex)) {
       return false;
     }
   }
+  if (addressIsRpa) (void)gReader->registry().setLastRpa(nodeIndex, advertised);
 
   ClientSlot* slot = nullptr;
   for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
@@ -277,6 +424,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
       return false;
     }
     pairingSuccess(address);
+    if (addressIsRpa) (void)gReader->recordPeerRpa(address, advertised);
   } else if (Config::SENSOR_REQUIRE_ENCRYPTION_VALUE &&
              !slot->client->secureConnection()) {
     (void)NimBLEDevice::deleteClient(slot->client);
@@ -376,15 +524,13 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
 bool SensorReader::begin(const String& gatewayName) {
   if (!Config::SENSOR_READER_ENABLED_VALUE) return false;
   if (initialized_) return true;
+  (void)peerMutexLock();
+  peerMutexUnlock();
   if (!NimBLEDevice::isInitialized() &&
       !NimBLEDevice::init(std::string(gatewayName.c_str()))) return false;
   if (gConfig.blePairingEnabled) {
     NimBLEDevice::setSecurityAuth(true /* bonding */, true /* MITM */, true /* SC */);
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
-    uint8_t passkey[6] = {};
-    if (!deriveBlePasskey(passkey)) return false;
-    gBlePasskey = passkeyValue(passkey);
-    NimBLEDevice::setSecurityPasskey(gBlePasskey);
   }
   (void)NimBLEDevice::setMTU(Config::SENSOR_MTU_VALUE);
   gScan = NimBLEDevice::getScan();
@@ -442,11 +588,17 @@ void SensorReader::task() {
       esp_task_wdt_reset();
       const NimBLEAdvertisedDevice* device = results.getDevice(static_cast<uint32_t>(i));
       if (!device || !device->isAdvertisingService(NimBLEUUID(SensorProtocol::SERVICE_UUID))) continue;
-      const SensorProtocol::BleAddress address = toBleAddress(device->getAddress());
-      const int existingNode = registry_.findNode(address);
+      const SensorProtocol::BleAddress advertised = toBleAddress(device->getAddress());
+      SensorProtocol::BleAddress identity{};
+      bool isRpa = false;
+      if (!resolvePeerIdentity(advertised,
+                               device->haveName() ? device->getName().c_str() : nullptr,
+                               identity, isRpa)) continue;
+      const int existingNode = registry_.findNode(identity);
       if (existingNode >= 0) {
-        const SensorRegistry::Node* node = registry_.node(static_cast<size_t>(existingNode));
-        if (node && node->connected) continue;
+        SensorRegistry::Node nodeSnapshot{};
+        if (registry_.snapshotNode(static_cast<size_t>(existingNode), nodeSnapshot) &&
+            nodeSnapshot.connected) continue;
       }
       if (connectDevice(device)) ++active;
     }
@@ -457,7 +609,16 @@ void SensorReader::task() {
 }
 
 bool SensorReader::enqueueSensorForLoRa(const SensorSample& sample) {
-  return sensorQueue_ && xQueueSend(sensorQueue_, &sample, 0) == pdTRUE;
+  if (!sensorQueue_) return false;
+  if (xQueueSend(sensorQueue_, &sample, 0) == pdTRUE) return true;
+  droppedSamples_.fetch_add(1, std::memory_order_relaxed);
+  if (queuePolicy_ == SampleQueuePolicy::DROP_OLDEST) {
+    SensorSample discarded{};
+    (void)xQueueReceive(sensorQueue_, &discarded, 0);
+    if (xQueueSend(sensorQueue_, &sample, 0) == pdTRUE) return true;
+  }
+  droppedSamples_.fetch_add(1, std::memory_order_relaxed);
+  return false;
 }
 
 bool SensorReader::popSensorForLoRa(SensorSample& sample, TickType_t timeout) {
@@ -490,16 +651,156 @@ bool SensorReader::isEnabled() const { return Config::SENSOR_READER_ENABLED_VALU
 
 bool SensorReader::hasConnectedNode() const {
   for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
-    const SensorRegistry::Node* node = registry_.node(i);
-    if (node && node->connected) return true;
+    SensorRegistry::Node nodeSnapshot{};
+    if (registry_.snapshotNode(i, nodeSnapshot) && nodeSnapshot.connected) return true;
   }
   return false;
 }
+
+
+bool SensorReader::setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey) {
+  if (address.bytes[0] == 0 && address.bytes[1] == 0 && address.bytes[2] == 0 &&
+      address.bytes[3] == 0 && address.bytes[4] == 0 && address.bytes[5] == 0) return false;
+  if (passkey < 100000U || passkey > 999999U || !peerMutexLock()) return false;
+  PeerRecord peers[PEER_MAX]{};
+  const bool loaded = peerStoreLoad(peers);
+  if (!loaded) { peerMutexUnlock(); return false; }
+  size_t slot = PEER_MAX;
+  for (size_t i = 0; i < PEER_MAX; ++i) if (peers[i].magic == PEER_MAGIC && peers[i].identity == address) { slot = i; break; }
+  if (slot == PEER_MAX) for (size_t i = 0; i < PEER_MAX; ++i) if (peers[i].magic != PEER_MAGIC) { slot = i; break; }
+  if (slot == PEER_MAX) { peerMutexUnlock(); return false; }
+  PeerRecord& p = peers[slot];
+  const String oldName = String(p.name);
+  p = {};
+  p.magic = PEER_MAGIC;
+  p.passkey = passkey;
+  p.identity = address;
+  p.updatedEpoch = static_cast<uint32_t>(time(nullptr) > 1700000000 ? time(nullptr) : 0);
+  const int existing = registry_.findNode(address);
+  if (existing >= 0) {
+    SensorRegistry::Node n{};
+    if (registry_.snapshotNode(static_cast<size_t>(existing), n)) {
+      p.lastRpa = n.lastRPA;
+      std::strncpy(p.name, n.name, sizeof(p.name) - 1);
+    }
+  } else {
+    std::strncpy(p.name, oldName.c_str(), sizeof(p.name) - 1);
+  }
+  p.crc = peerCrc(p);
+  const bool ok = peerStoreSave(peers);
+  peerMutexUnlock();
+  return ok;
+}
+
+bool SensorReader::forgetPeerPasskey(const SensorProtocol::BleAddress& address) {
+  if (!peerMutexLock()) return false;
+  PeerRecord peers[PEER_MAX]{};
+  if (!peerStoreLoad(peers)) { peerMutexUnlock(); return false; }
+  bool found = false;
+  for (auto& p : peers) if (p.magic == PEER_MAGIC && p.identity == address) { p = {}; found = true; }
+  const bool ok = found && peerStoreSave(peers);
+  peerMutexUnlock();
+  return ok;
+}
+
+bool SensorReader::getPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t& passkey) const {
+  passkey = 0;
+  if (!peerMutexLock()) return false;
+  PeerRecord peers[PEER_MAX]{};
+  const bool loaded = peerStoreLoad(peers);
+  if (!loaded) { peerMutexUnlock(); return false; }
+  for (auto& p : peers) {
+    if (p.magic == PEER_MAGIC && p.identity == address && peerFresh(p.updatedEpoch)) {
+      passkey = p.passkey;
+      peerMutexUnlock();
+      return true;
+    }
+  }
+  peerMutexUnlock();
+  return false;
+}
+
+bool SensorReader::resolvePeerIdentity(const SensorProtocol::BleAddress& advertised,
+                                       const char* name,
+                                       SensorProtocol::BleAddress& identity,
+                                       bool& isRpaOut) const {
+  identity = advertised;
+  isRpaOut = false;
+  const int direct = registry_.findNode(advertised);
+  if (direct >= 0) {
+    SensorRegistry::Node n{};
+    if (registry_.snapshotNode(static_cast<size_t>(direct), n)) identity = n.address;
+    isRpaOut = n.hasRPA && n.lastRPA == advertised;
+    return true;
+  }
+  if (!isRpa(advertised) || !peerMutexLock()) return !isRpa(advertised);
+  PeerRecord peers[PEER_MAX]{};
+  if (!peerStoreLoad(peers)) { peerMutexUnlock(); return false; }
+  for (auto& p : peers) {
+    if (p.magic != PEER_MAGIC || !peerFresh(p.updatedEpoch) ||
+        (name && name[0] && p.name[0] && std::strncmp(name, p.name, sizeof(p.name)) != 0)) continue;
+    if (p.lastRpa == advertised ||
+        (name && name[0] && p.name[0] && std::strncmp(name, p.name, sizeof(p.name)) == 0)) {
+      identity = p.identity; isRpaOut = true; peerMutexUnlock(); return true;
+    }
+  }
+  peerMutexUnlock();
+  return false; // never create a new node for an unknown RPA.
+}
+
+bool SensorReader::recordPeerRpa(const SensorProtocol::BleAddress& identity,
+                                  const SensorProtocol::BleAddress& rpa) {
+  if (!isRpa(rpa) || !peerMutexLock()) return false;
+  PeerRecord peers[PEER_MAX]{};
+  if (!peerStoreLoad(peers)) { peerMutexUnlock(); return false; }
+  for (auto& p : peers) {
+    if (p.magic == PEER_MAGIC && p.identity == identity) {
+      p.lastRpa = rpa;
+      p.updatedEpoch = static_cast<uint32_t>(time(nullptr) > 1700000000 ? time(nullptr) : p.updatedEpoch);
+      p.crc = peerCrc(p);
+      const bool ok = peerStoreSave(peers);
+      peerMutexUnlock();
+      return ok;
+    }
+  }
+  peerMutexUnlock();
+  return false;
+}
+
+String SensorReader::peersJson() const {
+  String j = "[";
+  if (!peerMutexLock()) return j + "]";
+  PeerRecord peers[PEER_MAX]{};
+  if (!peerStoreLoad(peers)) { peerMutexUnlock(); return j + "]"; }
+  bool first = true;
+  for (const auto& p : peers) {
+    if (p.magic != PEER_MAGIC || !peerFresh(p.updatedEpoch)) continue;
+    if (!first) j += ',';
+    first = false;
+    String addr = addressText(p.identity);
+    j += "{\"addr\":\"" + addr + "\",\"passkey\":\"****" + String(p.passkey).substring(4) + "\"}";
+  }
+  peerMutexUnlock();
+  return j + "]";
+}
+
+uint8_t SensorReader::queueDepth() const {
+  return sensorQueue_ ? static_cast<uint8_t>(uxQueueMessagesWaiting(sensorQueue_)) : 0;
+}
+
 
 #else
 
 bool SensorReader::begin(const String&) { return false; }
 bool SensorReader::enqueueSensorForLoRa(const SensorSample&) { return false; }
+uint32_t SensorReader::droppedSamples() const { return 0; }
+uint8_t SensorReader::queueDepth() const { return 0; }
+bool SensorReader::setPeerPasskey(const SensorProtocol::BleAddress&, uint32_t) { return false; }
+bool SensorReader::forgetPeerPasskey(const SensorProtocol::BleAddress&) { return false; }
+bool SensorReader::getPeerPasskey(const SensorProtocol::BleAddress&, uint32_t&) const { return false; }
+bool SensorReader::resolvePeerIdentity(const SensorProtocol::BleAddress& a, const char*, SensorProtocol::BleAddress& i, bool& r) const { i = a; r = false; return false; }
+bool SensorReader::recordPeerRpa(const SensorProtocol::BleAddress&, const SensorProtocol::BleAddress&) { return false; }
+String SensorReader::peersJson() const { return "[]"; }
 bool SensorReader::popSensorForLoRa(SensorSample&, TickType_t) { return false; }
 bool SensorReader::snapshotNodes(SensorNodeSnapshot*, size_t, size_t& count) const { count = 0; return false; }
 bool SensorReader::snapshotNode(size_t, SensorRegistry::Node&) const { return false; }

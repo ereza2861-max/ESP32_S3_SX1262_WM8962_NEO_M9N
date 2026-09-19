@@ -224,3 +224,15 @@ Deep sleep uses a 12-hour timer wake to force a periodic time-sync opportunity. 
 battery gauge at I2C address `0x36` is polled periodically with bounded bus operations and
 falls back to the ADC1 battery path if unavailable. See `docs/PCB_MAPPING.md` for the hardware
 contract.
+
+## BLE pairing (per-node passkey)
+Gateway BLE pairing uses a six-digit passkey stored per sensor identity in the `ble_peer` NVS namespace. The gateway refuses a secure connection when no passkey is provisioned; there is no insecure fallback. Use the authenticated WebUI endpoints `/api/ble/passkey` or the serial commands `ble passkey <addr> <passkey>`, `ble forget <addr>`, and `ble list`. Passkeys are masked in listings.
+
+## BLE identity (RPA handling)
+ESP32-C3 sensor nodes request a stable public BLE address. The gateway registry uses that identity address as its primary key and may retain a last-seen resolvable random address (RPA) for diagnostics. Unknown RPAs are not inserted as new nodes. An RPA older than one hour without a successful pairing is ignored by the peer mapping.
+
+## Sensor queue policy
+Sensor forwarding uses a fixed depth-16 queue. The default `DROP_OLDEST` policy keeps the newest sample when saturated and increments `sensorDropped`. `/api/sensors/live` exposes `sensorDropped` and `queueDepth`; runtime policy can be changed with `/api/sensors/queue-policy`.
+
+## Version pinning
+`platformio.ini` pins the existing Espressif32 6.13.0 platform. Dependencies whose exact upstream version could not be established from the repository are explicitly marked in `VERSIONS.md`; `tools/audit_versions.py` reports remaining pinning work. Run `python tools/audit_versions.py` in CI and before release.

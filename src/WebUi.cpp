@@ -267,6 +267,7 @@ extern LoRaManager lora;
 extern LoRaWANManager lorawan;
 extern AudioManager audio;
 extern BleSensorReader bleSensorReader;
+extern void fieldRadioRequestDeepSleep();
 static SensorReader::SensorNodeSnapshot gSensorSnapshots[SensorRegistry::MAX_SUPPORTED_NODES]{};
 
 static const char INDEX_HTML[] PROGMEM = R"HTML(
@@ -916,6 +917,10 @@ void WebUi::begin() {
   server_.on("/api/sensors/live", HTTP_GET, [this]{ if (auth()) handleSensorLive(); });
   server_.on("/api/sensors/forget", HTTP_POST, [this]{ if (auth()) handleSensorForget(); });
   server_.on("/api/sensors/refresh", HTTP_POST, [this]{ if (auth()) handleSensorRefresh(); });
+  server_.on("/api/sensors/queue-policy", HTTP_POST, [this]{ if (auth()) handleSensorQueuePolicy(); });
+  server_.on("/api/ble/passkey", HTTP_POST, [this]{ if (auth()) handleBlePasskeySet(); });
+  server_.on("/api/ble/passkey", HTTP_DELETE, [this]{ if (auth()) handleBlePasskeyDelete(); });
+  server_.on("/api/ble/passkey", HTTP_GET, [this]{ if (auth()) handleBlePasskeyList(); });
   server_.on("/api/mqtt/provision", HTTP_POST, [this]{ if (auth()) handleMqttProvision(); });
   server_.on("/api/mqtt/status", HTTP_GET, [this]{ if (auth()) handleMqttStatus(); });
   server_.on("/api/routes", HTTP_GET, [this]{ if (auth()) handleRoutes(); });
@@ -927,6 +932,7 @@ void WebUi::begin() {
   server_.on("/api/dedup/stats", HTTP_GET, [this]{ if (auth()) handleDedupStats(); });
   server_.on("/api/forward/stats", HTTP_GET, [this]{ if (auth()) handleForwardStats(); });
   server_.on("/api/auth/stats", HTTP_GET, [this]{ if (auth()) handleAuthStats(); });
+  server_.on("/api/ecdh/status", HTTP_GET, [this]{ if (auth()) server_.send(200, "application/json", lora.ecdhStatusJson()); });
   server_.on("/api/theme", HTTP_POST, [this]{ if (auth()) handleTheme(); });
   server_.on("/api/nvs", HTTP_GET, [this]{ if (auth()) handleNvs(); });
   server_.on("/api/config/migrate", HTTP_POST, [this]{ if (auth()) handleConfigMigrate(); });
@@ -976,6 +982,7 @@ void WebUi::begin() {
   server_.on("/api/track/simplified", HTTP_GET, [this]{ if (auth()) handleTrackSimplified(); });
   server_.on("/api/track/download", HTTP_GET, [this]{ if (auth()) handleTrackDownload(); });
   server_.on("/api/reboot", HTTP_POST, [this]{ if (auth()) handleReboot(); });
+  server_.on("/api/deep-sleep", HTTP_POST, [this]{ if (auth()) fieldRadioRequestDeepSleep(); });
   server_.on("/api/config", HTTP_POST, [this]{ if (auth()) handleConfig(); });
   server_.on("/api/config/export", HTTP_GET, [this]{ if (auth()) handleConfigExport(); });
   server_.on("/api/config/backup", HTTP_GET, [this]{ if (auth()) handleConfigBackup(); });
@@ -1099,6 +1106,7 @@ void WebUi::handleStatus() {
   j += ",\"sf\":" + String(lora.currentDataRate());
   j += ",\"adr\":" + String(lora.adrEnabled() ? "true" : "false") + "},";
   j += "\"codec\":" + String(gState.codecReady ? "true":"false") + ",";
+  j += "\"sensorDropped\":" + String(gState.sensorDropped) + ",";
   j += "\"sd\":" + String(gState.storageReady ? "true":"false") + ",";
   j += "\"battery\":{\"available\":" + String(gState.batteryAvailable ? "true":"false");
   j += ",\"v\":";
@@ -2114,6 +2122,7 @@ static String sensorNodeJson(size_t index, const SensorRegistry::Node& node, boo
              "\",\"name\":\"" + jsonEscape(String(node.name)) + "\",\"rssi\":" + String(node.rssi) +
              ",\"connected\":" + String(node.connected ? "true" : "false") +
              ",\"lastSeenMs\":" + String(node.lastSeenMs) + ",\"sensorCount\":" + String(node.sensorCount);
+  if (node.hasRPA) j += ",\"rpa\":\"" + sensorAddressJson(node.lastRPA) + "\"";
   if (includeValues) {
     j += ",\"sensors\":[";
     for (size_t i = 0; i < node.sensorCount; ++i) {
@@ -2138,7 +2147,7 @@ void WebUi::handleSensorNodes() {
   if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) {
     server_.send(503, "application/json", "{\"ok\":false,\"error\":\"sensor snapshot unavailable\"}"); return;
   }
-  String j = "{\"ok\":true,\"nodes\":[";
+  String j = "{\"ok\":true,\"sensorDropped\":" + String(bleSensorReader.sensorReader().droppedSamples()) + ",\"queueDepth\":" + String(bleSensorReader.sensorReader().queueDepth()) + ",\"nodes\":[";
   for (size_t i = 0; i < count; ++i) { if (i) j += ','; j += sensorNodeJson(gSensorSnapshots[i].index, gSensorSnapshots[i].node, false); }
   server_.sendHeader("Cache-Control", "no-store"); server_.send(200, "application/json", j + "]}");
 }
@@ -2158,7 +2167,7 @@ void WebUi::handleSensorLive() {
   if (!rateLimit(lastSensorLiveMs_, Config::WEB_RATE_LIMIT_MS)) return;
   size_t count = 0;
   if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) { server_.send(503, "application/json", "{\"ok\":false}"); return; }
-  String j = "{\"ok\":true,\"nodes\":[";
+  String j = "{\"ok\":true,\"sensorDropped\":" + String(bleSensorReader.sensorReader().droppedSamples()) + ",\"queueDepth\":" + String(bleSensorReader.sensorReader().queueDepth()) + ",\"nodes\":[";
   for (size_t i = 0; i < count; ++i) { if (i) j += ','; j += sensorNodeJson(gSensorSnapshots[i].index, gSensorSnapshots[i].node, true); }
   server_.sendHeader("Cache-Control", "no-store"); server_.send(200, "application/json", j + "]}");
 }
@@ -2187,6 +2196,69 @@ void WebUi::handleSensorRefresh() {
   server_.send(202, "application/json", "{\"ok\":true,\"queued\":true}");
 }
 
+
+
+
+static bool parseBleAddressArg(ESPWebServerSecure& server, SensorProtocol::BleAddress& out) {
+  const String raw = server.arg("addr");
+  if (raw.length() != 17) return false;
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < 6; ++i) {
+    const size_t pos = (5U - i) * 3U;
+    if (i < 5 && raw[pos + 2] != ':') return false;
+    const int hi = hex(raw[pos]), lo = hex(raw[pos + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out.bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  out.type = 0;
+  return true;
+}
+
+void WebUi::handleBlePasskeySet() {
+  if (!rateLimit(lastBlePasskeyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  SensorProtocol::BleAddress address{};
+  const String pass = server_.arg("passkey");
+  if (!parseBleAddressArg(server_, address) || pass.length() != 6) {
+    server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid addr/passkey\"}"); return;
+  }
+  for (size_t i = 0; i < 6; ++i) if (!isdigit(static_cast<unsigned char>(pass[i]))) {
+    server_.send(400, "application/json", "{\"ok\":false,\"error\":\"passkey must be 6 digits\"}"); return;
+  }
+  const uint32_t value = static_cast<uint32_t>(pass.toInt());
+  if (value < 100000U || value > 999999U || !bleSensorReader.setPeerPasskey(address, value)) {
+    server_.send(400, "application/json", "{\"ok\":false,\"error\":\"passkey rejected\"}"); return;
+  }
+  server_.send(200, "application/json", "{\"ok\":true}");
+}
+
+void WebUi::handleBlePasskeyDelete() {
+  if (!rateLimit(lastBlePasskeyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  SensorProtocol::BleAddress address{};
+  if (!parseBleAddressArg(server_, address) || !bleSensorReader.forgetPeerPasskey(address)) {
+    server_.send(404, "application/json", "{\"ok\":false,\"error\":\"peer not found\"}"); return;
+  }
+  server_.send(200, "application/json", "{\"ok\":true}");
+}
+
+void WebUi::handleBlePasskeyList() {
+  if (!rateLimit(lastBlePasskeyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", "{\"ok\":true,\"peers\":" + bleSensorReader.peersJson() + "}");
+}
+
+void WebUi::handleSensorQueuePolicy() {
+  if (!rateLimit(lastSensorQueuePolicyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  const String policy = server_.arg("policy");
+  if (policy == "oldest") bleSensorReader.sensorReader().setQueuePolicy(SensorReader::SampleQueuePolicy::DROP_OLDEST);
+  else if (policy == "newest") bleSensorReader.sensorReader().setQueuePolicy(SensorReader::SampleQueuePolicy::DROP_NEWEST);
+  else { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"policy must be newest|oldest\"}"); return; }
+  server_.send(200, "application/json", "{\"ok\":true,\"policy\":\"" + policy + "\"}");
+}
 
 
 void WebUi::handleMqttProvision() {
@@ -2297,7 +2369,8 @@ void WebUi::handleDedupStats() {
   String j = "{\"hits\":" + String(lora.dedupHits()) +
              ",\"misses\":" + String(lora.dedupMisses()) +
              ",\"cacheSize\":" + String(Config::LORA_DEDUP_CACHE_SIZE) +
-             ",\"evictions\":" + String(lora.dedupEvictions()) + "}";
+             ",\"evictions\":" + String(lora.dedupEvictions()) +
+             ",\"replayRejects\":" + String(lora.replayRejects()) + "}";
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", j);
 }

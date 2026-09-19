@@ -30,6 +30,8 @@ private:
   uint32_t lastSensorNodesMs_ = 0;
   uint32_t lastSensorLiveMs_ = 0;
   uint32_t lastSensorActionMs_ = 0;
+  uint32_t lastBlePasskeyMs_ = 0;
+  uint32_t lastSensorQueuePolicyMs_ = 0;
   File uploadFile_;
   String uploadPath_;
   size_t uploadBytes_ = 0;
@@ -141,4 +143,8 @@ private:
   void handleSensorLive();
   void handleSensorForget();
   void handleSensorRefresh();
+  void handleBlePasskeySet();
+  void handleBlePasskeyDelete();
+  void handleBlePasskeyList();
+  void handleSensorQueuePolicy();
 };

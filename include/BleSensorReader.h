@@ -1,3 +1,4 @@
+// G16: per-node BLE passkey provisioning facade.
 #pragma once
 #include <Arduino.h>
 #include "SensorReader.h"
@@ -12,6 +13,9 @@ public:
   bool hasConnectedSensorNode() const;
   SensorReader& sensorReader() { return sensorReader_; }
   const SensorReader& sensorReader() const { return sensorReader_; }
+  bool setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey);
+  bool forgetPeerPasskey(const SensorProtocol::BleAddress& address);
+  String peersJson() const;
 
 private:
   SensorReader sensorReader_;

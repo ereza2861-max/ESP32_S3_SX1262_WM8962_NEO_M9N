@@ -171,6 +171,10 @@ static_assert(FIELDRADIO_LORA_ECDH_REKEY_ENABLED == 0 ||
 constexpr uint32_t LORA_ECDH_KEY_RETENTION_SEC =
     2UL * LORA_REKEY_PERIOD_SEC;
 constexpr uint8_t LORA_ECDH_PROTOCOL_VERSION = 1;
+constexpr uint8_t LORA_PROTOCOL_VERSION_ECDH = 5;
+constexpr uint8_t LORA_ECDH_KEY_EPOCH_DELTA_CURRENT = 0;
+constexpr uint8_t LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS = 1;
+constexpr size_t LORA_ECDH_V5_HEADER_BYTES = 20;
 constexpr uint8_t LORA_ECDH_BEACON_MAGIC = 0xE2;
 constexpr size_t LORA_ECDH_PUBLIC_KEY_BYTES = 32;
 constexpr size_t LORA_ECDH_BEACON_BYTES =

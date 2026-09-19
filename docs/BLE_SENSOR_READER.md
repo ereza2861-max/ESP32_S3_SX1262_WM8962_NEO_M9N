@@ -34,12 +34,7 @@ stored bonds. `SENSOR_MAX_NODES` is intentionally limited to three or fewer.
 
 ## Important hardware compatibility
 
-**HC-06 is not a BLE GATT peripheral.** It is a Bluetooth Classic SPP module and
-cannot implement this protocol. An ATmega328 sensor node using this repository's
-BLE contract therefore needs a BLE-capable module/SoC (for example an
-appropriate BLE UART/GATT module), or a separate Classic-Bluetooth SPP transport
-must be designed and implemented. The current ESP32-S3 firmware does not claim
-HC-06/SPP support.
+The supported sensor-node architecture is ESP32-C3 with the repository's NimBLE GATT contract. A sensor node must implement the advertised service and characteristics described above.
 
 ## Failure and recovery behavior
 
