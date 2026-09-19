@@ -8,6 +8,7 @@
 #include "StorageManager.h"
 #include "RadioArbiter.h"
 #include "SensorTelemetry.h"
+#include "EncryptedFrameParser.h"
 #include <esp_system.h>
 #include <Preferences.h>
 #include <mbedtls/aes.h>
@@ -745,22 +746,23 @@ bool LoRaManager::decryptPacketV3(const String& packet, uint8_t& type,
                                   uint32_t& epochSec, uint8_t* plain,
                                   size_t capacity, size_t& len) {
   len = 0; sourceId = 0; ttl = 0; hopIndex = 0; epochSec = 0;
-  if (packet.length() < PACKET_HEADER_V3 + PACKET_TAG ||
-      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC ||
-      static_cast<uint8_t>(packet[1]) != LORA_PROTOCOL_VERSION_HOP)
+  EncryptedFrameParser::Parsed parsed{};
+  if (!EncryptedFrameParser::parse(
+          reinterpret_cast<const uint8_t*>(packet.c_str()), packet.length(),
+          LORA_PROTOCOL_VERSION_HOP, PACKET_HEADER_V3, PACKET_TAG, parsed,
+          Config::LORA_MAX_PACKET))
     return false;
 
-  type = static_cast<uint8_t>(packet[2]);
-  seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
-        (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
+  type = parsed.type;
+  seq = parsed.sequence;
   uint32_t nonce = 0;
   memcpy(&nonce, packet.c_str() + 5, sizeof(nonce));
-  memcpy(&sourceId, packet.c_str() + 9, sizeof(sourceId));
-  ttl = static_cast<uint8_t>(packet[13]);
-  hopIndex = static_cast<uint8_t>(packet[14]);
-  memcpy(&epochSec, packet.c_str() + 15, sizeof(epochSec));
+  sourceId = parsed.sourceId;
+  ttl = parsed.ttl;
+  hopIndex = parsed.hopIndex;
+  epochSec = parsed.epochSec;
 
-  const size_t cipherLen = packet.length() - PACKET_HEADER_V3 - PACKET_TAG;
+  const size_t cipherLen = parsed.cipherLength;
   if (!plain || cipherLen > capacity) return false;
 
   uint8_t key[16];
@@ -812,21 +814,22 @@ bool LoRaManager::decryptPacketV5(const String& packet, uint8_t& type,
   hopIndex = 0;
   epochSec = 0;
   keyEpochDelta = 0;
-  if (packet.length() < PACKET_HEADER_V5 + PACKET_TAG ||
-      static_cast<uint8_t>(packet[0]) != PACKET_MAGIC ||
-      static_cast<uint8_t>(packet[1]) != Config::LORA_PROTOCOL_VERSION_ECDH)
+  EncryptedFrameParser::Parsed parsed{};
+  if (!EncryptedFrameParser::parse(
+          reinterpret_cast<const uint8_t*>(packet.c_str()), packet.length(),
+          Config::LORA_PROTOCOL_VERSION_ECDH, PACKET_HEADER_V5, PACKET_TAG,
+          parsed, Config::LORA_MAX_PACKET))
     return false;
 
-  type = static_cast<uint8_t>(packet[2]);
-  seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
-        (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
+  type = parsed.type;
+  seq = parsed.sequence;
   uint32_t nonce = 0;
   memcpy(&nonce, packet.c_str() + 5, sizeof(nonce));
-  memcpy(&sourceId, packet.c_str() + 9, sizeof(sourceId));
-  ttl = static_cast<uint8_t>(packet[13]);
-  hopIndex = static_cast<uint8_t>(packet[14]);
-  memcpy(&epochSec, packet.c_str() + 15, sizeof(epochSec));
-  keyEpochDelta = static_cast<uint8_t>(packet[19]);
+  sourceId = parsed.sourceId;
+  ttl = parsed.ttl;
+  hopIndex = parsed.hopIndex;
+  epochSec = parsed.epochSec;
+  keyEpochDelta = parsed.keyEpochDelta;
 
   if (sourceId == 0 || ttl == 0 || ttl > Config::LORA_INITIAL_TTL ||
       epochSec == 0 ||
@@ -845,7 +848,7 @@ bool LoRaManager::decryptPacketV5(const String& packet, uint8_t& type,
           epochSec, keyEpochDelta, keyEpochSec))
     return false;
 
-  const size_t cipherLen = packet.length() - PACKET_HEADER_V5 - PACKET_TAG;
+  const size_t cipherLen = parsed.cipherLength;
   if (!plain || cipherLen > capacity) return false;
 
   uint8_t sessionKey[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};

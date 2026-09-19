@@ -14,6 +14,7 @@ public:
   SensorReader& sensorReader() { return sensorReader_; }
   const SensorReader& sensorReader() const { return sensorReader_; }
   bool setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey);
+  bool setPeerIrk(const SensorProtocol::BleAddress& address, const uint8_t irk[16]);
   bool forgetPeerPasskey(const SensorProtocol::BleAddress& address);
   String peersJson() const;
 

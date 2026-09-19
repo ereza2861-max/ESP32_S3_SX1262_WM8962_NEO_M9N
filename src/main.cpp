@@ -24,6 +24,7 @@
 #include "MqttClientManager.h"
 #include "AudioManager.h"
 #include "StorageManager.h"
+#include "SensorSpool.h"
 #include "WebUi.h"
 #include "PersistentConfig.h"
 #include "BleSensorReader.h"
@@ -37,6 +38,7 @@ WifiStaManager wifiSta;
 MqttClientManager mqtt;
 AudioManager audio;
 StorageManager storage;
+SensorSpool sensorSpool;
 ESPWebServerSecure server(Config::WEB_PORT);
 WebUi web(server);
 FuelGaugeMax17048 fuelGauge;
@@ -61,7 +63,7 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
-static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0, hbLoRaWAN = 0;
+static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0, hbLoRaWAN = 0, hbBleSensor = 0, hbSensorForward = 0;
 static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr, hNet = nullptr, hBleSensor = nullptr, hSensorForward = nullptr;
 static uint32_t bootCount = 0;
 static Adafruit_NeoPixel rgb(1, Board::LED_RGB, NEO_GRB + NEO_KHZ800);
@@ -696,6 +698,7 @@ static void taskBleSensor(void*) {
   watchdogSubscribe();
   for (;;) {
     esp_task_wdt_reset();
+    ++hbBleSensor;
     bleSensorReader.task();
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -714,42 +717,111 @@ static void taskSensorForward(void*) {
 
   for (;;) {
     esp_task_wdt_reset();
-    { StateLock lock(gState); if (lock.ok()) gState.sensorDropped = bleSensorReader.sensorReader().droppedSamples(); }
-    SensorReader::SensorSample sample{};
-    if (bleSensorReader.sensorReader().popSensorForLoRa(sample, 0)) {
-      // Keep all network I/O out of the NimBLE notification callback. The BLE
-      // reader only queues a fully self-contained sample; this task owns MQTT.
-      (void)mqtt.publishSensorData(sample.nodeId, sample.nodeName, sample.sensorId,
-                                   sample.sensorName, sample.unit, sample.value,
-                                   sample.quality, sample.rssi, sample.timestampMs);
+    ++hbSensorForward;
+
+    static uint32_t spoolRetryMs = 0;
+    if (!sensorSpool.ready() && static_cast<int32_t>(millis() - spoolRetryMs) >= 0) {
+      spoolRetryMs = millis() + 5000U;
+      if (storage.begin()) (void)sensorSpool.begin();
+    }
+
+    {
+      StateLock lock(gState);
+      if (lock.ok()) {
+        gState.sensorDropped = bleSensorReader.sensorReader().droppedSamples();
+        gState.sensorSpoolDepth = static_cast<uint32_t>(sensorSpool.depth());
+        gState.sensorSpoolEvictions = sensorSpool.evictions();
+        gState.sensorSpoolDrops = sensorSpool.drops();
+        gState.sensorSpoolRecovered = sensorSpool.recovered();
+        gState.peerMacFailures = bleSensorReader.sensorReader().peerMacFailures();
+      }
+    }
+
+    // First make the RAM queue durable. Peek is intentional: a sample is not
+    // consumed from RAM until its persistent spool record exists.
+    SensorReader::SensorSample queued{};
+    if (bleSensorReader.sensorReader().peekSensorForLoRa(queued)) {
       ReportState* state = nullptr;
       ReportState* freeState = nullptr;
       for (auto& candidate : states) {
-        if (candidate.valid && candidate.nodeId == sample.nodeId &&
-            candidate.sensorId == sample.sensorId) {
+        if (candidate.valid && candidate.nodeId == queued.nodeId &&
+            candidate.sensorId == queued.sensorId) {
           state = &candidate;
           break;
         }
         if (!candidate.valid && !freeState) freeState = &candidate;
       }
       if (!state) state = freeState;
+
+      uint8_t required = SensorSpool::DELIVERY_MQTT;
       if (state && SensorTelemetry::shouldReportSensor(
-              state->valid ? state->value : NAN, sample.value,
-              state ? state->lastReportMs : 0, millis(),
+              state->valid ? state->value : NAN, queued.value,
+              state->valid ? state->lastReportMs : 0, millis(),
               Config::SENSOR_REPORT_DELTA_THRESHOLD,
               Config::SENSOR_REPORT_PERIOD_MS)) {
-        if (lora.sendSensorTelemetry(sample.nodeId, sample.sensorId, sample.value,
-                                     sample.quality, sample.timestampMs)) {
-          state->nodeId = sample.nodeId;
-          state->sensorId = sample.sensorId;
-          state->value = sample.value;
-          state->lastReportMs = millis();
-          state->valid = true;
+        required |= SensorSpool::DELIVERY_LORA;
+      }
+
+      if (sensorSpool.append(queued, required)) {
+        SensorReader::SensorSample consumed{};
+        (void)bleSensorReader.sensorReader().popSensorForLoRa(consumed, 0);
+      }
+    }
+
+    // Drain the persistent spool independently of the RAM queue. A downstream
+    // outage therefore leaves only the undelivered bit set and does not lose
+    // samples already accepted by the BLE reader.
+    SensorSpool::Pending pending{};
+    if (sensorSpool.peek(pending)) {
+      if ((pending.requiredMask & SensorSpool::DELIVERY_MQTT) &&
+          !(pending.deliveredMask & SensorSpool::DELIVERY_MQTT)) {
+        if (mqtt.publishSensorData(pending.sample.nodeId, pending.sample.nodeName,
+                                   pending.sample.sensorId, pending.sample.sensorName,
+                                   pending.sample.unit, pending.sample.value,
+                                   pending.sample.quality, pending.sample.rssi,
+                                   pending.sample.timestampMs)) {
+          (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_MQTT);
         }
       }
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(10));
+
+      if ((pending.requiredMask & SensorSpool::DELIVERY_LORA) &&
+          !(pending.deliveredMask & SensorSpool::DELIVERY_LORA)) {
+        bool reportDue = true;
+        ReportState* state = nullptr;
+        ReportState* freeState = nullptr;
+        for (auto& candidate : states) {
+          if (candidate.valid && candidate.nodeId == pending.sample.nodeId &&
+              candidate.sensorId == pending.sample.sensorId) {
+            state = &candidate;
+            break;
+          }
+          if (!candidate.valid && !freeState) freeState = &candidate;
+        }
+        if (!state) state = freeState;
+        if (state) {
+          reportDue = SensorTelemetry::shouldReportSensor(
+              state->valid ? state->value : NAN, pending.sample.value,
+              state->valid ? state->lastReportMs : 0, millis(),
+              Config::SENSOR_REPORT_DELTA_THRESHOLD,
+              Config::SENSOR_REPORT_PERIOD_MS);
+        }
+        if (reportDue &&
+            lora.sendSensorTelemetry(pending.sample.nodeId, pending.sample.sensorId,
+                                     pending.sample.value, pending.sample.quality,
+                                     pending.sample.timestampMs)) {
+          (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_LORA);
+          if (state) {
+            state->nodeId = pending.sample.nodeId;
+            state->sensorId = pending.sample.sensorId;
+            state->value = pending.sample.value;
+            state->lastReportMs = millis();
+            state->valid = true;
+          }
+        }
+      }
     }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
@@ -885,10 +957,10 @@ static void taskHealth(void*) {
     esp_task_wdt_reset();
     const uint32_t now = millis();
     if (now - lastCheck >= 5000) {
-      const uint32_t hb[5] = {hbGnss, hbLoRa, hbAudio, hbWeb, hbLoRaWAN};
+      const uint32_t hb[7] = {hbGnss, hbLoRa, hbAudio, hbWeb, hbLoRaWAN, hbBleSensor, hbSensorForward};
       bool stalled = false;
       uint8_t stalledMask = 0;
-      for (size_t i = 0; i < 5; ++i) {
+      for (size_t i = 0; i < 7; ++i) {
         if (hb[i] == last[i]) {
           stalled = true;
           stalledMask |= static_cast<uint8_t>(1U << i);
@@ -1032,6 +1104,36 @@ static void serviceSerialConsole() {
         else
           Serial.println("BLE: peer passkey stored");
       }
+    } else if (line.startsWith("ble irk ")) {
+      const String rest = line.substring(8);
+      const int sep = rest.indexOf(' ');
+      SensorProtocol::BleAddress parsed{};
+      uint8_t irk[16] = {};
+      bool valid = sep == 17 && rest.length() == 17 + 1 + 32;
+      auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+      };
+      const String addr = valid ? rest.substring(0, sep) : String();
+      const String key = valid ? rest.substring(sep + 1) : String();
+      for (size_t i = 0; valid && i < 6; ++i) {
+        const size_t pos = (5U - i) * 3U;
+        if (i < 5 && addr[pos + 2] != ':') { valid = false; break; }
+        const int hi = hex(addr[pos]), lo = hex(addr[pos + 1]);
+        if (hi < 0 || lo < 0) { valid = false; break; }
+        parsed.bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+      }
+      for (size_t i = 0; valid && i < sizeof(irk); ++i) {
+        const int hi = hex(key[i * 2]), lo = hex(key[i * 2 + 1]);
+        if (hi < 0 || lo < 0) { valid = false; break; }
+        irk[i] = static_cast<uint8_t>((hi << 4) | lo);
+      }
+      if (!valid || !bleSensorReader.setPeerIrk(parsed, irk))
+        Serial.println("BLE: invalid IRK/address or storage failure");
+      else
+        Serial.println("BLE: peer IRK stored");
     } else if (line.startsWith("ble forget ")) {
       const String addr = line.substring(11);
       SensorProtocol::BleAddress parsed{};
@@ -1056,6 +1158,7 @@ static void serviceSerialConsole() {
     } else if (line == "ble list") {
       Serial.println(bleSensorReader.peersJson());
     } else if (line == "reboot") {
+      (void)sensorSpool.flush();
       ESP.restart();
     } else if (line == "wipe") {
       nvs_flash_erase();
@@ -1067,7 +1170,7 @@ static void serviceSerialConsole() {
           (unsigned)gState.healthLogCount);
     } else if (line == "help" || line.isEmpty()) {
       Serial.printf("wdt=%lu,%lu,%lu,%lu\n", (unsigned long)gState.wdtResetCounts[0], (unsigned long)gState.wdtResetCounts[1], (unsigned long)gState.wdtResetCounts[2], (unsigned long)gState.wdtResetCounts[3]);
-      Serial.println("commands: status config ble passkey <addr> <passkey> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
+      Serial.println("commands: status config ble passkey <addr> <passkey> ble irk <addr> <32-hex> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
     } else {
       Serial.println("unknown command; type help");
     }
@@ -1130,6 +1233,8 @@ void setup() {
 #endif
 
   bool sdOk = storage.begin();
+  const bool sensorSpoolOk = sensorSpool.begin();
+  if (!sensorSpoolOk) Serial.println("WARN: sensor spool unavailable; BLE forwarding will remain in RAM until SD recovers");
   bool gpsOk = gnss.begin();
   bool loraOk = lora.begin();
   bool lorawanOk = lorawan.begin();

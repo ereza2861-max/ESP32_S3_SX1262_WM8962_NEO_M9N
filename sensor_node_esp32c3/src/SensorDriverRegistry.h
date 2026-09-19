@@ -1,0 +1,44 @@
+#pragma once
+
+#include <Arduino.h>
+#include "SensorDriver.h"
+#include "SensorRegistry.h"
+#include <cstddef>
+#include <cstdint>
+
+class SensorDriverRegistry {
+public:
+  static constexpr size_t MAX_DRIVERS = 8;
+  static constexpr uint8_t DRIVER_BME280 = 1;
+  static constexpr uint8_t DRIVER_BATTERY_ADC = 2;
+  static constexpr uint8_t DRIVER_DIGITAL_INPUT = 3;
+  static constexpr uint8_t DRIVER_GENERIC_I2C = 4;
+  static constexpr uint16_t FLAG_SIGNED = 1U << 0;
+  static constexpr uint16_t FLAG_LITTLE_ENDIAN = 1U << 1;
+  static constexpr uint16_t FLAG_REGISTER_16BIT = 1U << 2;
+
+  bool load(SensorRegistry& registry);
+  bool save() const;
+  bool add(const DriverConfig& config, SensorRegistry& registry);
+  bool remove(uint16_t sensorId, SensorRegistry& registry);
+  void clear(SensorRegistry& registry);
+  bool sample(SensorRegistry& registry, uint32_t nowMs);
+  size_t count() const { return count_; }
+  const DriverConfig* config(size_t index) const;
+  String listJson() const;
+
+private:
+  struct Entry {
+    DriverConfig config{};
+    SensorDriver* driver = nullptr;
+    uint32_t lastSampleMs = 0;
+  };
+
+  Entry entries_[MAX_DRIVERS]{};
+  size_t count_ = 0;
+
+  static uint32_t crc32(const uint8_t* data, size_t len);
+  static SensorDriver* createDriver(const DriverConfig& config);
+  static bool validConfig(const DriverConfig& config);
+  bool rebuild(SensorRegistry& registry);
+};

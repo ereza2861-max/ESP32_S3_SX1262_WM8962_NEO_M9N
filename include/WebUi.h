@@ -147,4 +147,6 @@ private:
   void handleBlePasskeyDelete();
   void handleBlePasskeyList();
   void handleSensorQueuePolicy();
+  void handleSensorSpool();
+  void handleSensorSpoolClear();
 };

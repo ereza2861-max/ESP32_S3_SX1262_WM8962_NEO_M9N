@@ -78,6 +78,11 @@ struct RuntimeState {
   uint32_t playbackDurationMs = 0;
   uint8_t queueDepth = 0;
   uint32_t sensorDropped = 0;
+  uint32_t sensorSpoolDepth = 0;
+  uint32_t sensorSpoolEvictions = 0;
+  uint32_t sensorSpoolDrops = 0;
+  uint32_t sensorSpoolRecovered = 0;
+  uint32_t peerMacFailures = 0;
   bool usbAudioReady = false;
   bool usbAudioActive = false;
   bool loraReady = false;

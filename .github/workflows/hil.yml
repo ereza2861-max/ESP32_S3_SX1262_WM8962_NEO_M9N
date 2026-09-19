@@ -1,0 +1,34 @@
+name: host-hil-gates
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'shared/**'
+      - 'test/**'
+      - 'Makefile'
+      - '.github/workflows/hil.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'shared/**'
+      - 'test/**'
+      - 'Makefile'
+      - '.github/workflows/hil.yml'
+
+jobs:
+  host-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host test dependencies
+        run: sudo apt-get update && sudo apt-get install -y g++ libssl-dev
+      - name: Fuzz parser
+        run: make fuzz
+      - name: Failure injection
+        run: make failure-inject
+      - name: Native unit tests
+        run: |
+          python3 -m pip install --user platformio
+          export PATH="$HOME/.local/bin:$PATH"
+          make test

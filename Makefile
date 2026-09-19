@@ -15,7 +15,7 @@ PROJECT_PATH := $(abspath $(PROJECT_DIR))
 PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 
 .PHONY: all build build-log ci-build sensor-node-build clean upload monitor provision check-provisioning \
-        preflight check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci auth-help info help
+        preflight check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci auth-help info help         test test-hil fuzz failure-inject secure-boot-keys
 
 GH ?= gh
 CI_WORKFLOW ?= compile.yml
@@ -46,7 +46,7 @@ ci-build:
 sensor-node-build:
 	@set -eu; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
-	$(PIO) -d "$(PROJECT_PATH)/sensor_node_esp32c3" run -e esp32-c3-devkitm-1
+	$(PIO) -d "$(PROJECT_PATH)/sensor_node_esp32c3" run -e sensor_node_c3
 
 build-log: check-provisioning
 	@set -o pipefail; \
@@ -90,6 +90,23 @@ download-ci:
 	else \
 		echo "WARN: sensor-node firmware artifact tidak tersedia."; \
 	fi
+
+
+test:
+	@set -eu; 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; 	$(PIO) -d "$(PROJECT_PATH)" test -e native
+
+test-hil:
+	@echo "HIL is manual hardware validation; see test/hil/*.md"
+	@echo "Host-only gates: make fuzz && make failure-inject"
+
+fuzz:
+	@set -eu; 	mkdir -p "$(PROJECT_PATH)/.host-test"; 	c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer 	  -I"$(PROJECT_PATH)/shared" "$(PROJECT_PATH)/shared/EncryptedFrameParser.h" 	  "$(PROJECT_PATH)/src/EncryptedFrameParser.cpp" "$(PROJECT_PATH)/test/test_fuzz_frame_parser.cpp" 	  -o "$(PROJECT_PATH)/.host-test/test_fuzz_frame_parser"; 	"$(PROJECT_PATH)/.host-test/test_fuzz_frame_parser"
+
+failure-inject:
+	@set -eu; 	mkdir -p "$(PROJECT_PATH)/.host-test"; 	c++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer 	  "$(PROJECT_PATH)/test/test_failure_injection.cpp" 	  -o "$(PROJECT_PATH)/.host-test/test_failure_injection"; 	"$(PROJECT_PATH)/.host-test/test_failure_injection"
+
+secure-boot-keys:
+	@set -eu; 	KEY_DIR="$${KEY_DIR:-$$HOME/.fieldradio/keys}"; 	mkdir -p "$$KEY_DIR"; chmod 700 "$$KEY_DIR"; 	command -v openssl >/dev/null 2>&1 || { echo "ERROR: openssl tidak ditemukan."; exit 127; }; 	test ! -e "$$KEY_DIR/secure_boot_signing_key.pem" || { echo "ERROR: signing key already exists; choose a new KEY_DIR."; exit 2; }; 	test ! -e "$$KEY_DIR/flash_encryption_key.hex" || { echo "ERROR: flash key already exists; choose a new KEY_DIR."; exit 2; }; 	openssl ecparam -name prime256v1 -genkey -noout -out "$$KEY_DIR/secure_boot_signing_key.pem"; 	openssl rand -hex 32 > "$$KEY_DIR/flash_encryption_key.hex"; 	chmod 600 "$$KEY_DIR/secure_boot_signing_key.pem" "$$KEY_DIR/flash_encryption_key.hex"; 	echo "Key material generated in $$KEY_DIR; no eFuse or device operation was performed."
 
 clean:
 	@set -eu; \

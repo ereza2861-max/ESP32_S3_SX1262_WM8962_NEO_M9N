@@ -2,6 +2,7 @@
 #include "generated/WebTlsProvisioning.h"
 #include "Config.h"
 #include "AppState.h"
+#include "SensorSpool.h"
 #include "StorageManager.h"
 #include "LoRaManager.h"
 #include "LoRaWANManager.h"
@@ -24,6 +25,8 @@
 #include <esp_system.h>
 #include <nvs_flash.h>
 #include <ctype.h>
+
+extern SensorSpool sensorSpool;
 
 static String jsonEscape(const String& input) {
   String out;
@@ -918,6 +921,8 @@ void WebUi::begin() {
   server_.on("/api/sensors/forget", HTTP_POST, [this]{ if (auth()) handleSensorForget(); });
   server_.on("/api/sensors/refresh", HTTP_POST, [this]{ if (auth()) handleSensorRefresh(); });
   server_.on("/api/sensors/queue-policy", HTTP_POST, [this]{ if (auth()) handleSensorQueuePolicy(); });
+  server_.on("/api/sensors/spool", HTTP_GET, [this]{ if (auth()) handleSensorSpool(); });
+  server_.on("/api/sensors/spool/clear", HTTP_POST, [this]{ if (auth()) handleSensorSpoolClear(); });
   server_.on("/api/ble/passkey", HTTP_POST, [this]{ if (auth()) handleBlePasskeySet(); });
   server_.on("/api/ble/passkey", HTTP_DELETE, [this]{ if (auth()) handleBlePasskeyDelete(); });
   server_.on("/api/ble/passkey", HTTP_GET, [this]{ if (auth()) handleBlePasskeyList(); });
@@ -1107,6 +1112,11 @@ void WebUi::handleStatus() {
   j += ",\"adr\":" + String(lora.adrEnabled() ? "true" : "false") + "},";
   j += "\"codec\":" + String(gState.codecReady ? "true":"false") + ",";
   j += "\"sensorDropped\":" + String(gState.sensorDropped) + ",";
+  j += "\"sensorSpoolDepth\":" + String(gState.sensorSpoolDepth) + ",";
+  j += "\"sensorSpoolEvictions\":" + String(gState.sensorSpoolEvictions) + ",";
+  j += "\"sensorSpoolDrops\":" + String(gState.sensorSpoolDrops) + ",";
+  j += "\"sensorSpoolRecovered\":" + String(gState.sensorSpoolRecovered) + ",";
+  j += "\"peerMacFailures\":" + String(gState.peerMacFailures) + ",";
   j += "\"sd\":" + String(gState.storageReady ? "true":"false") + ",";
   j += "\"battery\":{\"available\":" + String(gState.batteryAvailable ? "true":"false");
   j += ",\"v\":";
@@ -3186,7 +3196,32 @@ void WebUi::handleAudioSource() {
   server_.send(200, "text/plain", "OK");
 }
 
+void WebUi::handleSensorSpool() {
+  if (!rateLimit(lastSensorNodesMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", sensorSpool.statusJson());
+}
+
+void WebUi::handleSensorSpoolClear() {
+  if (!rateLimit(lastSensorActionMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!sensorSpool.clear()) {
+    server_.send(503, "application/json", "{\"ok\":false,\"error\":\"spool clear failed\"}");
+    return;
+  }
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.sensorSpoolDepth = 0;
+      gState.sensorSpoolEvictions = sensorSpool.evictions();
+      gState.sensorSpoolDrops = sensorSpool.drops();
+      gState.sensorSpoolRecovered = sensorSpool.recovered();
+    }
+  }
+  server_.send(200, "application/json", "{\"ok\":true}");
+}
+
 void WebUi::handleReboot() {
+  (void)sensorSpool.flush();
   server_.send(200, "text/plain", "rebooting");
   delay(100);
   ESP.restart();

@@ -31,6 +31,10 @@ bool BleSensorReader::hasConnectedSensorNode() const {
 bool BleSensorReader::setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey) {
   return sensorReader_.setPeerPasskey(address, passkey);
 }
+
+bool BleSensorReader::setPeerIrk(const SensorProtocol::BleAddress& address, const uint8_t irk[16]) {
+  return sensorReader_.setPeerIrk(address, irk);
+}
 bool BleSensorReader::forgetPeerPasskey(const SensorProtocol::BleAddress& address) {
   return sensorReader_.forgetPeerPasskey(address);
 }

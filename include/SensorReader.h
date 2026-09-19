@@ -25,11 +25,19 @@ public:
   const SensorRegistry& registry() const { return registry_; }
   bool enqueueSensorForLoRa(const struct SensorSample& sample);
   bool popSensorForLoRa(struct SensorSample& sample, TickType_t timeout = 0);
+  bool peekSensorForLoRa(struct SensorSample& sample) const;
   uint32_t droppedSamples() const { return droppedSamples_.load(std::memory_order_relaxed); }
   uint8_t queueDepth() const;
-  SampleQueuePolicy queuePolicy() const { return queuePolicy_; }
-  bool setQueuePolicy(SampleQueuePolicy policy) { queuePolicy_ = policy; return true; }
+  uint32_t peerMacFailures() const;
+  SampleQueuePolicy queuePolicy() const {
+    return static_cast<SampleQueuePolicy>(queuePolicy_.load(std::memory_order_acquire));
+  }
+  bool setQueuePolicy(SampleQueuePolicy policy) {
+    queuePolicy_.store(static_cast<uint8_t>(policy), std::memory_order_release);
+    return true;
+  }
   bool setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey);
+  bool setPeerIrk(const SensorProtocol::BleAddress& address, const uint8_t irk[16]);
   bool forgetPeerPasskey(const SensorProtocol::BleAddress& address);
   bool getPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t& passkey) const;
   bool resolvePeerIdentity(const SensorProtocol::BleAddress& advertised,
@@ -67,7 +75,7 @@ private:
   uint8_t sensorQueueStorage_[Config::SENSOR_LORA_QUEUE_DEPTH * sizeof(SensorSample)]{};
   bool initialized_ = false;
   std::atomic<uint32_t> droppedSamples_{0};
-  SampleQueuePolicy queuePolicy_ = SampleQueuePolicy::DROP_OLDEST;
-  volatile bool forgetRequested_[SensorRegistry::MAX_SUPPORTED_NODES]{};
-  volatile bool refreshRequested_[SensorRegistry::MAX_SUPPORTED_NODES]{};
+  std::atomic<uint8_t> queuePolicy_{static_cast<uint8_t>(SampleQueuePolicy::DROP_OLDEST)};
+  std::atomic<bool> forgetRequested_[SensorRegistry::MAX_SUPPORTED_NODES]{};
+  std::atomic<bool> refreshRequested_[SensorRegistry::MAX_SUPPORTED_NODES]{};
 };

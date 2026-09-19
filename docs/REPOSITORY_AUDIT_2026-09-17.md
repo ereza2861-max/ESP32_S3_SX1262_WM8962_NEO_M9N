@@ -66,3 +66,34 @@ provisioning) and the repository preflight.
 3. Complete STA/MQTT provisioning and TLS trust handling before treating MQTT as production-ready.
 4. Add hardware-backed integration tests for PPS, I2C gauge, radio wake, audio clocks and sleep/wake.
 5. Keep Secure Boot/flash encryption as an explicit manufacturing procedure with recovery/update policy.
+
+
+## Follow-up audit findings — 2026-09-20
+
+### 6. BLE queue drop accounting and cross-task state
+The BLE sensor queue previously incremented `sensorDropped` twice when a
+`DROP_NEWEST` sample was rejected, and could also count a successful
+`DROP_OLDEST` replacement as two drops. The counter now represents actual
+discarded samples. Queue policy and WebUI-triggered forget/refresh requests are
+also synchronized with atomics because they cross FreeRTOS task boundaries.
+
+### 7. BLE security configuration consistency
+`SENSOR_REQUIRE_ENCRYPTION=1` with `BLE_PAIRING_ENABLED=0` is incompatible with
+the current sensor-node contract because the node requires an encrypted and
+authenticated connection. The reader now rejects that configuration explicitly
+instead of attempting an incompatible security fallback.
+
+### 8. BLE health monitoring
+The health task previously monitored five core tasks but omitted the BLE sensor
+reader and sensor-forwarding tasks even though both are long-lived FreeRTOS
+tasks. Their heartbeats are now included in the stalled-task mask.
+
+### 9. Sensor-node serial provisioning
+The ESP32-C3 example accepted partially numeric serial input through `String::toInt()`
+and reported NVS provisioning success without checking write results. Integer
+parsing is now strict and the save path verifies each NVS write.
+
+### 10. Remaining delivery semantics
+BLE samples are still best-effort across the downstream MQTT/LoRa boundary.
+The current patch does not silently invent persistent store-and-forward semantics;
+see GAP E in `DECISIONS.md` for the required product decision.

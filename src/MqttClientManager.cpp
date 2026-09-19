@@ -1,4 +1,5 @@
 #include "MqttClientManager.h"
+#include "SensorSpool.h"
 #include "Config.h"
 #include "MqttCaCert.h"
 #include "Telemetry.h"
@@ -406,6 +407,8 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
   payload += unit;
   payload += "\",\"value\":";
   payload += valueText;
+  payload += ",\"sample_id\":";
+  payload += String(static_cast<unsigned long>(SensorSpool::sampleId(sample)));
   payload += ",\"quality\":";
   payload += String(static_cast<unsigned>(sample.quality));
   payload += ",\"rssi\":";

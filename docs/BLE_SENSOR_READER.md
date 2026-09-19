@@ -23,11 +23,12 @@ outside the notification callback.
 
 ## Pairing
 
-BLE pairing is controlled by `RuntimeConfig::blePairingEnabled`. When enabled,
-the gateway derives a six-digit passkey from the local 128-bit LoRa key and the
-device ID. The passkey is never stored. NimBLE remains the authoritative bond
-store; the application does not duplicate LTK/IRK material in its own NVS
-namespace.
+BLE pairing is controlled by `RuntimeConfig::blePairingEnabled`. Each sensor node
+has its own six-digit passkey. The gateway requires that passkey to be provisioned
+per identity and stores the identity → passkey mapping in the `ble_peer` NVS
+namespace. The passkey is masked in listings; it is not derived from the public
+BLE address. NimBLE remains the authoritative bond store; the application does not
+duplicate LTK/IRK material in its own NVS namespace.
 
 The NimBLE build is provisioned for three simultaneous connections and eight
 stored bonds. `SENSOR_MAX_NODES` is intentionally limited to three or fewer.
@@ -56,4 +57,4 @@ For a normal BLE Sensor Reader build, the deployment must have at least:
 4. a sensor node implementing the exact GATT contract above.
 
 If BLE pairing is enabled, the external node must support the selected BLE
-pairing/bonding method and use the same derived six-digit passkey contract.
+pairing/bonding method and use the provisioned per-node six-digit passkey.
