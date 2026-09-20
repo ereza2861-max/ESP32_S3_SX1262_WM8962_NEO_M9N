@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "Config.h"
 
 struct RuntimeConfig {
   float loraFreqMHz;
@@ -32,6 +33,18 @@ struct RuntimeConfig {
   uint8_t lorawanFPort = Config::LORAWAN_DEFAULT_FPORT;
   uint16_t lorawanUplinkPeriodSec = Config::LORAWAN_UPLINK_PERIOD_SEC_DEFAULT;
   bool blePairingEnabled = Config::BLE_PAIRING_ENABLED_VALUE;
+  bool mqttEnabled = true;
+  uint32_t wakePeriodSec = Config::GNSS_TIME_SYNC_PERIOD_MS / 1000UL;
+  bool classDEnabled = false;
+  uint8_t classDBoostLevel = Config::CLASS_D_BOOST_LEVEL;
+  // Safety-critical power thresholds/timers are runtime-configurable, but bounded
+  // by validation in RuntimeConfig::load/save before they reach the power task.
+  bool deepSleepEnabled = Config::DEEP_SLEEP_ENABLED;
+  uint32_t deepSleepIdleMs = Config::DEEP_SLEEP_IDLE_MS;
+  uint32_t deepSleepWakeGraceMs = Config::DEEP_SLEEP_WAKE_GRACE_MS;
+  uint32_t criticalShutdownDelayMs = Config::CRITICAL_SHUTDOWN_DELAY_MS;
+  float batteryLowThreshold = Config::BATTERY_LOW_THRESHOLD;
+  float batteryCriticalThreshold = Config::BATTERY_CRITICAL;
 
   void load();
   bool migrate();

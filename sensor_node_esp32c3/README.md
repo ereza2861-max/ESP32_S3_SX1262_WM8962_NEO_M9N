@@ -47,6 +47,23 @@ pio device monitor -b 115200
 The repository must provide `../shared/SensorProtocol.h` before building.
 The PlatformIO environment is `esp32-c3-devkitm-1` with Arduino and NimBLE-Arduino 2.5.1.
 
+## OTA firmware update
+
+The ESP32-C3 sensor node owns its OTA lifecycle independently of the ESP32-S3 gateway. OTA uses the ArduinoOTA network transport with a per-device provisioned password and a dedicated dual-application partition table. The ESP32-S3 does not store or execute the C3 firmware image.
+
+Provision the node locally before enabling OTA:
+
+```text
+wifi ssid <ssid>
+wifi pass <password>
+ota password <12..64 character secret>
+ota save
+```
+
+The node reconnects as a Wi-Fi station at boot and exposes ArduinoOTA only after a successful connection and valid stored OTA password. A failed Wi-Fi connection does not stop sensor/BLE operation. Do not expose OTA to an untrusted network; use an isolated management network and production flash-encryption/secure-boot provisioning where required by the deployment security policy.
+
+The OTA image is written to the inactive application slot. The bootloader selects the new slot after a successful transfer, so an interrupted transfer does not overwrite the running application. Automatic application rollback is not enabled by this patch; production validation should include boot-failure recovery before deployment.
+
 ## Serial provisioning
 
 At 115200 baud:

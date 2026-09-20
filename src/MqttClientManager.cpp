@@ -1,6 +1,7 @@
 #include "MqttClientManager.h"
 #include "SensorSpool.h"
 #include "Config.h"
+#include "PersistentConfig.h"
 #include "MqttCaCert.h"
 #include "Telemetry.h"
 #include <Preferences.h>
@@ -293,6 +294,12 @@ void MqttClientManager::auditEvent(const char* event, int mqttState) {
 
 
 bool MqttClientManager::begin() {
+  enabled_ = gConfig.mqttEnabled;
+  if (!enabled_) {
+    connected_ = false;
+    client_.disconnect();
+    return true;
+  }
   if (!sensorQueue_) {
     sensorQueue_ = xQueueCreateStatic(16, sizeof(SensorSample),
                                       sensorQueueStorage_, &sensorQueueStruct_);
@@ -336,7 +343,7 @@ bool MqttClientManager::connect(const String& host, uint16_t port,
 }
 
 bool MqttClientManager::publish(const String& topic, const String& payload, bool retained) {
-  if (!isConnected() || topic.isEmpty() || payload.isEmpty()) return false;
+  if (!enabled_ || !isConnected() || topic.isEmpty() || payload.isEmpty()) return false;
   if (topic.length() > 128 || payload.length() > 2048) return false;
   return client_.publish(topic.c_str(), payload.c_str(), retained);
 }
@@ -423,7 +430,23 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
   return publish(topic(sensorLeaf.c_str()), payload, false);
 }
 
+void MqttClientManager::setEnabled(bool enabled) {
+  if (enabled_ == enabled) return;
+  enabled_ = enabled;
+  if (!enabled_) {
+    connected_ = false;
+    client_.disconnect();
+    secure_.stop();
+    plain_.stop();
+    return;
+  }
+  nextRetryMs_ = 0;
+  retryDelayMs_ = Config::MQTT_RECONNECT_MIN_MS;
+  if (host_.isEmpty()) (void)begin();
+}
+
 void MqttClientManager::task() {
+  if (!enabled_) return;
   if (host_.isEmpty() || WiFi.status() != WL_CONNECTED) {
     if (connected_) auditEvent("DISCONNECT", client_.state());
     connected_ = false;

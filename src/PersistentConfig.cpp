@@ -197,6 +197,17 @@ void RuntimeConfig::load() {
   const uint8_t savedLwFPort = prefs.getUChar("lw_fport", lorawanFPort);
   const uint16_t savedLwPeriod = prefs.getUShort("lw_period", lorawanUplinkPeriodSec);
   const bool savedBlePairing = prefs.getBool("ble_pair", blePairingEnabled);
+  const bool savedMqttEnabled = prefs.getBool("mqtt_en", mqttEnabled);
+  const uint32_t savedWakePeriodSec = prefs.getUInt("wake_sec", wakePeriodSec);
+  const bool savedClassDEnabled = prefs.getBool("classd_en", classDEnabled);
+  const uint8_t savedClassDBoostLevel = prefs.getUChar("classd_boost", classDBoostLevel);
+  const bool savedDeepSleepEnabled = prefs.getBool("sleep_en", deepSleepEnabled);
+  const uint32_t savedDeepSleepIdleMs = prefs.getUInt("sleep_idle", deepSleepIdleMs);
+  const uint32_t savedWakeGraceMs = prefs.getUInt("wake_grace", deepSleepWakeGraceMs);
+  const uint32_t savedCriticalShutdownMs =
+      prefs.getUInt("bat_crit_delay", criticalShutdownDelayMs);
+  const float savedBatteryLow = prefs.getFloat("bat_low", batteryLowThreshold);
+  const float savedBatteryCritical = prefs.getFloat("bat_critical", batteryCriticalThreshold);
   prefs.end();
 
   RuntimeConfig candidate = *this;
@@ -230,6 +241,16 @@ void RuntimeConfig::load() {
   candidate.lorawanFPort = savedLwFPort;
   candidate.lorawanUplinkPeriodSec = savedLwPeriod;
   candidate.blePairingEnabled = savedBlePairing;
+  candidate.mqttEnabled = savedMqttEnabled;
+  candidate.wakePeriodSec = savedWakePeriodSec;
+  candidate.classDEnabled = savedClassDEnabled;
+  candidate.classDBoostLevel = savedClassDBoostLevel;
+  candidate.deepSleepEnabled = savedDeepSleepEnabled;
+  candidate.deepSleepIdleMs = savedDeepSleepIdleMs;
+  candidate.deepSleepWakeGraceMs = savedWakeGraceMs;
+  candidate.criticalShutdownDelayMs = savedCriticalShutdownMs;
+  candidate.batteryLowThreshold = savedBatteryLow;
+  candidate.batteryCriticalThreshold = savedBatteryCritical;
   if (version == 4) {
     // v4 had no BLE pairing field. Keep legacy values and initialize the
     // pairing flag from the compile-time default; no passkey is migrated.
@@ -272,6 +293,31 @@ void RuntimeConfig::load() {
     lorawanUplinkPeriodSec = candidate.lorawanUplinkPeriodSec;
   }
   blePairingEnabled = candidate.blePairingEnabled;
+  mqttEnabled = candidate.mqttEnabled;
+  if (candidate.wakePeriodSec >= 60UL && candidate.wakePeriodSec <= 7UL * 24UL * 60UL * 60UL)
+    wakePeriodSec = candidate.wakePeriodSec;
+  if (candidate.classDBoostLevel <= 7)
+    classDBoostLevel = candidate.classDBoostLevel;
+  classDEnabled = candidate.classDEnabled && Config::CLASS_D_ENABLED;
+  if (candidate.deepSleepIdleMs >= 60000UL &&
+      candidate.deepSleepIdleMs <= 24UL * 60UL * 60UL * 1000UL)
+    deepSleepIdleMs = candidate.deepSleepIdleMs;
+  if (candidate.deepSleepWakeGraceMs >= 100UL &&
+      candidate.deepSleepWakeGraceMs <= 60000UL)
+    deepSleepWakeGraceMs = candidate.deepSleepWakeGraceMs;
+  if (candidate.criticalShutdownDelayMs >= 100UL &&
+      candidate.criticalShutdownDelayMs <= 600000UL)
+    criticalShutdownDelayMs = candidate.criticalShutdownDelayMs;
+  if (isfinite(candidate.batteryLowThreshold) &&
+      isfinite(candidate.batteryCriticalThreshold) &&
+      candidate.batteryCriticalThreshold >= 2.5f &&
+      candidate.batteryLowThreshold > candidate.batteryCriticalThreshold &&
+      candidate.batteryLowThreshold <= 4.2f)
+    {
+      batteryLowThreshold = candidate.batteryLowThreshold;
+      batteryCriticalThreshold = candidate.batteryCriticalThreshold;
+    }
+  deepSleepEnabled = candidate.deepSleepEnabled;
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
   uint8_t passwordSaltCheck[PASSWORD_SALT_BYTES] = {};
   if (hexDecode(candidate.webPasswordSaltHex, passwordSaltCheck, sizeof(passwordSaltCheck)) &&
@@ -300,6 +346,20 @@ bool RuntimeConfig::migrate() {
 
 bool RuntimeConfig::save() const {
   if (!validRadio() || volume > 100 || audioRecordSource > Config::AUDIO_SOURCE_USB ||
+      audioRecordQuality > 2 || classDBoostLevel > 7 ||
+      wakePeriodSec < 60UL || wakePeriodSec > 7UL * 24UL * 60UL * 60UL ||
+      (classDEnabled && !Config::CLASS_D_ENABLED) ||
+      deepSleepIdleMs < 60000UL ||
+      deepSleepIdleMs > 24UL * 60UL * 60UL * 1000UL ||
+      deepSleepWakeGraceMs < 100UL ||
+      deepSleepWakeGraceMs > 60000UL ||
+      criticalShutdownDelayMs < 100UL ||
+      criticalShutdownDelayMs > 600000UL ||
+      !isfinite(batteryLowThreshold) ||
+      !isfinite(batteryCriticalThreshold) ||
+      batteryCriticalThreshold < 2.5f ||
+      batteryLowThreshold <= batteryCriticalThreshold ||
+      batteryLowThreshold > 4.2f ||
       !isfinite(batteryCalibration) ||
       batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
       !validLoRaWAN() ||
@@ -338,7 +398,17 @@ bool RuntimeConfig::save() const {
             prefs.putBytes("lw_devaddr", lorawanDevAddr, sizeof(lorawanDevAddr)) == sizeof(lorawanDevAddr) &&
             prefs.putUChar("lw_fport", lorawanFPort) > 0 &&
             prefs.putUShort("lw_period", lorawanUplinkPeriodSec) > 0 &&
-            prefs.putBool("ble_pair", blePairingEnabled);
+            prefs.putBool("ble_pair", blePairingEnabled) &&
+             prefs.putBool("mqtt_en", mqttEnabled) &&
+             prefs.putUInt("wake_sec", wakePeriodSec) > 0 &&
+             prefs.putBool("classd_en", classDEnabled) &&
+             prefs.putUChar("classd_boost", classDBoostLevel) > 0 &&
+             prefs.putBool("sleep_en", deepSleepEnabled) &&
+             prefs.putUInt("sleep_idle", deepSleepIdleMs) > 0 &&
+             prefs.putUInt("wake_grace", deepSleepWakeGraceMs) > 0 &&
+             prefs.putUInt("bat_crit_delay", criticalShutdownDelayMs) > 0 &&
+             prefs.putFloat("bat_low", batteryLowThreshold) != 0 &&
+             prefs.putFloat("bat_critical", batteryCriticalThreshold) != 0;
   if (ok) {
     uint8_t salt[PASSWORD_SALT_BYTES] = {};
     uint8_t hash[32] = {};

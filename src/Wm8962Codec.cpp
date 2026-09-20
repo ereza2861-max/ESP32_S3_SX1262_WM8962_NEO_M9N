@@ -177,9 +177,7 @@ bool Wm8962Codec::runInputDcServo() {
 }
 
 bool Wm8962Codec::configureClassDSpeaker() {
-  if constexpr (!Config::CLASS_D_ENABLED) {
-    return true;
-  }
+  if (!classDEnabled_) return true;
 
   if constexpr (Config::CLASS_D_ENABLED) {
     static_assert(Config::CLASS_D_OUTPUT_MODE == Config::ClassDOutputMode::BTL,
@@ -204,7 +202,7 @@ bool Wm8962Codec::configureClassDSpeaker() {
     return false;
 
   const uint16_t classD2 =
-      (Config::CLASS_D_MONO ? SPK_MONO : 0) | Config::CLASS_D_BOOST_LEVEL;
+      (Config::CLASS_D_MONO ? SPK_MONO : 0) | classDBoostLevel_;
   if (!writeReg(R_CLASSD_2, classD2)) return false;
 
   // Speaker wake is the datasheet-defined pop-minimising sequence.
@@ -222,6 +220,37 @@ bool Wm8962Codec::configureClassDSpeaker() {
   if (!readReg(R_CLASSD_1, status) || (status & SPKOUT_EN) != SPKOUT_EN)
     return false;
   return true;
+}
+
+bool Wm8962Codec::setClassDConfig(bool enabled, uint8_t boostLevel) {
+  if (boostLevel > 7) return false;
+  if (!wire_) {
+    if (!Config::CLASS_D_ENABLED && enabled) return false;
+    classDEnabled_ = enabled && Config::CLASS_D_ENABLED;
+    classDBoostLevel_ = boostLevel;
+    return true;
+  }
+  if (!Config::CLASS_D_ENABLED) {
+    classDEnabled_ = false;
+    return !enabled;
+  }
+
+  classDEnabled_ = enabled;
+  classDBoostLevel_ = boostLevel;
+  if (!enabled) {
+    if (!updateReg(R_CLASSD_1, SPKOUT_PGA_MUTE, SPKOUT_PGA_MUTE)) return false;
+    return updateReg(R_PWR_2, 0x0018, 0x0000);
+  }
+
+  if (!updateReg(R_PWR_2, 0x0018, 0x0018)) return false;
+  const uint16_t classD2 =
+      (Config::CLASS_D_MONO ? SPK_MONO : 0) | classDBoostLevel_;
+  if (!writeReg(R_CLASSD_2, classD2)) return false;
+  if (!writeReg(R_CLASSD_1, SPKOUT_PGA_MUTE | CLASSD_DAC_MUTE)) return false;
+  if (!writeReg(R_WSEQ_CTRL_2, 0x00E8)) return false;
+  delay(2);
+  return updateReg(R_CLASSD_1, CLASSD_DAC_MUTE | SPKOUT_PGA_MUTE,
+                   CLASSD_DAC_MUTE | SPKOUT_PGA_MUTE);
 }
 
 bool Wm8962Codec::configureAnaloguePath() {
@@ -347,7 +376,8 @@ bool Wm8962Codec::setMuted(bool muted) {
   if (!updateReg(R_HP_L, VOL_VU, VOL_VU)) return false;
 
   if constexpr (Config::CLASS_D_ENABLED) {
-    if (!updateReg(R_CLASSD_1, SPKOUT_PGA_MUTE,
+    if (classDEnabled_ &&
+        !updateReg(R_CLASSD_1, SPKOUT_PGA_MUTE,
                    muted ? SPKOUT_PGA_MUTE : 0))
       return false;
   }
@@ -372,8 +402,9 @@ bool Wm8962Codec::setVolumePercent(uint8_t percent) {
   if (!writeReg(R_DAC_R, VOL_VU | dac)) return false;
 
   if constexpr (Config::CLASS_D_ENABLED) {
-    if (!writeReg(R_SPKOUT_L, VOL_VU | hp) ||
-        !writeReg(R_SPKOUT_R, VOL_VU | hp))
+    if (classDEnabled_ &&
+        (!writeReg(R_SPKOUT_L, VOL_VU | hp) ||
+         !writeReg(R_SPKOUT_R, VOL_VU | hp)))
       return false;
   }
   return setMuted(false);

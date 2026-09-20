@@ -73,11 +73,17 @@ them. A self-signed certificate is suitable for lab use; production deployments 
 use a controlled CA/device-certificate process and the Secure Boot/flash-encryption
 profile described in `docs/SECURITY_PROVISIONING.md`.
 
-### LoRa fragmentation, voice ACK, store-and-forward, mesh routing
-These require a protocol-versioned packet format and persistent queue semantics. The
-existing protocol already has authenticated envelopes, TTL, deduplication, text/SOS ACK,
-LBT and hop support. A production fragmentation/voice-ACK extension should be added as
-a new protocol version rather than changing the meaning of existing packets.
+### LoRa fragmentation, selective-repeat/SACK, voice ACK, store-and-forward, mesh routing
+The fragment transport is now bounded and implemented inside the existing authenticated
+packet envelope: maximum 2048 bytes, maximum 16 fragments, TX window 8, receiver SACK
+bitmap 8 bits, and independent per-fragment retransmission. Fragment ACKs use the existing
+`LORA_TYPE_TEXT_ACK` message type with an 8-byte SACK payload; ordinary 6-byte text ACKs
+remain unchanged. This is a greenfield protocol decision: no legacy node interoperability
+is required because no node is operating and the PCB has not been fabricated.
+
+The remaining production gate is RF/HIL validation under loss, reordering, duplicate,
+power-loss and SD-recovery conditions. Store-and-forward remains SD-backed and bounded;
+mesh routing continues to use the authenticated routing extension and TTL/replay controls.
 
 ### GNSS dead reckoning / AGPS
 These require additional sensors or an offline assistance-data source. GPS-only firmware

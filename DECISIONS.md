@@ -52,3 +52,40 @@ TODO(hw):
 - `test/hil/test_hil_lora_reconnect.md`: verify radio outage/ACK-loss behavior.
 - `test/hil/test_hil_power_loss.md`: verify SD recovery and brownout behavior.
 - `test/hil/test_hil_factory.md`: verify production provisioning and eFuse flow.
+
+
+## GAP J — transport reliability — CLOSED
+Text fragmentation uses **Full Selective Repeat + bounded SACK**. The sender window is 8,
+the SACK bitmap is 8 bits, each fragment has an independent retry budget, and reassembly
+is hard-bounded to 2048 bytes / 16 fragments / 3 concurrent messages. This is a greenfield
+decision; no old-node compatibility branch is required.
+
+## GAP K — Wi-Fi STA lifecycle — DECISION LOCKED
+Use **Persistent STA + reconnect + AP fallback**. The AP remains the local recovery path
+when STA credentials are absent or the STA link is unavailable. End-to-end credential
+provisioning UI remains a delivery gate and must not silently store plaintext credentials
+outside the platform's protected configuration store.
+
+## GAP L — MQTT authority and durability — DECISION LOCKED
+MQTT is **authoritative** for upstream sensor delivery. The SD spool remains the durability
+boundary, with MQTT and LoRa delivery bits tracked independently. Reconnect uses
+**exponential backoff**. A future broker-QoS/acknowledgement gate must be validated before
+a record is considered broker-authoritatively delivered; a local `publish()` return value
+alone is not proof of broker persistence.
+
+## GAP M — HIL automation — DECISION LOCKED
+Use a **full automated hardware rack** for factory/HIL acceptance. Host-only tests are not
+allowed to claim RF, audio, PPS, sleep/wake, power-loss, or provisioning acceptance.
+
+## GAP N — ECDH lifecycle — DECISION LOCKED
+Use a **protocol Hybrid** refactor with **Epoch + handshake** rekey triggers and **bounded
+retention** of the old key. The current repository keeps ECDH behind its build flag until
+the complete peer handshake is validated; enabling the flag is not a production acceptance
+criterion by itself.
+
+## GAP O — configuration concurrency — DECISION LOCKED
+Runtime configuration uses **Mutex + snapshot** semantics. Persistence uses
+**transaction + generation counter**, values are **validate-before-persist**, and
+propagation uses the same **generation counter** so a task can reject stale snapshots.
+Direct cross-task mutation of `gConfig` is a defect to be removed during the configuration
+migration; callers must use a snapshot for long-running operations.

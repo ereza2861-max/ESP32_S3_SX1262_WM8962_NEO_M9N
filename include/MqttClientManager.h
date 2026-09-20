@@ -16,6 +16,8 @@ public:
                             const String& user, const String& pass);
   bool credentialsProvisioned() const { return credentialsProvisioned_; }
   bool passwordRotationWarning() const;
+  void setEnabled(bool enabled);
+  bool enabled() const { return enabled_; }
   bool publish(const String& topic, const String& payload, bool retained = false);
   bool publishSensorData(uint32_t nodeId, const char* nodeName,
                          uint16_t sensorId, const char* sensorName,
@@ -43,6 +45,7 @@ private:
   PubSubClient client_;
   bool useTls_ = false;
   bool connected_ = false;
+  bool enabled_ = true;
   String host_;
   String user_;
   String pass_;

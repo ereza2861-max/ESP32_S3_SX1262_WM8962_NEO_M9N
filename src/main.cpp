@@ -450,9 +450,9 @@ static void updateBattery(uint32_t now) {
             gConfig.batteryCalibration) > 0.05f;
   gState.batteryV = gState.batteryAvailable ? voltage : NAN;
   gState.batteryLow = gState.batteryAvailable &&
-                      voltage <= Config::BATTERY_LOW_THRESHOLD;
+                      voltage <= gConfig.batteryLowThreshold;
   gState.batteryCritical = gState.batteryAvailable &&
-                           voltage <= Config::BATTERY_CRITICAL;
+                           voltage <= gConfig.batteryCriticalThreshold;
   if (gState.batteryAvailable) {
     const float pct = (voltage - Config::BATTERY_PERCENT_EMPTY_V) *
                       100.0f /
@@ -478,7 +478,7 @@ static void updateBattery(uint32_t now) {
       const float dv = gState.batteryHistoryV[last] - gState.batteryHistoryV[first];
       if (dt >= 60000U && dv < -0.001f) {
         const float rateVPerMin = (-dv) / (static_cast<float>(dt) / 60000.0f);
-        const float remainingV = max(0.0f, voltage - Config::BATTERY_CRITICAL);
+        const float remainingV = max(0.0f, voltage - gConfig.batteryCriticalThreshold);
         gState.batteryEstimatedMinutes = static_cast<int32_t>(
             constrain(remainingV / rateVPerMin, 0.0f, 100000.0f));
       } else {
@@ -527,7 +527,7 @@ static bool shouldDeepSleep(uint32_t now) {
 
   if (critical) {
     if (!criticalBatterySince) criticalBatterySince = now;
-    if (now - criticalBatterySince >= Config::CRITICAL_SHUTDOWN_DELAY_MS)
+    if (now - criticalBatterySince >= gConfig.criticalShutdownDelayMs)
       return true;
   } else {
     criticalBatterySince = 0;
@@ -535,13 +535,13 @@ static bool shouldDeepSleep(uint32_t now) {
 
   static uint32_t idleSince = 0;
   setPowerProfile(busy || critical);
-  if (!Config::DEEP_SLEEP_ENABLED || busy) {
+  if (!gConfig.deepSleepEnabled || busy) {
     idleSince = now;
     return false;
   }
 
   if (!idleSince) idleSince = now;
-  if (now - idleSince >= Config::DEEP_SLEEP_IDLE_MS) {
+  if (now - idleSince >= gConfig.deepSleepIdleMs) {
     return true;
   }
   return false;
@@ -562,10 +562,12 @@ static void enterDeepSleep() {
   if (Board::BTN_PTT >= 0) wakeMask |= 1ULL << Board::BTN_PTT;
   if (Board::BTN_SOS >= 0) wakeMask |= 1ULL << Board::BTN_SOS;
 
-  const esp_err_t timerWakeErr = esp_sleep_enable_timer_wakeup(
-      static_cast<uint64_t>(Config::GNSS_TIME_SYNC_PERIOD_MS) * 1000ULL);
+  const uint64_t wakePeriodUs =
+      static_cast<uint64_t>(gConfig.wakePeriodSec) * 1000000ULL;
+  const esp_err_t timerWakeErr = esp_sleep_enable_timer_wakeup(wakePeriodUs);
   if (timerWakeErr != ESP_OK)
-    Serial.printf("POWER: failed to configure 12h GNSS time-sync wake: %s\\n",
+    Serial.printf("POWER: failed to configure GNSS time-sync wake (%lus): %s\\n",
+                  static_cast<unsigned long>(gConfig.wakePeriodSec),
                   esp_err_to_name(timerWakeErr));
 
   if (wakeMask != 0) {
@@ -592,7 +594,7 @@ static void enterDeepSleep() {
 
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
-  delay(Config::DEEP_SLEEP_WAKE_GRACE_MS);
+  delay(gConfig.deepSleepWakeGraceMs);
   esp_deep_sleep_start();
 }
 
@@ -1004,9 +1006,9 @@ static void taskHealth(void*) {
         gState.batteryV = voltage;
         gState.batteryPercent = percent;
         gState.batteryLow = gState.batteryAvailable &&
-                            voltage <= Config::BATTERY_LOW_THRESHOLD;
+                            voltage <= gConfig.batteryLowThreshold;
         gState.batteryCritical = gState.batteryAvailable &&
-                                 voltage <= Config::BATTERY_CRITICAL;
+                                 voltage <= gConfig.batteryCriticalThreshold;
       }
     }
     vTaskDelay(pdMS_TO_TICKS(1000));

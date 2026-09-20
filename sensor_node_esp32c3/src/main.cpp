@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <esp_system.h>
 #include "Config.h"
 #include "SensorRegistry.h"
@@ -14,6 +16,81 @@ BleSensorServer bleServer;
 Preferences prefs;
 String nodeName;
 size_t configuredSensorCount = SensorNodeConfig::EXAMPLE_SENSOR_COUNT;
+String wifiSsid;
+String wifiPassword;
+String otaPassword;
+bool otaEnabled = false;
+
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
+constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
+constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
+
+bool validSecretLength(const String& value) {
+  return value.length() >= OTA_PASSWORD_MIN_LEN && value.length() <= OTA_PASSWORD_MAX_LEN;
+}
+
+void loadOtaProvisioning() {
+  Preferences otaPrefs;
+  if (!otaPrefs.begin("ota", true)) {
+    otaEnabled = false;
+    return;
+  }
+  wifiSsid = otaPrefs.getString("ssid", "");
+  wifiPassword = otaPrefs.getString("wpass", "");
+  otaPassword = otaPrefs.getString("opass", "");
+  otaPrefs.end();
+  otaEnabled = wifiSsid.length() > 0 && validSecretLength(otaPassword);
+}
+
+bool saveOtaProvisioning() {
+  Preferences otaPrefs;
+  if (!otaPrefs.begin("ota", false)) return false;
+  const bool ok = otaPrefs.putString("ssid", wifiSsid) > 0 &&
+                  otaPrefs.putString("wpass", wifiPassword) > 0 &&
+                  otaPrefs.putString("opass", otaPassword) > 0;
+  otaPrefs.end();
+  return ok;
+}
+
+void setupOta() {
+  loadOtaProvisioning();
+  if (!otaEnabled) {
+    Serial.println("OTA: disabled; provision Wi-Fi and an OTA password (>=12 chars)");
+    return;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED &&
+         static_cast<uint32_t>(millis() - start) < WIFI_CONNECT_TIMEOUT_MS) {
+    delay(100);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("OTA: Wi-Fi connection failed; sensor service continues");
+    WiFi.disconnect(true, false);
+    return;
+  }
+
+  ArduinoOTA.setHostname(nodeName.c_str());
+  ArduinoOTA.setPassword(otaPassword.c_str());
+  ArduinoOTA.onStart([]() { Serial.println("OTA: update started"); });
+  ArduinoOTA.onEnd([]() { Serial.println("OTA: update complete"); });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    static uint32_t lastReport = 0;
+    const uint32_t now = millis();
+    if (now - lastReport >= 1000 || progress == total) {
+      lastReport = now;
+      Serial.printf("OTA: %u/%u\n", progress, total);
+    }
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("OTA: error=%u\n", static_cast<unsigned>(error));
+  });
+  ArduinoOTA.begin();
+  Serial.printf("OTA: enabled at %s\n", WiFi.localIP().toString().c_str());
+}
+
 
 bool validBatteryPin(int pin) {
   // ESP32-C3 ADC1 is GPIO0..4. GPIO2 is a strapping pin and is excluded.
@@ -83,6 +160,10 @@ void printHelp() {
   Serial.println("  driver save");
   Serial.println("  pin battery <gpio>      set legacy ADC1 battery GPIO (0,1,3,4)");
   Serial.println("  pin digital <gpio>      set legacy safe digital GPIO");
+  Serial.println("  wifi ssid <ssid>         stage Wi-Fi SSID for OTA");
+  Serial.println("  wifi pass <password>     stage Wi-Fi password for OTA");
+  Serial.println("  ota password <secret>    stage OTA password (min 12 chars)");
+  Serial.println("  ota save                 save OTA provisioning and reboot");
   Serial.println("  show                    show current provisioning");
   Serial.println("  save                    save provisioning to NVS and reboot");
   Serial.println("  help");
@@ -143,6 +224,8 @@ void showProvisioning() {
                 nodeName.c_str(), static_cast<unsigned>(configuredSensorCount),
                 SensorsExample::batteryAdcPin(), SensorsExample::digitalPin(),
                 static_cast<unsigned>(driverRegistry.count()));
+  Serial.printf("ota=%s wifi=%s\n", otaEnabled ? "configured" : "disabled",
+                wifiSsid.length() ? "configured" : "not-configured");
 }
 
 void handleCommand(String line) {
@@ -151,6 +234,48 @@ void handleCommand(String line) {
   if (line == "help") { printHelp(); return; }
   if (line == "show") { showProvisioning(); return; }
   if (line == "save") { saveProvisioning(); return; }
+  if (line == "ota save") {
+    if (!wifiSsid.length() || !validSecretLength(otaPassword)) {
+      Serial.println("ERROR: provision Wi-Fi SSID and OTA password (>=12 chars) first");
+      return;
+    }
+    const bool saved = saveOtaProvisioning();
+    Serial.println(saved ? "OK: OTA provisioning saved; rebooting" :
+                           "ERROR: OTA provisioning save failed");
+    if (saved) {
+      delay(100);
+      ESP.restart();
+    }
+    return;
+  }
+  if (line.startsWith("wifi ssid ")) {
+    wifiSsid = line.substring(10);
+    wifiSsid.trim();
+    if (wifiSsid.isEmpty() || wifiSsid.length() > 32) {
+      Serial.println("ERROR: invalid Wi-Fi SSID");
+      return;
+    }
+    Serial.println("OK: Wi-Fi SSID staged");
+    return;
+  }
+  if (line.startsWith("wifi pass ")) {
+    wifiPassword = line.substring(10);
+    if (wifiPassword.length() > 63) {
+      Serial.println("ERROR: Wi-Fi password too long");
+      return;
+    }
+    Serial.println("OK: Wi-Fi password staged");
+    return;
+  }
+  if (line.startsWith("ota password ")) {
+    otaPassword = line.substring(13);
+    if (!validSecretLength(otaPassword)) {
+      Serial.println("ERROR: OTA password must be 12..64 bytes");
+      return;
+    }
+    Serial.println("OK: OTA password staged");
+    return;
+  }
   if (line.startsWith("name ")) {
     const String value = line.substring(5);
     if (!validNodeNameLength(value, SensorProtocol::MAX_NODE_NAME_BYTES - 1)) {
@@ -327,6 +452,7 @@ void setup() {
   showProvisioning();
   Serial.printf("drivers=%s\n", driverRegistry.listJson().c_str());
   printHelp();
+  setupOta();
   if (!bleServer.begin(nodeName, registry)) {
     Serial.println("FATAL: BLE server initialization failed");
     while (true) delay(1000);
@@ -342,6 +468,7 @@ void loop() {
     else SensorsExample::sample(registry);
   }
   bleServer.task();
+  if (WiFi.status() == WL_CONNECTED && otaEnabled) ArduinoOTA.handle();
 
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');

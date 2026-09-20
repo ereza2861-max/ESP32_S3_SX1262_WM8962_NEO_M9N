@@ -501,6 +501,7 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
   uint8_t key[16];
   if (!plain || !loadKey(key))
     return false;
+  const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
 
   if (Config::LORA_USE_AES_GCM) {
     if (len + PACKET_HEADER_V4 + PACKET_TAG > Config::LORA_MAX_PACKET)
@@ -521,8 +522,8 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
     packet += static_cast<char>(seq & 0xFF);
     packet += static_cast<char>(seq >> 8);
     for (uint8_t byte : nonce) packet += static_cast<char>(byte);
-    for (uint8_t i = 0; i < sizeof(sourceId_); ++i)
-      packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+    for (uint8_t i = 0; i < sizeof(sourceIdSnapshot); ++i)
+      packet += static_cast<char>((sourceIdSnapshot >> (8 * i)) & 0xFF);
     packet += static_cast<char>(ttl);
 
     uint8_t cipher[Config::LORA_MAX_PACKET] = {};
@@ -562,7 +563,7 @@ bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
   for (uint8_t i = 0; i < 4; ++i)
     packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
   for (uint8_t i = 0; i < 4; ++i)
-    packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+    packet += static_cast<char>((sourceIdSnapshot >> (8 * i)) & 0xFF);
   packet += static_cast<char>(ttl);
 
   uint8_t iv[16] = {};
@@ -608,6 +609,7 @@ bool LoRaManager::encryptPacketV5(const uint8_t* plain, size_t len, uint8_t type
           epochSec, keyEpochDelta, keyEpochSec))
     return false;
 
+  const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
   uint8_t sessionKey[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};
   bool haveKey = ecdhKeyMaterial_.getSessionKey(
       peerSourceId, keyEpochSec, sessionKey);
@@ -622,7 +624,7 @@ bool LoRaManager::encryptPacketV5(const uint8_t* plain, size_t len, uint8_t type
       if (ecdhKeyMaterial_.hasEphemeralKey() &&
           ecdhKeyMaterial_.ephemeralEpoch() == peerEpoch) {
         haveKey = ecdhKeyMaterial_.deriveSessionKey(
-            peer.ephemeralPublic, sourceId_, peerSourceId, peer.epochSec) &&
+            peer.ephemeralPublic, sourceIdSnapshot, peerSourceId, peer.epochSec) &&
                   ecdhKeyMaterial_.getSessionKey(
                       peerSourceId, keyEpochSec, sessionKey);
       }
@@ -648,7 +650,7 @@ bool LoRaManager::encryptPacketV5(const uint8_t* plain, size_t len, uint8_t type
   for (uint8_t i = 0; i < 4; ++i)
     packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
   for (uint8_t i = 0; i < 4; ++i)
-    packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+    packet += static_cast<char>((sourceIdSnapshot >> (8 * i)) & 0xFF);
   packet += static_cast<char>(ttl);
   packet += static_cast<char>(hopIndex);
   for (uint8_t i = 0; i < 4; ++i)
@@ -743,6 +745,7 @@ bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type
     return false;
   uint8_t rotatingKey[16] = {};
   if (epochSec != 0 && deriveRotatingKey(key, epochSec, rotatingKey)) memcpy(key, rotatingKey, sizeof(key));
+  const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
 
   const uint32_t nonce = esp_random();
   packet.reserve(PACKET_HEADER_V3 + len + PACKET_TAG);
@@ -754,7 +757,7 @@ bool LoRaManager::encryptPacketV3(const uint8_t* plain, size_t len, uint8_t type
   for (uint8_t i = 0; i < 4; ++i)
     packet += static_cast<char>((nonce >> (8 * i)) & 0xFF);
   for (uint8_t i = 0; i < 4; ++i)
-    packet += static_cast<char>((sourceId_ >> (8 * i)) & 0xFF);
+    packet += static_cast<char>((sourceIdSnapshot >> (8 * i)) & 0xFF);
   packet += static_cast<char>(Config::LORA_INITIAL_TTL);
   packet += static_cast<char>(hopIndex);
   for (uint8_t i = 0; i < 4; ++i)
@@ -1027,7 +1030,7 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     if (!textStateMutex_ ||
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
       return false;
-    if (textAwaitingAck_) {
+    if (textAwaitingAck_ || fragmentTx_.active) {
       xSemaphoreGive(textStateMutex_);
       return false;
     }
@@ -1062,38 +1065,35 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     return false;
   }
 
+  // Keep the same mutex -> SPI lock ordering used by the other TX paths.
+  // The text-state lock is reacquired only after mutex_ is owned. This closes
+  // the callsign-change window between packet construction and on-air TX.
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    return false;
+  }
+  if (hopOn && !retuneToHopChannelLocked(hopIndex)) {
+    xSemaphoreGive(mutex_);
+    return false;
+  }
+
   if (type == Config::LORA_TYPE_TEXT) {
+    if (!textStateMutex_ ||
+        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE) {
+      xSemaphoreGive(mutex_);
+      return false;
+    }
+    if (sourceId_.load(std::memory_order_acquire) != sourceIdSnapshot) {
+      xSemaphoreGive(textStateMutex_);
+      xSemaphoreGive(mutex_);
+      return false;
+    }
     textPendingPacket_ = packet;
     textPendingSeq_ = seq;
     textRetryCount_ = 0;
     textSentMs_ = millis();
     textAwaitingAck_ = true;
     textAcked_ = false;
-    xSemaphoreGive(textStateMutex_);
-    textStateHeld = false;
-  }
-
-  // Keep the same mutex -> SPI lock ordering used by the other TX paths.
-  // Retuning before taking mutex_ can deadlock with processPendingTx(), which
-  // takes mutex_ first and then waits for the global SPI mutex.
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
-        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-      textAwaitingAck_ = false;
-      textAcked_ = false;
-      xSemaphoreGive(textStateMutex_);
-    }
-    return false;
-  }
-  if (hopOn && !retuneToHopChannelLocked(hopIndex)) {
-    xSemaphoreGive(mutex_);
-    if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
-        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-      textAwaitingAck_ = false;
-      textAcked_ = false;
-      xSemaphoreGive(textStateMutex_);
-    }
-    return false;
+    textStateHeld = true;
   }
 
   int16_t st = RADIOLIB_ERR_UNKNOWN;
@@ -1121,25 +1121,24 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
     vTaskDelay(pdMS_TO_TICKS(Config::LORA_LBT_BACKOFF_MIN_MS + (span ? (esp_random() % (span + 1U)) : 0U)));
   }
   (void)retuneToChannel0Locked();
+  if (!txOk && textStateHeld) {
+    textAwaitingAck_ = false;
+    textAcked_ = false;
+    textPendingPacket_.clear();
+  }
+  if (textStateHeld) {
+    xSemaphoreGive(textStateMutex_);
+    textStateHeld = false;
+  }
   xSemaphoreGive(mutex_);
   if (!txOk) {
-    if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
-        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {
-      textAwaitingAck_ = false;
-      textAcked_ = false;
-      xSemaphoreGive(textStateMutex_);
-    }
     return false;
   }
   ++hopFrame_;
-  uint32_t loggedSourceId = 0;
-  if (type == Config::LORA_TYPE_TEXT && textStateMutex_ &&
-      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-    loggedSourceId = sourceId_;
-    xSemaphoreGive(textStateMutex_);
-  } else {
-    loggedSourceId = sourceId_;
-  }
+  const uint32_t loggedSourceId =
+      type == Config::LORA_TYPE_TEXT
+          ? sourceIdSnapshot
+          : sourceId_.load(std::memory_order_acquire);
   logPacket(true, type, seq, loggedSourceId, 0, 0.0f, Config::LORA_INITIAL_TTL);
   return true;
 }
@@ -1888,8 +1887,9 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
       memcpy(routed, forward.payload, ROUTE_EXT_V2_BYTES);
       routed[3] = static_cast<uint8_t>(hopCount + 1U);
       memcpy(routed + 8, &selectedNextHop, 4);
+      const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
       memcpy(routed + 12U + static_cast<size_t>(hopCount + 1U) * sizeof(uint32_t),
-             &sourceId_, sizeof(sourceId_));
+             &sourceIdSnapshot, sizeof(sourceIdSnapshot));
     } else {
       // Upgrade a legacy v1 extension to Rev-C v2 while preserving its known
       // origin/previous-hop information. Full history is only available from
@@ -1903,7 +1903,8 @@ bool LoRaManager::transmitForward(const ForwardPacket& forward) {
       memset(routed + 12, 0, ROUTE_EXT_V2_BYTES - 12);
       uint32_t origin = previousHop;
       memcpy(routed + 12, &origin, 4);
-      memcpy(routed + 16, &sourceId_, 4);
+      const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
+      memcpy(routed + 16, &sourceIdSnapshot, sizeof(sourceIdSnapshot));
     }
     memcpy(routed + outRouteBytes, forward.payload + routeOffset, appLen);
     routedLen = appLen + outRouteBytes;
@@ -2197,7 +2198,62 @@ bool LoRaManager::sendTextAck(uint16_t ackedSeq, uint32_t ackedSourceId, uint8_t
   return transmit(packet, true);
 }
 
+bool LoRaManager::sendFragmentAck(uint32_t ackedSourceId, uint16_t messageId,
+                                  uint8_t baseIndex, uint8_t bitmap,
+                                  uint8_t hopIndex) {
+  uint8_t payload[8] = {};
+  memcpy(payload, &ackedSourceId, sizeof(ackedSourceId));
+  memcpy(payload + 4, &messageId, sizeof(messageId));
+  payload[6] = baseIndex;
+  payload[7] = bitmap;
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return false;
+  uint8_t routed[Config::LORA_MAX_PACKET] = {};
+  const size_t routedLen = addRouteExtension(
+      payload, sizeof(payload), ackedSourceId, 0, routed, sizeof(routed));
+  String packet;
+  const uint32_t epochSec = currentEpochSec();
+  if (!routedLen ||
+      !encryptPacketV3(routed, routedLen, Config::LORA_TYPE_TEXT_ACK, seq,
+                       hopIndex, epochSec, packet))
+    return false;
+  return transmit(packet, true);
+}
+
+void LoRaManager::handleFragmentAckPayload(const uint8_t* payload, size_t len) {
+  if (!payload || len != 8 || !textStateMutex_ ||
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return;
+
+  uint32_t ackedSource = 0;
+  uint16_t messageId = 0;
+  memcpy(&ackedSource, payload, sizeof(ackedSource));
+  memcpy(&messageId, payload + 4, sizeof(messageId));
+  const uint8_t base = payload[6];
+  const uint8_t bitmap = payload[7];
+
+  if (fragmentTx_.active && ackedSource == sourceId_ &&
+      messageId == fragmentTx_.messageId) {
+    if (base >= fragmentTx_.count) {
+      fragmentTx_.ackedMask = static_cast<uint16_t>(
+          (1UL << fragmentTx_.count) - 1UL);
+    } else {
+      const uint16_t lowerMask = static_cast<uint16_t>((1UL << base) - 1UL);
+      fragmentTx_.ackedMask |= lowerMask;
+      for (uint8_t bit = 0; bit < 8 && base + bit < fragmentTx_.count; ++bit) {
+        if (bitmap & static_cast<uint8_t>(1U << bit))
+          fragmentTx_.ackedMask |= static_cast<uint16_t>(1U << (base + bit));
+      }
+    }
+  }
+  xSemaphoreGive(textStateMutex_);
+}
+
 void LoRaManager::handleTextAckPayload(const uint8_t* payload, size_t len) {
+  if (len == 8) {
+    handleFragmentAckPayload(payload, len);
+    return;
+  }
   if (!payload || len != 6) return;
   uint16_t ackedSeq = static_cast<uint16_t>(payload[0]) | (static_cast<uint16_t>(payload[1]) << 8);
   uint32_t ackedSource = 0;
@@ -2213,12 +2269,8 @@ void LoRaManager::handleTextAckPayload(const uint8_t* payload, size_t len) {
   xSemaphoreGive(textStateMutex_);
 }
 
-bool LoRaManager::validateTextAckHop() const {
+bool LoRaManager::validateTextAckHop(bool hopEnabled) const {
   if (!textAwaitingAck_ || textPendingPacket_.isEmpty()) return true;
-  const bool hopEnabled = [&]() {
-    StateLock lock(gState);
-    return lock.ok() && gState.hopEnabled && gState.hopChannelCount > 0;
-  }();
   const uint8_t version = textPendingPacket_.length() > 1
       ? static_cast<uint8_t>(textPendingPacket_[1]) : 0;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
@@ -2239,6 +2291,12 @@ void LoRaManager::serviceTextRetry() {
   String packet;
   uint32_t sentMs = 0;
   uint8_t retryCount = 0;
+  bool hopEnabled = false;
+  {
+    StateLock stateLock(gState);
+    if (stateLock.ok())
+      hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
+  }
   {
     if (!textStateMutex_ ||
         xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return;
@@ -2259,12 +2317,6 @@ void LoRaManager::serviceTextRetry() {
     // V3 packets authenticate the hop index. A retry must be rebuilt when the
     // hop frame has advanced; otherwise it can be transmitted on a channel
     // that no longer matches the receiver's current hopping slot.
-    bool hopEnabled = false;
-    {
-      StateLock stateLock(gState);
-      if (stateLock.ok())
-        hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
-    }
     if (hopEnabled) {
       uint8_t plain[Config::LORA_MAX_PACKET] = {};
       uint8_t type = 0, ttl = 0, hop = 0;
@@ -2372,7 +2424,7 @@ void LoRaManager::serviceTextRetry() {
       }
       textPendingPacket_ = rebuilt;
     }
-    if (!validateTextAckHop()) {
+    if (!validateTextAckHop(hopEnabled)) {
       textAwaitingAck_ = false;
       textAcked_ = false;
       xSemaphoreGive(textStateMutex_);
@@ -2576,7 +2628,7 @@ bool LoRaManager::begin() {
   captureMutex_ = xSemaphoreCreateMutex();
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
-  sourceId_ = sourceIdFromCallsign(gConfig.callsign);
+  sourceId_.store(sourceIdFromCallsign(gConfig.callsign), std::memory_order_release);
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   // DECISION: fail closed if ECDH key material cannot be initialized while
   // the feature flag is enabled; do not start a partially initialized node.
@@ -2875,6 +2927,7 @@ void LoRaManager::task() {
   (void)processPendingTx();
   serviceSosRetry();
   serviceTextRetry();
+  serviceFragmentTx();
   serviceVoiceAckRetry();
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   {
@@ -3123,7 +3176,8 @@ void LoRaManager::task() {
       updateNeighborMetric(rxSourceId, rssi, snr);
     }
     bool textPayloadValid = false;
-    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_TEXT &&
+    if (rxAuthenticated && addressedToUs &&
+        (type == Config::LORA_TYPE_TEXT || type == Config::LORA_TYPE_FRAG_DATA) &&
         appPayloadLen > 0 && !duplicateV2) {
       const bool looksLikeFragment =
           appPayloadLen >= 2 && appPayload[0] == FRAGMENT_MAGIC &&
@@ -3132,24 +3186,65 @@ void LoRaManager::task() {
         // A fragment-shaped payload must pass fragment validation. Do not
         // ACK malformed fragments or reinterpret them as ordinary text.
         textPayloadValid = handleTextFragment(rxSourceId, appPayload, appPayloadLen);
-      } else {
+      } else if (type == Config::LORA_TYPE_TEXT) {
         char text[Config::LORA_MAX_PACKET + 1] = {};
         memcpy(text, appPayload, appPayloadLen);
         text[appPayloadLen] = '\0';
         addMessageHistory(rxSourceId, text);
         textPayloadValid = true;
       }
-    } else if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_TEXT &&
+    } else if (rxAuthenticated && addressedToUs &&
+               (type == Config::LORA_TYPE_TEXT || type == Config::LORA_TYPE_FRAG_DATA) &&
                appPayloadLen > 0 && duplicateV2) {
-      // Duplicates are still valid authenticated text and may need an ACK.
-      textPayloadValid = true;
+      // Duplicates are still authenticated and may need an ACK. Fragment
+      // duplicates are re-validated so a lost SACK does not cause a false drop.
+      if (type == Config::LORA_TYPE_FRAG_DATA) {
+        textPayloadValid = handleTextFragment(rxSourceId, appPayload, appPayloadLen);
+      } else {
+        textPayloadValid = true;
+      }
     }
     if (rxAuthenticated && !malformedRouteExtension && addressedToUs &&
-        nextHopIsUs && (type == Config::LORA_TYPE_TEXT || type == Config::LORA_TYPE_FRAG_DATA) && textPayloadValid) {
+        nextHopIsUs && type == Config::LORA_TYPE_TEXT && textPayloadValid) {
       textAckSeq_ = seq;
       textAckSourceId_ = rxSourceId;
       textAckHopIndex_ = (isV3 || isV5) ? hopIndex : 0;
       textAckPending_ = true;
+    }
+    if (rxAuthenticated && !malformedRouteExtension && addressedToUs &&
+        nextHopIsUs && type == Config::LORA_TYPE_FRAG_DATA && textPayloadValid) {
+      const uint16_t messageId = static_cast<uint16_t>(appPayload[2]) |
+          (static_cast<uint16_t>(appPayload[3]) << 8);
+      const uint8_t count = appPayload[5];
+      const uint8_t index = appPayload[4];
+      uint8_t base = count;
+      uint8_t bitmap = 0;
+      // handleTextFragment locates the exact transaction; find it again for
+      // the SACK bitmap without exposing its storage outside this task.
+      for (const auto& candidate : fragmentRx_) {
+        if (candidate.active && candidate.sourceId == rxSourceId &&
+            candidate.messageId == messageId) {
+          for (uint8_t j = 0; j < count; ++j) {
+            if (!(candidate.receivedMask & static_cast<uint16_t>(1U << j))) {
+              base = j;
+              break;
+            }
+          }
+          if (base < count) {
+            for (uint8_t bit = 0; bit < 8 && base + bit < count; ++bit)
+              if (candidate.receivedMask & static_cast<uint16_t>(1U << (base + bit)))
+                bitmap |= static_cast<uint8_t>(1U << bit);
+          }
+          break;
+        }
+      }
+      (void)index;
+      fragmentAckSourceId_ = rxSourceId;
+      fragmentAckMessageId_ = messageId;
+      fragmentAckBaseIndex_ = base;
+      fragmentAckBitmap_ = bitmap;
+      fragmentAckHopIndex_ = (isV3 || isV5) ? hopIndex : 0;
+      fragmentAckPending_ = true;
     }
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_SOS && appPayloadLen > 0) {
       // Re-ACK an authenticated duplicate so an ACK lost on-air does not
@@ -3304,6 +3399,15 @@ void LoRaManager::task() {
     textAckPending_ = false;
     (void)sendTextAck(ackSeq, ackSource, ackHop);
   }
+  if (fragmentAckPending_) {
+    const uint32_t ackSource = fragmentAckSourceId_;
+    const uint16_t messageId = fragmentAckMessageId_;
+    const uint8_t baseIndex = fragmentAckBaseIndex_;
+    const uint8_t bitmap = fragmentAckBitmap_;
+    const uint8_t ackHop = fragmentAckHopIndex_;
+    fragmentAckPending_ = false;
+    (void)sendFragmentAck(ackSource, messageId, baseIndex, bitmap, ackHop);
+  }
 
   // Forwarding is deliberately serialized outside the receive critical
   // section. Voice/PTT keeps priority; one queued packet is attempted per task
@@ -3339,7 +3443,8 @@ uint8_t LoRaManager::txPriorityForPacket(const String& packet) {
     case Config::LORA_TYPE_TEXT_ACK:
     case Config::LORA_TYPE_VOICE_ACK: return TX_PRIORITY_ACK;
     case Config::LORA_TYPE_VOICE: return TX_PRIORITY_VOICE;
-    case Config::LORA_TYPE_TEXT: return TX_PRIORITY_TEXT;
+    case Config::LORA_TYPE_TEXT:
+    case Config::LORA_TYPE_FRAG_DATA: return TX_PRIORITY_TEXT;
     case Config::LORA_TYPE_NEIGHBOR_BEACON: return TX_PRIORITY_BEACON;
     default: return TX_PRIORITY_FORWARD;
   }
@@ -3731,25 +3836,26 @@ bool LoRaManager::prepareForDeepSleep() {
 
   if (!ready_ || !mutex_) return ready_;
 
-  // textStateMutex_ participates in the text->mutex lock order used by
-  // transmitHopped()/serviceTextRetry(). Hold it while taking mutex_ so the
-  // deep-sleep check cannot race a text transaction or invert the lock order.
-  if (!textStateMutex_ ||
-      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(100)) != pdTRUE)
+  // Global lock order is mutex_ -> textStateMutex_. Taking textStateMutex_
+  // first here would deadlock with transmitHopped(), which holds mutex_ while
+  // it commits the text transaction immediately before TX.
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE)
     return false;
-  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(1000)) != pdTRUE) {
-    xSemaphoreGive(textStateMutex_);
+  if (!textStateMutex_ ||
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
+    xSemaphoreGive(mutex_);
     return false;
   }
 
   if (fragmentRxDirty_ && !persistFragmentRx()) {
-    xSemaphoreGive(mutex_);
     xSemaphoreGive(textStateMutex_);
+    xSemaphoreGive(mutex_);
     return false;
   }
 
   bool txQueued = pendingTx_.active || forwardInFlightActive_ ||
-                  voiceTxOutstanding_ != 0 || textAwaitingAck_;
+                  voiceTxOutstanding_ != 0 || textAwaitingAck_ ||
+                  fragmentTx_.active;
   if (!txQueued) {
     for (const auto& entry : txQueue_) {
       if (entry.used) {
@@ -3761,8 +3867,8 @@ bool LoRaManager::prepareForDeepSleep() {
   if (txQueued) {
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "Deep sleep blocked: TX transaction pending";
-    xSemaphoreGive(mutex_);
     xSemaphoreGive(textStateMutex_);
+    xSemaphoreGive(mutex_);
     return false;
   }
 
@@ -3788,8 +3894,8 @@ bool LoRaManager::prepareForDeepSleep() {
     }
   }
 
-  xSemaphoreGive(mutex_);
   xSemaphoreGive(textStateMutex_);
+  xSemaphoreGive(mutex_);
   return armed;
 }
 
@@ -4328,7 +4434,7 @@ void LoRaManager::updateSourceId() {
     textAwaitingAck_ = false;
     textAcked_ = false;
     textPendingPacket_.clear();
-    sourceId_ = next;
+    sourceId_.store(next, std::memory_order_release);
     xSemaphoreGive(textStateMutex_);
   } else {
     // Never mutate sourceId_ outside the text-state transaction. An unlocked
@@ -4384,8 +4490,9 @@ bool LoRaManager::sendTextTo(uint32_t destination, const String& text) {
       xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
     return false;
   const bool self = destination == sourceId_;
+  const bool fragmentBusy = fragmentTx_.active;
   xSemaphoreGive(textStateMutex_);
-  if (self) return false;
+  if (self || fragmentBusy) return false;
   if (text.length() > Config::LORA_MAX_PACKET - PACKET_HEADER_V3 - PACKET_TAG - ROUTE_EXT_BYTES)
     return enqueueTextFragments(text, destination);
   // Transmission is synchronous only for the radio airtime/LBT operation.
@@ -4689,7 +4796,8 @@ void LoRaManager::serviceNeighborBeacon() {
   uint8_t payload[8] = {};
   payload[0] = BEACON_MAGIC;
   payload[1] = Config::LORA_PROTOCOL_VERSION;
-  memcpy(payload + 2, &sourceId_, 4);
+  const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
+  memcpy(payload + 2, &sourceIdSnapshot, sizeof(sourceIdSnapshot));
   uint16_t uptime10 = static_cast<uint16_t>(min<uint32_t>(65535U, now / 1000U));
   memcpy(payload + 6, &uptime10, 2);
   uint16_t seq = 0;
@@ -4960,58 +5068,150 @@ bool LoRaManager::loadFragmentRx() {
 }
 
 bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination) {
-  if (text.length() <= Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG) return false;
+  if (text.length() <= Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG)
+    return false;
   if (text.length() > Config::LORA_FRAGMENT_MAX_BYTES) return false;
   if (Config::LORA_MAX_PACKET <= PACKET_HEADER_TX + PACKET_TAG +
                                   Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
     return false;
+
   const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG -
                           Config::LORA_FRAGMENT_HEADER_BYTES - ROUTE_EXT_BYTES;
   if (chunkMax == 0 || chunkMax > Config::LORA_MAX_PACKET) return false;
   const uint8_t count = static_cast<uint8_t>((text.length() + chunkMax - 1) / chunkMax);
   if (count == 0 || count > Config::LORA_FRAGMENT_MAX_COUNT) return false;
+
+  if (!textStateMutex_ ||
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
+    return false;
+  if (textAwaitingAck_ || fragmentTx_.active) {
+    xSemaphoreGive(textStateMutex_);
+    return false;
+  }
+
+  const uint32_t sourceIdSnapshot = sourceId_;
   const uint16_t messageId = ++fragmentMessageId_;
+  fragmentTx_ = FragmentTxState{};
+  fragmentTx_.active = true;
+  fragmentTx_.destination = destination;
+  fragmentTx_.messageId = messageId;
+  fragmentTx_.count = count;
+
+  // Build and authenticate the complete transaction while sourceId_ is
+  // protected by textStateMutex_. The sender window is populated only after
+  // every fragment has been constructed successfully.
   for (uint8_t index = 0; index < count; ++index) {
     const size_t offset = static_cast<size_t>(index) * chunkMax;
     const size_t chunkLen = min(chunkMax, text.length() - offset);
     uint8_t payload[Config::LORA_MAX_PACKET] = {};
-    payload[0] = FRAGMENT_MAGIC; payload[1] = Config::LORA_FRAGMENT_VERSION;
-    payload[2] = static_cast<uint8_t>(messageId & 0xFF); payload[3] = static_cast<uint8_t>(messageId >> 8);
-    payload[4] = index; payload[5] = count;
-    payload[6] = static_cast<uint8_t>(text.length() & 0xFF); payload[7] = static_cast<uint8_t>(text.length() >> 8);
-    memcpy(payload + Config::LORA_FRAGMENT_HEADER_BYTES, text.c_str() + offset, chunkLen);
+    payload[0] = FRAGMENT_MAGIC;
+    payload[1] = Config::LORA_FRAGMENT_VERSION;
+    payload[2] = static_cast<uint8_t>(messageId & 0xFF);
+    payload[3] = static_cast<uint8_t>(messageId >> 8);
+    payload[4] = index;
+    payload[5] = count;
+    payload[6] = static_cast<uint8_t>(text.length() & 0xFF);
+    payload[7] = static_cast<uint8_t>(text.length() >> 8);
+    memcpy(payload + Config::LORA_FRAGMENT_HEADER_BYTES,
+           text.c_str() + offset, chunkLen);
+
     uint16_t seq = 0;
-    if (!nextTxSequence(seq)) return false;
+    if (!nextTxSequence(seq)) {
+      fragmentTx_ = FragmentTxState{};
+      xSemaphoreGive(textStateMutex_);
+      return false;
+    }
     uint8_t routed[Config::LORA_MAX_PACKET] = {};
     const size_t routedLen = addRouteExtension(
         payload, Config::LORA_FRAGMENT_HEADER_BYTES + chunkLen, destination, 0,
-        routed, sizeof(routed));
+        routed, sizeof(routed), sourceIdSnapshot);
     String packet;
     if (!routedLen ||
-        !encryptPacket(routed, routedLen, Config::LORA_TYPE_FRAG_DATA, seq, packet))
-      return false;
-    if (!textStateMutex_ ||
-        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) != pdTRUE)
-      return false;
-    textPendingPacket_ = packet;
-    textPendingSeq_ = seq;
-    textRetryCount_ = 0;
-    textSentMs_ = millis();
-    textAwaitingAck_ = true;
-    textAcked_ = false;
-    xSemaphoreGive(textStateMutex_);
-
-    if (!transmit(packet, true)) {
-      if (xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-        textAwaitingAck_ = false;
-        textAcked_ = false;
-        xSemaphoreGive(textStateMutex_);
-      }
+        !encryptPacket(routed, routedLen, Config::LORA_TYPE_FRAG_DATA, seq, packet) ||
+        packet.length() > Config::LORA_MAX_PACKET) {
+      fragmentTx_ = FragmentTxState{};
+      xSemaphoreGive(textStateMutex_);
       return false;
     }
-
+    fragmentTx_.packetLen[index] = static_cast<uint16_t>(packet.length());
+    memcpy(fragmentTx_.packets[index], packet.c_str(), packet.length());
   }
+
+  xSemaphoreGive(textStateMutex_);
   return true;
+}
+
+void LoRaManager::serviceFragmentTx() {
+  struct Attempt {
+    uint8_t index = 0;
+    String packet;
+    uint8_t retries = 0;
+    bool retransmit = false;
+  };
+  Attempt attempts[Config::LORA_FRAGMENT_WINDOW_SIZE] = {};
+  size_t attemptCount = 0;
+  const uint32_t now = millis();
+
+  if (!textStateMutex_ ||
+      xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+    return;
+  if (!fragmentTx_.active) {
+    xSemaphoreGive(textStateMutex_);
+    return;
+  }
+
+  uint8_t base = fragmentTx_.count;
+  for (uint8_t i = 0; i < fragmentTx_.count; ++i) {
+    if (!(fragmentTx_.ackedMask & static_cast<uint16_t>(1U << i))) {
+      base = i;
+      break;
+    }
+  }
+  if (base >= fragmentTx_.count) {
+    fragmentTx_ = FragmentTxState{};
+    xSemaphoreGive(textStateMutex_);
+    return;
+  }
+
+  const uint8_t end = min<uint8_t>(
+      fragmentTx_.count,
+      static_cast<uint8_t>(base + Config::LORA_FRAGMENT_WINDOW_SIZE));
+  for (uint8_t i = base; i < end && attemptCount < Config::LORA_FRAGMENT_WINDOW_SIZE; ++i) {
+    const bool neverSent = fragmentTx_.sentMs[i] == 0;
+    const bool timedOut = !neverSent &&
+        now - fragmentTx_.sentMs[i] >= Config::LORA_FRAGMENT_ACK_TIMEOUT_MS;
+    if (!neverSent && !timedOut) continue;
+    if (!neverSent && fragmentTx_.retries[i] >= Config::LORA_FRAGMENT_MAX_RETRIES) {
+      fragmentTx_ = FragmentTxState{};
+      xSemaphoreGive(textStateMutex_);
+      StateLock lock(gState);
+      if (lock.ok()) gState.lastError = "Fragment SACK timeout";
+      return;
+    }
+    Attempt& attempt = attempts[attemptCount++];
+    attempt.index = i;
+    attempt.retries = fragmentTx_.retries[i];
+    attempt.retransmit = !neverSent;
+    attempt.packet.reserve(fragmentTx_.packetLen[i]);
+    for (uint16_t byte = 0; byte < fragmentTx_.packetLen[i]; ++byte)
+      attempt.packet += static_cast<char>(fragmentTx_.packets[i][byte]);
+  }
+  xSemaphoreGive(textStateMutex_);
+
+  for (size_t n = 0; n < attemptCount; ++n) {
+    if (!transmit(attempts[n].packet, true)) continue;
+    if (!textStateMutex_ ||
+        xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(20)) != pdTRUE)
+      continue;
+    if (fragmentTx_.active) {
+      const uint8_t i = attempts[n].index;
+      if (!(fragmentTx_.ackedMask & static_cast<uint16_t>(1U << i))) {
+        fragmentTx_.sentMs[i] = millis();
+        if (attempts[n].retransmit) ++fragmentTx_.retries[i];
+      }
+    }
+    xSemaphoreGive(textStateMutex_);
+  }
 }
 
 bool LoRaManager::sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,

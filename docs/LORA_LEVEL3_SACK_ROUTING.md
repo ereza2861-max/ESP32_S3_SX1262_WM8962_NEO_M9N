@@ -75,3 +75,18 @@ origin/previous-hop exclusion, next-hop selection, and replay/dedup state.
 - ACK payload versioning is explicit so malformed/old payloads are rejected.
 - Window size is bounded at 8 to match the receiver reorder buffer and avoid
   unbounded RAM growth.
+
+
+## Text fragmentation selective repeat
+
+Text payloads larger than the single-frame budget use a bounded selective-repeat
+transaction. The sender keeps at most `LORA_FRAGMENT_WINDOW_SIZE` (8) fragments in flight,
+and the receiver returns an 8-bit SACK bitmap beginning at the first missing fragment.
+Only missing fragments are retransmitted. A completed message is acknowledged by a SACK
+with `baseIndex == fragmentCount`.
+
+Hard limits are enforced at 2048 bytes total and 16 fragments. Reassembly has three
+bounded concurrent slots and persists incomplete state to SD. Conflicting duplicate
+fragments are rejected rather than replacing authenticated state. Because the project is
+greenfield, the fragment ACK payload may use this new 8-byte SACK form without a legacy
+fragment-peer compatibility branch.

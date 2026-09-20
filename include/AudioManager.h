@@ -26,6 +26,7 @@ public:
   bool setVox(bool enabled, float threshold = 0.08f, uint32_t hangMs = 700);
   bool setVoxAdapt(uint32_t adaptMs);
   void setVolume(uint8_t percent);
+  bool setClassDConfig(bool enabled, uint8_t boostLevel);
   bool usbStart();
   bool setRecordSource(uint8_t source);
   bool setUsbMonitor(bool enabled);

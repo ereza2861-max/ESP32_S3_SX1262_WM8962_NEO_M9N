@@ -28,6 +28,7 @@ bool AudioManager::initCodec() {
   Wire.begin(Board::I2C_SDA, Board::I2C_SCL, 400000);
   Wire.setTimeOut(50);
   if (!codec.begin(Wire, Board::WM8962_I2C_ADDR)) return false;
+  if (!codec.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel)) return false;
   return configureCodecForI2S();
 }
 
@@ -1435,9 +1436,15 @@ void AudioManager::stopPlayback() {
 
 void AudioManager::setVolume(uint8_t percent) {
   volume_ = constrain(percent, 0, 100);
-  codec.setVolumePercent(volume_);
+  (void)codec.setVolumePercent(volume_);
   StateLock lock(gState);
   if (lock.ok()) gState.volume = volume_;
+}
+
+bool AudioManager::setClassDConfig(bool enabled, uint8_t boostLevel) {
+  if (!initialized_) return false;
+  if (!codec.setClassDConfig(enabled, boostLevel)) return false;
+  return codec.setVolumePercent(volume_);
 }
 
 esp_err_t AudioManager::usbOutputCallback(uint8_t* data, size_t len, void* /*ctx*/) {

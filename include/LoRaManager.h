@@ -144,7 +144,7 @@ private:
   bool handleTextFragment(uint32_t sourceId, const uint8_t* payload, size_t len);
   static uint8_t txPriorityForPacket(const String& packet);
   bool lbtChannelBusy(int16_t scanStatus) const;
-  bool validateTextAckHop() const;
+  bool validateTextAckHop(bool hopEnabled) const;
   bool enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
                       uint8_t ttl, const uint8_t* payload, size_t len,
                       uint8_t wireVersion);
@@ -181,7 +181,7 @@ private:
   uint16_t txSequence_ = 0;
   uint32_t txSequenceAbsolute_ = 1;
   uint32_t txSequenceReservedUntil_ = 0;
-  uint32_t sourceId_ = 0;
+  std::atomic<uint32_t> sourceId_{0};
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   struct EcdhPeerState {
     uint32_t sourceId = 0;
@@ -387,6 +387,24 @@ private:
   uint16_t textAckSeq_ = 0;
   uint32_t textAckSourceId_ = 0;
   uint8_t textAckHopIndex_ = 0;
+  bool fragmentAckPending_ = false;
+  uint32_t fragmentAckSourceId_ = 0;
+  uint16_t fragmentAckMessageId_ = 0;
+  uint8_t fragmentAckBaseIndex_ = 0;
+  uint8_t fragmentAckBitmap_ = 0;
+  uint8_t fragmentAckHopIndex_ = 0;
+  struct FragmentTxState {
+    bool active = false;
+    uint32_t destination = 0;
+    uint16_t messageId = 0;
+    uint8_t count = 0;
+    uint16_t ackedMask = 0;
+    uint32_t sentMs[Config::LORA_FRAGMENT_MAX_COUNT] = {};
+    uint8_t retries[Config::LORA_FRAGMENT_MAX_COUNT] = {};
+    uint16_t packetLen[Config::LORA_FRAGMENT_MAX_COUNT] = {};
+    uint8_t packets[Config::LORA_FRAGMENT_MAX_COUNT][Config::LORA_MAX_PACKET] = {};
+  };
+  FragmentTxState fragmentTx_{};
   String sosPacket_;
   uint8_t computeHopIndex(uint32_t frame) const;
   bool retuneToHopChannel(uint8_t index);
@@ -415,7 +433,11 @@ private:
   void handleSosAckPayload(const uint8_t* payload, size_t len);
   void handleTextAckPayload(const uint8_t* payload, size_t len);
   bool sendTextAck(uint16_t ackedSeq, uint32_t ackedSourceId, uint8_t hopIndex);
+  bool sendFragmentAck(uint32_t ackedSourceId, uint16_t messageId,
+                       uint8_t baseIndex, uint8_t bitmap, uint8_t hopIndex);
+  void handleFragmentAckPayload(const uint8_t* payload, size_t len);
   void serviceTextRetry();
+  void serviceFragmentTx();
   void serviceSosRetry();
   void addSosHistory(uint8_t event, uint32_t peer = 0);
   bool encryptPacket(const uint8_t* plain, size_t len, uint8_t type,

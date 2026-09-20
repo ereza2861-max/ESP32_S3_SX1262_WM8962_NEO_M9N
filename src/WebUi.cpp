@@ -8,6 +8,7 @@
 #include "LoRaWANManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
+#include "MqttClientManager.h"
 #include "BleSensorReader.h"
 #include <cstring>
 #include <WiFi.h>
@@ -77,6 +78,16 @@ static String configBackupPlaintext() {
   p += "webuser=" + c.webUser + "\n";
   p += "websalt=" + c.webPasswordSaltHex + "\n";
   p += "webph=" + c.webPasswordHashHex + "\n";
+  p += "mqtt_en=" + String(c.mqttEnabled ? 1 : 0) + "\n";
+  p += "wake_sec=" + String(c.wakePeriodSec) + "\n";
+  p += "sleep_en=" + String(c.deepSleepEnabled ? 1 : 0) + "\n";
+  p += "sleep_idle=" + String(c.deepSleepIdleMs) + "\n";
+  p += "wake_grace=" + String(c.deepSleepWakeGraceMs) + "\n";
+  p += "bat_crit_delay=" + String(c.criticalShutdownDelayMs) + "\n";
+  p += "bat_low=" + String(c.batteryLowThreshold, 3) + "\n";
+  p += "bat_critical=" + String(c.batteryCriticalThreshold, 3) + "\n";
+  p += "classd_en=" + String(c.classDEnabled ? 1 : 0) + "\n";
+  p += "classd_boost=" + String(c.classDBoostLevel) + "\n";
   return p;
 }
 
@@ -269,6 +280,7 @@ extern StorageManager storage;
 extern LoRaManager lora;
 extern LoRaWANManager lorawan;
 extern AudioManager audio;
+extern MqttClientManager mqtt;
 extern BleSensorReader bleSensorReader;
 extern void fieldRadioRequestDeepSleep();
 static SensorReader::SensorNodeSnapshot gSensorSnapshots[SensorRegistry::MAX_SUPPORTED_NODES]{};
@@ -333,6 +345,19 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
 <input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
 <button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button><button onclick="factoryReset()">Factory reset</button></div>
+<div class=card><h3>Runtime Advanced Settings</h3>
+<label>MQTT enabled <input id=mqttEnabled type=checkbox checked></label>
+<label>Time-sync wake period (seconds) <input id=wakePeriodSec type=number min=60 max=604800 value=43200></label>
+<label>Automatic deep-sleep <input id=deepSleepEnabled type=checkbox checked></label>
+<label>Deep-sleep idle timeout (seconds) <input id=deepSleepIdleSec type=number min=60 max=86400 value=300></label>
+<label>Wake grace period (ms) <input id=deepSleepWakeGraceMs type=number min=100 max=60000 value=5000></label>
+<label>Critical-battery shutdown delay (ms) <input id=criticalShutdownDelayMs type=number min=100 max=600000 value=1500></label>
+<label>Battery low threshold (V) <input id=batteryLowThreshold type=number step="0.01" min=2.5 max=4.2 value=3.4></label>
+<label>Battery critical threshold (V) <input id=batteryCriticalThreshold type=number step="0.01" min=2.5 max=4.2 value=3.2></label>
+<label>Class-D speaker enabled <input id=classDEnabled type=checkbox></label>
+<label>Class-D boost (0..7) <input id=classDBoost type=number min=0 max=7 value=0></label>
+<small>Class-D output mode, mono/stereo, speaker impedance and SPKVDD are hardware-contract values and are not runtime controls.</small>
+</div>
 <div class=card><h3>Radio diagnostics</h3>
 <input id=tuneFreq type=number step="0.001" min="920" max="923" placeholder="Frequency MHz">
 <button onclick="tuneRadio()">Manual tune</button><button onclick="refreshRadioHistory()">Refresh RSSI/SNR history</button><button onclick="refreshDiagnostics()">Refresh diagnostics</button><button onclick="captureStart()">Capture 10s</button><button onclick="captureStop()">Stop capture</button><button onclick="captureDump()">Dump capture</button><button onclick="toggleAdr()">ADR</button><button onclick="selfTest()">Self-test</button>
@@ -445,7 +470,15 @@ async function refreshSosHistory(){try{const a=await (await fetch('/api/sos-hist
 async function refreshFiles(){try{f.textContent=await j('/api/files?dir='+encodeURIComponent(fileDir.value))}catch(e){toast('File list failed')}}
 async function refresh(){
   const raw=await j('/api/status');s.textContent=raw;await refreshFiles();
-  try{const x=JSON.parse(raw);document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical);
+  try{const x=JSON.parse(raw);
+     const ra=x.runtimeAdvanced||{};
+     deepSleepEnabled.checked=!!ra.deepSleepEnabled;
+     deepSleepIdleSec.value=Math.round((ra.deepSleepIdleMs||300000)/1000);
+     deepSleepWakeGraceMs.value=ra.deepSleepWakeGraceMs||5000;
+     criticalShutdownDelayMs.value=ra.criticalShutdownDelayMs||1500;
+     batteryLowThreshold.value=ra.batteryLowThreshold??3.4;
+     batteryCriticalThreshold.value=ra.batteryCriticalThreshold??3.2;
+     document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical);
     document.getElementById('diagnostics').textContent =
       `Antenna OK: ${x.diagnostics?.antennaOk ? 'YES':'NO'} | TX RSSI: ${x.diagnostics?.txRssi} dBm | Baseline: ${x.diagnostics?.antennaBaselineRssi} dBm | CPU: ${x.cpuTempC} C | Battery calibration drift: ${x.batteryCalibrationDrift ? 'YES':'NO'}`;
   }catch(e){}
@@ -510,7 +543,16 @@ async function factoryReset(){
 async function saveCfg(){
   const q=new URLSearchParams({freq:freq.value,bw:bw.value,sf:sf.value,cr:cr.value,
     power:pwr.value,sync:sw.value,callsign:cs.value,volume:vol.value,batcal:bat.value,
-    audio_source:audsrc.value});
+    audio_source:audsrc.value,mqtt_enabled:mqttEnabled.checked?'1':'0',
+    wake_period_sec:wakePeriodSec.value,
+    deep_sleep_enabled:deepSleepEnabled.checked?'1':'0',
+    deep_sleep_idle_sec:deepSleepIdleSec.value,
+    deep_sleep_wake_grace_ms:deepSleepWakeGraceMs.value,
+    critical_shutdown_delay_ms:criticalShutdownDelayMs.value,
+    battery_low_threshold:batteryLowThreshold.value,
+    battery_critical_threshold:batteryCriticalThreshold.value,
+    classd_enabled:classDEnabled.checked?'1':'0',
+    classd_boost:classDBoost.value});
   if(key.value)q.set('lora_key',key.value);
   if(aps.value)q.set('ap_password',aps.value);
   if(wp.value)q.set('web_password',wp.value);
@@ -533,6 +575,20 @@ async function syncSource(){
     if(x.usbMonitor!==undefined)usbmon.checked=!!x.usbMonitor;
     if(x.audioLoopback!==undefined)loop.checked=!!x.audioLoopback;
     if(x.usbPlaybackTransport!==undefined)usbtransport.checked=!!x.usbPlaybackTransport;
+    if(x.runtimeAdvanced){
+      mqttEnabled.checked=!!x.runtimeAdvanced.mqttEnabled;
+      wakePeriodSec.value=String(x.runtimeAdvanced.wakePeriodSec);
+      deepSleepEnabled.checked=!!x.runtimeAdvanced.deepSleepEnabled;
+      deepSleepIdleSec.value=String(Math.round((x.runtimeAdvanced.deepSleepIdleMs||300000)/1000));
+      deepSleepWakeGraceMs.value=String(x.runtimeAdvanced.deepSleepWakeGraceMs||5000);
+      criticalShutdownDelayMs.value=String(x.runtimeAdvanced.criticalShutdownDelayMs||1500);
+      batteryLowThreshold.value=String(x.runtimeAdvanced.batteryLowThreshold??3.4);
+      batteryCriticalThreshold.value=String(x.runtimeAdvanced.batteryCriticalThreshold??3.2);
+      classDEnabled.disabled=!x.runtimeAdvanced.classDHardwareEnabled;
+      classDEnabled.checked=!!x.runtimeAdvanced.classDEnabled;
+      classDBoost.disabled=!x.runtimeAdvanced.classDHardwareEnabled;
+      classDBoost.value=String(x.runtimeAdvanced.classDBoostLevel);
+    }
   } catch(e){}
 }
 async function scanStart(mode){
@@ -1144,6 +1200,17 @@ void WebUi::handleStatus() {
   j += "\"rxActive\":" + String(gState.rxActive ? "true":"false") + ",";
   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
   j += "\"volume\":" + String(gState.volume) + ",";
+  j += "\"runtimeAdvanced\":{\"mqttEnabled\":" + String(gConfig.mqttEnabled ? "true" : "false") +
+       ",\"wakePeriodSec\":" + String(gConfig.wakePeriodSec) +
+       ",\"deepSleepEnabled\":" + String(gConfig.deepSleepEnabled ? "true" : "false") +
+       ",\"deepSleepIdleMs\":" + String(gConfig.deepSleepIdleMs) +
+       ",\"deepSleepWakeGraceMs\":" + String(gConfig.deepSleepWakeGraceMs) +
+       ",\"criticalShutdownDelayMs\":" + String(gConfig.criticalShutdownDelayMs) +
+       ",\"batteryLowThreshold\":" + String(gConfig.batteryLowThreshold, 3) +
+       ",\"batteryCriticalThreshold\":" + String(gConfig.batteryCriticalThreshold, 3) +
+       ",\"classDEnabled\":" + String(gConfig.classDEnabled ? "true" : "false") +
+       ",\"classDBoostLevel\":" + String(gConfig.classDBoostLevel) +
+       ",\"classDHardwareEnabled\":" + String(Config::CLASS_D_ENABLED ? "true" : "false") + "},";
   j += "\"voiceRxLost\":" + String(gState.voiceRxLost) + ",";
   j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",\"messageUnread\":" + String(gState.messageUnreadCount) + ",\"sosEscalated\":" + String(gState.sosEscalated ? "true" : "false") + ",";
   j += "\"loraLog\":" + String(gState.loraPacketLogCount) + ",";
@@ -2920,9 +2987,91 @@ void WebUi::handleConfig() {
     }
     candidate.blePairingEnabled = raw == "1";
   }
+  if (server_.hasArg("mqtt_enabled")) {
+    const String raw = server_.arg("mqtt_enabled");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid MQTT setting"); return;
+    }
+    candidate.mqttEnabled = raw == "1";
+  }
+  if (server_.hasArg("wake_period_sec")) {
+    if (!parseUnsigned(server_.arg("wake_period_sec"), 604800, value) || value < 60) {
+      server_.send(400, "text/plain", "invalid wake period"); return;
+    }
+    candidate.wakePeriodSec = value;
+  }
+  if (server_.hasArg("deep_sleep_enabled")) {
+    const String raw = server_.arg("deep_sleep_enabled");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid deep-sleep setting"); return;
+    }
+    candidate.deepSleepEnabled = raw == "1";
+  }
+  if (server_.hasArg("deep_sleep_idle_sec")) {
+    if (!parseUnsigned(server_.arg("deep_sleep_idle_sec"), 86400, value) || value < 60) {
+      server_.send(400, "text/plain", "invalid deep-sleep idle timeout"); return;
+    }
+    candidate.deepSleepIdleMs = value * 1000UL;
+  }
+  if (server_.hasArg("deep_sleep_wake_grace_ms")) {
+    if (!parseUnsigned(server_.arg("deep_sleep_wake_grace_ms"), 60000, value) || value < 100) {
+      server_.send(400, "text/plain", "invalid wake grace period"); return;
+    }
+    candidate.deepSleepWakeGraceMs = value;
+  }
+  if (server_.hasArg("critical_shutdown_delay_ms")) {
+    if (!parseUnsigned(server_.arg("critical_shutdown_delay_ms"), 600000, value) || value < 100) {
+      server_.send(400, "text/plain", "invalid critical shutdown delay"); return;
+    }
+    candidate.criticalShutdownDelayMs = value;
+  }
+  if (server_.hasArg("battery_low_threshold") || server_.hasArg("battery_critical_threshold")) {
+    const String lowRaw = server_.hasArg("battery_low_threshold")
+        ? server_.arg("battery_low_threshold") : String(candidate.batteryLowThreshold, 3);
+    const String criticalRaw = server_.hasArg("battery_critical_threshold")
+        ? server_.arg("battery_critical_threshold") : String(candidate.batteryCriticalThreshold, 3);
+    char* lowEnd = nullptr;
+    char* criticalEnd = nullptr;
+    const float low = strtof(lowRaw.c_str(), &lowEnd);
+    const float critical = strtof(criticalRaw.c_str(), &criticalEnd);
+    if (!lowEnd || *lowEnd != '\0' || !criticalEnd || *criticalEnd != '\0' ||
+        !isfinite(low) || !isfinite(critical) || critical < 2.5f ||
+        low <= critical || low > 4.2f) {
+      server_.send(400, "text/plain", "invalid battery thresholds"); return;
+    }
+    candidate.batteryLowThreshold = low;
+    candidate.batteryCriticalThreshold = critical;
+  }
+  if (server_.hasArg("classd_enabled")) {
+    const String raw = server_.arg("classd_enabled");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid Class-D setting"); return;
+    }
+    candidate.classDEnabled = raw == "1";
+  }
+  if (server_.hasArg("classd_boost")) {
+    if (!parseUnsigned(server_.arg("classd_boost"), 7, value)) {
+      server_.send(400, "text/plain", "invalid Class-D boost"); return;
+    }
+    candidate.classDBoostLevel = static_cast<uint8_t>(value);
+  }
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
+      candidate.wakePeriodSec < 60UL || candidate.wakePeriodSec > 604800UL ||
+      candidate.deepSleepIdleMs < 60000UL ||
+      candidate.deepSleepIdleMs > 86400000UL ||
+      candidate.deepSleepWakeGraceMs < 100UL ||
+      candidate.deepSleepWakeGraceMs > 60000UL ||
+      candidate.criticalShutdownDelayMs < 100UL ||
+      candidate.criticalShutdownDelayMs > 600000UL ||
+      !isfinite(candidate.batteryLowThreshold) ||
+      !isfinite(candidate.batteryCriticalThreshold) ||
+      candidate.batteryCriticalThreshold < 2.5f ||
+      candidate.batteryLowThreshold <= candidate.batteryCriticalThreshold ||
+      candidate.batteryLowThreshold > 4.2f ||
+      candidate.classDBoostLevel > 7 ||
+      (candidate.classDEnabled && !Config::CLASS_D_ENABLED) ||
       !validHex32(candidate.loraKeyHex) ||
       !validPassword(candidate.apPassword) ||
       (!candidate.webPassword.isEmpty() && !validPassword(candidate.webPassword)) ||
@@ -2942,8 +3091,18 @@ void WebUi::handleConfig() {
   }
 
   gConfig = candidate;
+  if (!audio.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel)) {
+    gConfig = previous;
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    (void)audio.setRecordSource(previousSource);
+    server_.send(503, "text/plain", "Class-D configuration rejected");
+    return;
+  }
+  mqtt.setEnabled(gConfig.mqttEnabled);
   if (radioChanged && !lora.applyConfig()) {
     gConfig = previous;
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    mqtt.setEnabled(previous.mqttEnabled);
     (void)audio.setRecordSource(previousSource);
     server_.send(503, "text/plain", "LoRa configuration rejected by radio");
     return;
@@ -2953,6 +3112,8 @@ void WebUi::handleConfig() {
   if (!gConfig.save()) {
     gConfig = previous;
     if (radioChanged) (void)lora.applyConfig();
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    mqtt.setEnabled(previous.mqttEnabled);
     (void)audio.setRecordSource(previousSource);
     audio.setVolume(gConfig.volume);
     server_.send(503, "text/plain", "NVS save failed");
@@ -2976,6 +3137,16 @@ void WebUi::handleConfigExport() {
   j += ",\"record_quality\":" + String(c.audioRecordQuality);
   j += ",\"ble_pairing\":" + String(c.blePairingEnabled ? "true" : "false");
   j += ",\"battery_calibration\":" + String(c.batteryCalibration, 5);
+  j += ",\"mqtt_enabled\":" + String(c.mqttEnabled ? "true" : "false");
+  j += ",\"wake_period_sec\":" + String(c.wakePeriodSec);
+  j += ",\"deep_sleep_enabled\":" + String(c.deepSleepEnabled ? "true" : "false");
+  j += ",\"deep_sleep_idle_sec\":" + String(c.deepSleepIdleMs / 1000UL);
+  j += ",\"deep_sleep_wake_grace_ms\":" + String(c.deepSleepWakeGraceMs);
+  j += ",\"critical_shutdown_delay_ms\":" + String(c.criticalShutdownDelayMs);
+  j += ",\"battery_low_threshold\":" + String(c.batteryLowThreshold, 3);
+  j += ",\"battery_critical_threshold\":" + String(c.batteryCriticalThreshold, 3);
+  j += ",\"classd_enabled\":" + String(c.classDEnabled ? "true" : "false");
+  j += ",\"classd_boost\":" + String(c.classDBoostLevel);
   j += ",\"callsign\":\"" + jsonEscape(c.callsign) + "\"";
   // Secrets are deliberately omitted; exporting them into browser downloads is
   // an avoidable credential leak.
@@ -3036,6 +3207,16 @@ void WebUi::handleConfigRestore() {
       else if (key == "webuser") candidate.webUser = value;
       else if (key == "websalt") candidate.webPasswordSaltHex = value;
       else if (key == "webph") candidate.webPasswordHashHex = value;
+      else if (key == "mqtt_en") candidate.mqttEnabled = value == "1";
+      else if (key == "wake_sec") candidate.wakePeriodSec = static_cast<uint32_t>(value.toInt());
+      else if (key == "sleep_en") candidate.deepSleepEnabled = value == "1";
+      else if (key == "sleep_idle") candidate.deepSleepIdleMs = static_cast<uint32_t>(value.toInt());
+      else if (key == "wake_grace") candidate.deepSleepWakeGraceMs = static_cast<uint32_t>(value.toInt());
+      else if (key == "bat_crit_delay") candidate.criticalShutdownDelayMs = static_cast<uint32_t>(value.toInt());
+      else if (key == "bat_low") candidate.batteryLowThreshold = value.toFloat();
+      else if (key == "bat_critical") candidate.batteryCriticalThreshold = value.toFloat();
+      else if (key == "classd_en") candidate.classDEnabled = value == "1";
+      else if (key == "classd_boost") candidate.classDBoostLevel = static_cast<uint8_t>(value.toInt());
       else { server_.send(400, "text/plain", "unknown backup key"); return; }
     }
     if (nl < 0) break;
@@ -3044,6 +3225,20 @@ void WebUi::handleConfigRestore() {
   if (!seenFreq || !seenBw || !seenSf || !seenCr || !candidate.validRadio() ||
       candidate.volume > 100 || candidate.audioRecordQuality > 2 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
+      candidate.wakePeriodSec < 60UL || candidate.wakePeriodSec > 604800UL ||
+      candidate.deepSleepIdleMs < 60000UL ||
+      candidate.deepSleepIdleMs > 86400000UL ||
+      candidate.deepSleepWakeGraceMs < 100UL ||
+      candidate.deepSleepWakeGraceMs > 60000UL ||
+      candidate.criticalShutdownDelayMs < 100UL ||
+      candidate.criticalShutdownDelayMs > 600000UL ||
+      !isfinite(candidate.batteryLowThreshold) ||
+      !isfinite(candidate.batteryCriticalThreshold) ||
+      candidate.batteryCriticalThreshold < 2.5f ||
+      candidate.batteryLowThreshold <= candidate.batteryCriticalThreshold ||
+      candidate.batteryLowThreshold > 4.2f ||
+      candidate.classDBoostLevel > 7 ||
+      (candidate.classDEnabled && !Config::CLASS_D_ENABLED) ||
       !candidate.webPasswordConfigured()) {
     server_.send(400, "text/plain", "backup config invalid");
     return;
@@ -3054,8 +3249,17 @@ void WebUi::handleConfigRestore() {
   const RuntimeConfig previous = gConfig;
   const uint8_t previousSource = audio.recordSource();
   gConfig = candidate;
+  if (!audio.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel)) {
+    gConfig = previous;
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    server_.send(503, "text/plain", "Class-D restore failed");
+    return;
+  }
+  mqtt.setEnabled(gConfig.mqttEnabled);
   if (!lora.applyConfig()) {
     gConfig = previous;
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    mqtt.setEnabled(previous.mqttEnabled);
     (void)lora.applyConfig();
     server_.send(503, "text/plain", "radio restore failed");
     return;
@@ -3064,6 +3268,8 @@ void WebUi::handleConfigRestore() {
       !audio.setRecordSource(gConfig.audioRecordSource)) {
     gConfig = previous;
     (void)lora.applyConfig();
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    mqtt.setEnabled(previous.mqttEnabled);
     (void)audio.setRecordQuality(previous.audioRecordQuality);
     (void)audio.setRecordSource(previousSource);
     audio.setVolume(previous.volume);
@@ -3076,6 +3282,8 @@ void WebUi::handleConfigRestore() {
   if (!gConfig.save()) {
     gConfig = previous;
     (void)lora.applyConfig();
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    mqtt.setEnabled(previous.mqttEnabled);
     (void)audio.setRecordQuality(previous.audioRecordQuality);
     (void)audio.setRecordSource(previousSource);
     audio.setVolume(previous.volume);

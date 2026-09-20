@@ -12,7 +12,7 @@ make secure-boot-keys KEY_DIR=/secure/offline/fieldradio-keys
 ```
 
 The target only creates:
-- `secure_boot_signing_key.pem` — Secure Boot V2 signing key.
+- `secure_boot_signing_key.pem` — RSA-3072 Secure Boot V2 signing key.
 - `flash_encryption_key.hex` — 32-byte Flash Encryption key.
 
 Keep this directory outside the Git worktree. The target does **not** burn
