@@ -436,7 +436,10 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
 }
 
 void MqttClientManager::setEnabled(bool enabled) {
-  if (enabled_ == enabled) return;
+  if (enabled_ == enabled) {
+    if (enabled_) (void)applyConfig();
+    return;
+  }
   enabled_ = enabled;
   if (!enabled_) {
     connected_ = false;
@@ -445,9 +448,38 @@ void MqttClientManager::setEnabled(bool enabled) {
     plain_.stop();
     return;
   }
+  (void)applyConfig();
+}
+
+bool MqttClientManager::applyConfig() {
+  if (!gConfig.mqttEnabled) {
+    if (enabled_) setEnabled(false);
+    return true;
+  }
+  enabled_ = true;
+  const bool endpointChanged =
+      host_ != gConfig.mqttHost ||
+      port_ != gConfig.mqttPort ||
+      useTls_ != gConfig.mqttTlsRequired;
+  if (!loadCredentials()) return false;
+  if (endpointChanged || !client_.connected()) {
+    connected_ = false;
+    client_.disconnect();
+    secure_.stop();
+    plain_.stop();
+  }
+  useTls_ = gConfig.mqttTlsRequired;
+  if (useTls_) {
+    secure_.setCACert(MQTT_BROKER_ROOT_CA);
+    secure_.setHandshakeTimeout(10);
+    client_.setClient(secure_);
+  } else {
+    client_.setClient(plain_);
+  }
+  client_.setServer(host_.c_str(), port_);
   nextRetryMs_ = 0;
   retryDelayMs_ = gConfig.mqttReconnectMinMs;
-  if (host_.isEmpty()) (void)begin();
+  return !host_.isEmpty() && port_ != 0;
 }
 
 void MqttClientManager::task() {

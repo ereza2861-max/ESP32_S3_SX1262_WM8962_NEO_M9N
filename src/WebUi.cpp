@@ -356,6 +356,25 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <label>Battery critical threshold (V) <input id=batteryCriticalThreshold type=number step="0.01" min=2.5 max=4.2 value=3.2></label>
 <label>Class-D speaker enabled <input id=classDEnabled type=checkbox></label>
 <label>Class-D boost (0..7) <input id=classDBoost type=number min=0 max=7 value=0></label>
+<label>MQTT host <input id=mqttHost maxlength=253></label><label>MQTT port <input id=mqttPort type=number min=1 max=65535></label>
+<label>MQTT TLS required <input id=mqttTls type=checkbox checked></label>
+<label>MQTT reconnect min/max ms <input id=mqttRetryMin type=number min=1000><input id=mqttRetryMax type=number min=1000></label>
+<label>MQTT telemetry/health ms <input id=mqttTelemetry type=number min=1000><input id=mqttHealth type=number min=1000></label>
+<label>Retain telemetry <input id=mqttRetainTelemetry type=checkbox></label><label>Retain availability/LWT <input id=mqttRetainAvailability type=checkbox checked></label>
+<label>MQTT credential rotation days <input id=mqttRotation type=number min=1 max=3650></label>
+<label>BLE reader enabled <input id=bleEnabled type=checkbox checked></label><label>BLE pairing <input id=blePairing type=checkbox checked></label>
+<label>BLE scan interval/window ms <input id=bleScanInterval type=number min=100><input id=bleScanWindow type=number min=1></label>
+<label>BLE scan duration/connect timeout ms <input id=bleScanDuration type=number min=100><input id=bleConnectTimeout type=number min=500></label>
+<label>BLE eviction ms <input id=bleEviction type=number min=10000></label><label>BLE max nodes <input id=bleMaxNodes type=number min=1 max=3></label>
+<label>BLE encryption required <input id=bleEncryption type=checkbox checked></label><label>BLE pairing failure threshold <input id=bleFailureThreshold type=number min=1 max=20></label>
+<label>BLE pairing block ms <input id=bleBlockMs type=number min=1000></label><label>BLE keep-awake <input id=bleKeepAwake type=checkbox checked></label>
+<label>ADR enabled <input id=adr type=checkbox></label><label>HOP enabled <input id=hop type=checkbox></label><label>HOP channel profile <input id=hopProfile type=number min=1 max=8></label>
+<label>Range-test mode <input id=rangeMode type=checkbox></label>
+<label>Web session timeout ms <input id=webSessionTimeout type=number min=60000></label><label>Auth rate-limit ms <input id=webRateLimit type=number min=100></label>
+<label>CSRF policy <select id=csrfPolicy><option value=0>token + Origin</option><option value=1>token only</option></select></label>
+<label>BLE pairing policy <select id=blePairingPolicy><option value=0>default</option><option value=1>strict</option></select></label>
+<label>ECDH rekey policy <select id=ecdhPolicy><option value=0>off</option><option value=1>required</option></select></label>
+<label>Replay window bits (8..32) <input id=replayWindow type=number min=8 max=32></label>
 <small>Class-D output mode, mono/stereo, speaker impedance and SPKVDD are hardware-contract values and are not runtime controls.</small>
 </div>
 <div class=card><h3>Radio diagnostics</h3>
@@ -478,6 +497,47 @@ async function refresh(){
      criticalShutdownDelayMs.value=ra.criticalShutdownDelayMs||1500;
      batteryLowThreshold.value=ra.batteryLowThreshold??3.4;
      batteryCriticalThreshold.value=ra.batteryCriticalThreshold??3.2;
+     mqttEnabled.checked=!!ra.mqttEnabled;
+     wakePeriodSec.value=String(ra.wakePeriodSec||43200);
+     mqttHost.value=ra.mqttHost||'';
+     mqttPort.value=ra.mqttPort||1883;
+     mqttTls.checked=!!ra.mqttTlsRequired;
+     mqttRetryMin.value=ra.mqttReconnectMinMs||5000;
+     mqttRetryMax.value=ra.mqttReconnectMaxMs||300000;
+     mqttTelemetry.value=ra.mqttTelemetryPeriodMs||30000;
+     mqttHealth.value=ra.mqttHealthPeriodMs||60000;
+     mqttRetainTelemetry.checked=!!ra.mqttRetainTelemetry;
+     mqttRetainAvailability.checked=!!ra.mqttRetainAvailability;
+     mqttRotation.value=ra.mqttCredentialRotationDays||90;
+     vox.checked=!!ra.voxEnabled;
+     voxThreshold.value=ra.voxThreshold||0.08;
+     voxHang.value=ra.voxHangMs||700;
+     aec.checked=!!ra.aecEnabled;
+     usbmon.checked=!!ra.usbMonitor;
+     usbtransport.checked=!!ra.usbPlaybackTransport;
+     loop.checked=!!ra.audioLoopback;
+     adr.checked=!!ra.loraAdrEnabled;
+     hop.checked=!!ra.loraHopEnabled;
+     hopProfile.value=ra.loraHopChannelProfile||8;
+     rangeMode.checked=!!ra.loraRangeTestMode;
+     bleEnabled.checked=!!ra.sensorReaderEnabled;
+     bleScanInterval.value=ra.sensorScanIntervalMs||5000;
+     bleScanWindow.value=ra.sensorScanWindowMs||80;
+     bleScanDuration.value=ra.sensorScanDurationMs||1500;
+     bleConnectTimeout.value=ra.sensorConnectTimeoutMs||5000;
+     bleEviction.value=ra.sensorNodeEvictionMs||600000;
+     bleMaxNodes.value=ra.sensorMaxNodes||2;
+     bleEncryption.checked=!!ra.sensorRequireEncryption;
+     blePairing.checked=!!ra.blePairingEnabled;
+     bleFailureThreshold.value=ra.blePairingFailureThreshold||3;
+     bleBlockMs.value=ra.blePairingBlockMs||60000;
+     bleKeepAwake.checked=!!ra.sensorKeepAwake;
+     webSessionTimeout.value=ra.webSessionTimeoutMs||900000;
+     webRateLimit.value=ra.webAuthRateLimitMs||500;
+     csrfPolicy.value=ra.csrfPolicy??0;
+     blePairingPolicy.value=ra.blePairingPolicy??0;
+     ecdhPolicy.value=ra.ecdhRekeyPolicy??0;
+     replayWindow.value=ra.replayWindowBits||32;
      document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical);
     document.getElementById('diagnostics').textContent =
       `Antenna OK: ${x.diagnostics?.antennaOk ? 'YES':'NO'} | TX RSSI: ${x.diagnostics?.txRssi} dBm | Baseline: ${x.diagnostics?.antennaBaselineRssi} dBm | CPU: ${x.cpuTempC} C | Battery calibration drift: ${x.batteryCalibrationDrift ? 'YES':'NO'}`;
@@ -552,7 +612,27 @@ async function saveCfg(){
     battery_low_threshold:batteryLowThreshold.value,
     battery_critical_threshold:batteryCriticalThreshold.value,
     classd_enabled:classDEnabled.checked?'1':'0',
-    classd_boost:classDBoost.value});
+    classd_boost:classDBoost.value,
+    mqtt_host:mqttHost.value,mqtt_port:mqttPort.value,mqtt_tls:mqttTls.checked?'1':'0',
+    mqtt_reconnect_min_ms:mqttRetryMin.value,mqtt_reconnect_max_ms:mqttRetryMax.value,
+    mqtt_telemetry_period_ms:mqttTelemetry.value,mqtt_health_period_ms:mqttHealth.value,
+    mqtt_retain_telemetry:mqttRetainTelemetry.checked?'1':'0',
+    mqtt_retain_availability:mqttRetainAvailability.checked?'1':'0',
+    mqtt_rotation_days:mqttRotation.value,
+    vox_enabled:vox.checked?'1':'0',vox_threshold:voxThreshold.value,vox_hang_ms:voxHang.value,
+    aec_enabled:aec.checked?'1':'0',usb_monitor:usbmon.checked?'1':'0',
+    usb_transport:usbtransport.checked?'1':'0',loopback:loop.checked?'1':'0',
+    adr_enabled:adr.checked?'1':'0',hop_enabled:hop.checked?'1':'0',hop_profile:hopProfile.value,
+    range_test_mode:rangeMode.checked?'1':'0',
+    ble_enabled:bleEnabled.checked?'1':'0',ble_scan_interval_ms:bleScanInterval.value,
+    ble_scan_window_ms:bleScanWindow.value,ble_scan_duration_ms:bleScanDuration.value,
+    ble_connect_timeout_ms:bleConnectTimeout.value,ble_eviction_ms:bleEviction.value,
+    ble_max_nodes:bleMaxNodes.value,ble_encryption:bleEncryption.checked?'1':'0',
+    ble_pairing:blePairing.checked?'1':'0',ble_failure_threshold:bleFailureThreshold.value,
+    ble_block_ms:bleBlockMs.value,ble_keep_awake:bleKeepAwake.checked?'1':'0',
+    web_session_timeout_ms:webSessionTimeout.value,web_auth_rate_limit_ms:webRateLimit.value,
+    csrf_policy:csrfPolicy.value,ble_pairing_policy:blePairingPolicy.value,
+    ecdh_rekey_policy:ecdhPolicy.value,replay_window_bits:replayWindow.value});
   if(key.value)q.set('lora_key',key.value);
   if(aps.value)q.set('ap_password',aps.value);
   if(wp.value)q.set('web_password',wp.value);
@@ -1212,7 +1292,46 @@ void WebUi::handleStatus() {
        ",\"batteryCriticalThreshold\":" + String(gConfig.batteryCriticalThreshold, 3) +
        ",\"classDEnabled\":" + String(gConfig.classDEnabled ? "true" : "false") +
        ",\"classDBoostLevel\":" + String(gConfig.classDBoostLevel) +
-       ",\"classDHardwareEnabled\":" + String(Config::CLASS_D_ENABLED ? "true" : "false") + "},";
+       ",\"classDHardwareEnabled\":" + String(Config::CLASS_D_ENABLED ? "true" : "false") +
+       ",\"mqttHost\":\"" + jsonEscape(gConfig.mqttHost) + "\"" +
+       ",\"mqttPort\":" + String(gConfig.mqttPort) +
+       ",\"mqttTlsRequired\":" + String(gConfig.mqttTlsRequired ? "true" : "false") +
+       ",\"mqttReconnectMinMs\":" + String(gConfig.mqttReconnectMinMs) +
+       ",\"mqttReconnectMaxMs\":" + String(gConfig.mqttReconnectMaxMs) +
+       ",\"mqttTelemetryPeriodMs\":" + String(gConfig.mqttTelemetryPeriodMs) +
+       ",\"mqttHealthPeriodMs\":" + String(gConfig.mqttHealthPeriodMs) +
+       ",\"mqttRetainTelemetry\":" + String(gConfig.mqttRetainTelemetry ? "true" : "false") +
+       ",\"mqttRetainAvailability\":" + String(gConfig.mqttRetainAvailability ? "true" : "false") +
+       ",\"mqttCredentialRotationDays\":" + String(gConfig.mqttCredentialRotationDays) +
+       ",\"voxEnabled\":" + String(gConfig.voxEnabled ? "true" : "false") +
+       ",\"voxThreshold\":" + String(gConfig.voxThreshold, 4) +
+       ",\"voxHangMs\":" + String(gConfig.voxHangMs) +
+       ",\"aecEnabled\":" + String(gConfig.aecEnabled ? "true" : "false") +
+       ",\"usbMonitor\":" + String(gConfig.usbMonitor ? "true" : "false") +
+       ",\"usbPlaybackTransport\":" + String(gConfig.usbPlaybackTransport ? "true" : "false") +
+       ",\"audioLoopback\":" + String(gConfig.audioLoopback ? "true" : "false") +
+       ",\"loraAdrEnabled\":" + String(gConfig.loraAdrEnabled ? "true" : "false") +
+       ",\"loraHopEnabled\":" + String(gConfig.loraHopEnabled ? "true" : "false") +
+       ",\"loraHopChannelProfile\":" + String(gConfig.loraHopChannelProfile) +
+       ",\"loraRangeTestMode\":" + String(gConfig.loraRangeTestMode ? "true" : "false") +
+       ",\"sensorReaderEnabled\":" + String(gConfig.sensorReaderEnabled ? "true" : "false") +
+       ",\"sensorScanIntervalMs\":" + String(gConfig.sensorScanIntervalMs) +
+       ",\"sensorScanWindowMs\":" + String(gConfig.sensorScanWindowMs) +
+       ",\"sensorScanDurationMs\":" + String(gConfig.sensorScanDurationMs) +
+       ",\"sensorConnectTimeoutMs\":" + String(gConfig.sensorConnectTimeoutMs) +
+       ",\"sensorNodeEvictionMs\":" + String(gConfig.sensorNodeEvictionMs) +
+       ",\"sensorMaxNodes\":" + String(gConfig.sensorMaxNodes) +
+       ",\"sensorRequireEncryption\":" + String(gConfig.sensorRequireEncryption ? "true" : "false") +
+       ",\"blePairingEnabled\":" + String(gConfig.blePairingEnabled ? "true" : "false") +
+       ",\"blePairingFailureThreshold\":" + String(gConfig.blePairingFailureThreshold) +
+       ",\"blePairingBlockMs\":" + String(gConfig.blePairingBlockMs) +
+       ",\"sensorKeepAwake\":" + String(gConfig.sensorKeepAwake ? "true" : "false") +
+       ",\"webSessionTimeoutMs\":" + String(gConfig.webSessionTimeoutMs) +
+       ",\"webAuthRateLimitMs\":" + String(gConfig.webAuthRateLimitMs) +
+       ",\"csrfPolicy\":" + String(gConfig.csrfPolicy) +
+       ",\"blePairingPolicy\":" + String(gConfig.blePairingPolicy) +
+       ",\"ecdhRekeyPolicy\":" + String(gConfig.ecdhRekeyPolicy) +
+       ",\"replayWindowBits\":" + String(gConfig.replayWindowBits) + "},";
   j += "\"voiceRxLost\":" + String(gState.voiceRxLost) + ",";
   j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",\"messageUnread\":" + String(gState.messageUnreadCount) + ",\"sosEscalated\":" + String(gState.sosEscalated ? "true" : "false") + ",";
   j += "\"loraLog\":" + String(gState.loraPacketLogCount) + ",";
@@ -2726,9 +2845,16 @@ void WebUi::handleRangeTest() {
     server_.send(400, "text/plain", "invalid range-test");
     return;
   }
+  RuntimeConfig candidate = gConfig;
+  candidate.loraRangeTestMode = raw == "1";
+  if (!candidate.save()) {
+    server_.send(503, "text/plain", "range-test configuration save failed");
+    return;
+  }
+  gConfig = candidate;
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
-  gState.rangeTest = raw == "1";
+  gState.rangeTest = candidate.loraRangeTestMode;
   server_.send(200, "text/plain", gState.rangeTest ? "RANGE TEST ON" : "RANGE TEST OFF");
 }
 
@@ -3150,6 +3276,13 @@ void WebUi::handleConfig() {
     }
     candidate.loraHopChannelProfile = static_cast<uint8_t>(value);
   }
+  if (server_.hasArg("range_test_mode")) {
+    const String raw = server_.arg("range_test_mode");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid range-test mode"); return;
+    }
+    candidate.loraRangeTestMode = raw == "1";
+  }
   if (server_.hasArg("ble_enabled")) candidate.sensorReaderEnabled = server_.arg("ble_enabled") == "1";
   if (server_.hasArg("ble_scan_interval_ms"))
     if (!parseUnsigned(server_.arg("ble_scan_interval_ms"), 60000, value) || value < 100) {
@@ -3207,9 +3340,9 @@ void WebUi::handleConfig() {
     } else candidate.ecdhRekeyPolicy = static_cast<uint8_t>(value);
   if (server_.hasArg("replay_window_bits"))
     if (!parseUnsigned(server_.arg("replay_window_bits"), Config::LORA_REPLAY_WINDOW_BITS, value) ||
-        value != Config::LORA_REPLAY_WINDOW_BITS) {
-      server_.send(400, "text/plain", "replay window is fixed at 32 bits"); return;
-    } else candidate.replayWindowBits = Config::LORA_REPLAY_WINDOW_BITS;
+        value < 8) {
+      server_.send(400, "text/plain", "replay window must be 8..32 bits"); return;
+    } else candidate.replayWindowBits = static_cast<uint8_t>(value);
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
@@ -3258,7 +3391,12 @@ void WebUi::handleConfig() {
     server_.send(503, "text/plain", "Class-D configuration rejected");
     return;
   }
-  mqtt.setEnabled(gConfig.mqttEnabled);
+  if (!mqtt.applyConfig()) {
+    gConfig = previous;
+    (void)mqtt.applyConfig();
+    server_.send(503, "text/plain", "MQTT configuration rejected");
+    return;
+  }
   if (!lora.setAdrEnabled(gConfig.loraAdrEnabled)) {
     gConfig = previous;
     (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
@@ -3287,6 +3425,10 @@ void WebUi::handleConfig() {
     return;
   }
 
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.rangeTest = gConfig.loraRangeTestMode;
+  }
   lora.updateSourceId();
   auditConfigChange(previous, gConfig, "web");
   server_.send(200, "text/plain",
@@ -3325,6 +3467,7 @@ void WebUi::handleConfigExport() {
   j += ",\"adr_enabled\":" + String(c.loraAdrEnabled ? "true" : "false");
   j += ",\"hop_enabled\":" + String(c.loraHopEnabled ? "true" : "false");
   j += ",\"hop_profile\":" + String(c.loraHopChannelProfile);
+  j += ",\"range_test_mode\":" + String(c.loraRangeTestMode ? "true" : "false");
   j += ",\"ble_enabled\":" + String(c.sensorReaderEnabled ? "true" : "false");
   j += ",\"ble_scan_interval_ms\":" + String(c.sensorScanIntervalMs);
   j += ",\"ble_scan_window_ms\":" + String(c.sensorScanWindowMs);

@@ -159,12 +159,11 @@ constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
 constexpr uint32_t WEB_POST_CSRF_TOKEN_BYTES = 16;
 constexpr uint32_t LORA_REKEY_PERIOD_SEC = 86400UL;
 constexpr uint32_t LORA_REPLAY_TIME_WINDOW_SEC = 300UL;
-// X25519/ECDH session-key rotation is deliberately disabled until the
-// interoperability/bring-up work is complete. Enable only with
-// -DFIELDRADIO_LORA_ECDH_REKEY_ENABLED=1 after both peers implement the same
-// wire format and key lifecycle.
+// ECDH support is compiled in so the rekey feature can be selected at
+// runtime. RuntimeConfig::ecdhRekeyPolicy remains the protocol switch:
+ // 0 = legacy AES-GCM framing, 1 = ECDH rekey framing.
 #ifndef FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-#define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 0
+#define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 1
 #endif
 constexpr bool LORA_ECDH_REKEY_ENABLED =
     FIELDRADIO_LORA_ECDH_REKEY_ENABLED != 0;

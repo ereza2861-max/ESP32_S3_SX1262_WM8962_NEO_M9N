@@ -520,8 +520,8 @@ static bool shouldDeepSleep(uint32_t now) {
   }
   // A continuously enabled BLE sensor gateway must not enter automatic deep
   // sleep or it would silently stop collecting external sensor nodes.
-  const bool sensorKeepAwake = Config::SENSOR_READER_ENABLED_VALUE &&
-                               Config::SENSOR_KEEP_AWAKE_VALUE;
+  const bool sensorKeepAwake = gConfig.sensorReaderEnabled &&
+                               gConfig.sensorKeepAwake;
   busy = busy || sensorKeepAwake;
 
   if (critical) {
@@ -1210,6 +1210,10 @@ void setup() {
     Serial.println("FATAL: mutex initialization");
     for (;;) delay(1000);
   }
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.rangeTest = gConfig.loraRangeTestMode;
+  }
 
   recordBootDiagnostics();
   loadBatteryHealth();
@@ -1320,7 +1324,7 @@ void loop() {
     if (lock.ok()) activePower = gState.ptt || gState.sos || gState.recording ||
         gState.playing || gState.usbAudioActive || gState.rxActive ||
         gState.wifiReady || gState.lorawanJoining || gState.lorawanJoined ||
-        (Config::SENSOR_READER_ENABLED_VALUE && Config::SENSOR_KEEP_AWAKE_VALUE);
+        (gConfig.sensorReaderEnabled && gConfig.sensorKeepAwake);
   }
   setPowerProfile(activePower);
   manageWifi(now);

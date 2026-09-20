@@ -78,7 +78,8 @@ void GnssManager::task() {
         syncSystemTime = epoch > 1700000000ULL &&
             (lastSyncMs_ == 0U || systemNow < 1700000000 ||
              llabs(static_cast<long long>(systemNow) - static_cast<long long>(epoch)) > 2 ||
-             now - lastSyncMs_ >= Config::GNSS_TIME_SYNC_PERIOD_MS);
+             now - lastSyncMs_ >=
+                static_cast<uint64_t>(gConfig.wakePeriodSec) * 1000ULL);
       }
       if (now - lastTrackLogMs >= Config::TRACK_LOG_PERIOD_MS) {
         lastTrackLogMs = now;

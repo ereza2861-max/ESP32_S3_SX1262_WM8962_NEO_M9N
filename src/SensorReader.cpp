@@ -509,7 +509,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
   }
 
   esp_task_wdt_reset();
-  if (gConfig.blePairingEnabled) {
+  if (gConfig.blePairingEnabled || gConfig.blePairingPolicy == 1) {
     if (!slot->client->secureConnection()) {
       pairingFailure(address);
       (void)NimBLEDevice::deleteClient(slot->client);
@@ -519,7 +519,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     }
     pairingSuccess(address);
     if (addressIsRpa) (void)gReader->recordPeerRpa(address, advertised);
-  } else if (Config::SENSOR_REQUIRE_ENCRYPTION_VALUE &&
+  } else if ((gConfig.sensorRequireEncryption || gConfig.blePairingPolicy == 1) &&
              !slot->client->secureConnection()) {
     (void)NimBLEDevice::deleteClient(slot->client);
     *slot = {};
@@ -654,6 +654,12 @@ bool SensorReader::begin(const String& gatewayName) {
 
 void SensorReader::task() {
   if (!initialized_ || !gConfig.sensorReaderEnabled || !gScan) return;
+
+  // BLE scan parameters are runtime policy. Re-apply them here so changes
+  // made through the WebUI take effect without rebooting the node.
+  gScan->setInterval(gConfig.sensorScanIntervalMs);
+  gScan->setWindow(gConfig.sensorScanWindowMs);
+  gScan->setMaxResults(static_cast<uint8_t>(gConfig.sensorMaxNodes));
 
   // WebUI actions are consumed by the BLE task; the HTTP handler never tears
   // down a NimBLE client or mutates the registry directly.

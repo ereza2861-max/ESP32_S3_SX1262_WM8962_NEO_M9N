@@ -499,10 +499,11 @@ void RuntimeConfig::load() {
   else csrfPolicy = 0;
   if (candidate.blePairingPolicy <= 1) blePairingPolicy = candidate.blePairingPolicy;
   if (candidate.ecdhRekeyPolicy <= 1) ecdhRekeyPolicy = candidate.ecdhRekeyPolicy;
-  // Replay acceptance is deliberately fixed to the 32-bit bitmap used by
-  // LoRaManager; accepting a smaller persisted value would silently change
-  // the security window.
-  replayWindowBits = Config::LORA_REPLAY_WINDOW_BITS;
+  // Keep the runtime replay window inside the bitmap capacity. A minimum of
+  // 8 bits avoids making the anti-replay policy trivially permissive.
+  if (candidate.replayWindowBits >= 8 &&
+      candidate.replayWindowBits <= Config::LORA_REPLAY_WINDOW_BITS)
+    replayWindowBits = candidate.replayWindowBits;
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
   uint8_t passwordSaltCheck[PASSWORD_SALT_BYTES] = {};
   if (hexDecode(candidate.webPasswordSaltHex, passwordSaltCheck, sizeof(passwordSaltCheck)) &&
@@ -565,7 +566,7 @@ bool RuntimeConfig::save() const {
       webSessionTimeoutMs < 60000UL || webSessionTimeoutMs > 86400000UL ||
       webAuthRateLimitMs < 100 || webAuthRateLimitMs > 600000UL ||
       csrfPolicy > 1 || blePairingPolicy > 1 || ecdhRekeyPolicy > 1 ||
-      replayWindowBits < 1 || replayWindowBits > Config::LORA_REPLAY_WINDOW_BITS ||
+      replayWindowBits < 8 || replayWindowBits > Config::LORA_REPLAY_WINDOW_BITS ||
       !isfinite(batteryCalibration) ||
       batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
       !validLoRaWAN() ||

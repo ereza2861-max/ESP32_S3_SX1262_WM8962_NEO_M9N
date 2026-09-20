@@ -17,6 +17,7 @@ public:
   bool credentialsProvisioned() const { return credentialsProvisioned_; }
   bool passwordRotationWarning() const;
   void setEnabled(bool enabled);
+  bool applyConfig();
   bool enabled() const { return enabled_; }
   bool publish(const String& topic, const String& payload, bool retained = false);
   bool publishSensorData(uint32_t nodeId, const char* nodeName,

@@ -1,6 +1,7 @@
 // G16: per-node BLE passkey provisioning facade.
 #include "BleSensorReader.h"
 #include "Config.h"
+#include "PersistentConfig.h"
 
 bool BleSensorReader::begin(const String& deviceName) {
   deviceName_ = deviceName;
@@ -10,7 +11,7 @@ bool BleSensorReader::begin(const String& deviceName) {
 }
 
 void BleSensorReader::task() {
-  if (!Config::SENSOR_READER_ENABLED_VALUE) return;
+  if (!gConfig.sensorReaderEnabled) return;
   const uint32_t now = millis();
   if (!ready_) {
     if (static_cast<int32_t>(now - retryAtMs_) >= 0) {

@@ -32,12 +32,13 @@ constexpr size_t PACKET_HEADER_V4 = PACKET_HEADER_V2 + 8; // V2 nonce 4B -> V4 n
 constexpr size_t PACKET_HEADER_V5 = Config::LORA_ECDH_V5_HEADER_BYTES;
 static_assert(PACKET_HEADER_V5 == PACKET_HEADER_V3 + 1,
               "V5 header must be V3 header plus key_epoch_delta");
-constexpr size_t PACKET_HEADER_TX =
+size_t packetHeaderTxBytes() {
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-    PACKET_HEADER_V5;
+  return gConfig.ecdhRekeyPolicy == 1 ? PACKET_HEADER_V5 : PACKET_HEADER_V4;
 #else
-    PACKET_HEADER_V2;
+  return PACKET_HEADER_V2;
 #endif
+}
 constexpr uint8_t ROUTE_EXT_MAGIC = 0xE7;
 constexpr uint8_t ROUTE_EXT_VERSION_V1 = 1;
 constexpr uint8_t ROUTE_EXT_VERSION = 2;
@@ -468,7 +469,8 @@ uint16_t LoRaManager::crc16(const uint8_t* data, size_t len) {
 bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
                                 uint16_t seq, String& packet) {
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-  if (type != Config::LORA_TYPE_NEIGHBOR_BEACON) {
+  if (gConfig.ecdhRekeyPolicy == 1 &&
+      type != Config::LORA_TYPE_NEIGHBOR_BEACON) {
     // DECISION: under flag=1 every data packet is pairwise V5. The peer is
     // resolved from the authenticated route envelope; broadcast without a
     // concrete peer has no ECDH session and is rejected rather than downgraded.
@@ -1334,7 +1336,7 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
       (wireVersion != Config::LORA_PROTOCOL_VERSION &&
        wireVersion != LORA_PROTOCOL_VERSION_HOP &&
        wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH) ||
-      len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG)
+      len > Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG)
     return false;
   if (!forwardRateAllowed(sourceId, type)) return false;
 
@@ -1355,7 +1357,7 @@ bool LoRaManager::enqueueForward(uint8_t type, uint16_t seq, uint32_t sourceId,
   // happen once, immediately before transmission, when the next hop is known.
   // Rewriting it here and again in transmitForward() makes previousHop become
   // this node and causes routeAllowsForward() to reject our own queued packet.
-  if (len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG)
+  if (len > Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG)
     return false;
 
   ForwardPacket packet{};
@@ -1418,7 +1420,7 @@ bool LoRaManager::persistForwardQueue() {
   }
   for (UBaseType_t i = 0; i < count; ++i) {
     const ForwardPacket& item = items[i];
-    if (!item.len || item.len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG) continue;
+    if (!item.len || item.len > Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG) continue;
     const uint32_t nonce = esp_random();
     uint8_t iv[16] = {};
     memcpy(iv, &nonce, sizeof(nonce));
@@ -1561,7 +1563,7 @@ bool LoRaManager::loadForwardQueue() {
       }
 
       if (magic != FORWARD_RECORD_MAGIC || ttl == 0 || len == 0 ||
-          len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG ||
+          len > Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG ||
           (wireVersion != Config::LORA_PROTOCOL_VERSION &&
            wireVersion != LORA_PROTOCOL_VERSION_HOP &&
            wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH)) {
@@ -1859,7 +1861,7 @@ bool LoRaManager::isPttOrRecording() const {
 
 bool LoRaManager::transmitForward(const ForwardPacket& forward) {
   if (!ready_ || !mutex_ || !forward.len || forward.ttl == 0 ||
-      forward.len > Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG ||
+      forward.len > Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG ||
       isPttOrRecording())
     return false;
 
@@ -3139,6 +3141,7 @@ void LoRaManager::task() {
          plain[0] == Config::LORA_RANGE_TEST_ACK_MAGIC);
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
     const bool ecdhPolicyAccepted =
+        gConfig.ecdhRekeyPolicy == 0 ||
         authenticatedV5 ||
         rangeTestFrame ||
         (authenticatedV3 &&
@@ -3702,7 +3705,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
   if (!ready_ || !mutex_ || text.isEmpty() ||
       text.length() > (alreadyEncrypted
           ? Config::LORA_MAX_PACKET
-          : Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG - ROUTE_EXT_BYTES))
+          : Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG - ROUTE_EXT_BYTES))
     return false;
   if (Config::LORA_REQUIRE_ENCRYPTION && gConfig.loraKeyHex.length() != 32)
     return false;
@@ -4994,33 +4997,47 @@ void LoRaManager::serviceNeighborBeacon() {
   if (!ready_ || now - lastNeighborBeaconMs_ < Config::LORA_NEIGHBOR_BEACON_PERIOD_MS)
     return;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-  const uint32_t epochSec = currentEpochSec();
-  if (epochSec == 0 || !ecdhKeyMaterial_.hasEphemeralKey())
-    return;
+  if (gConfig.ecdhRekeyPolicy == 1) {
+    const uint32_t epochSec = currentEpochSec();
+    if (epochSec == 0 || !ecdhKeyMaterial_.hasEphemeralKey())
+      return;
 
-  LoRaEcdhRekey::Beacon ecdhBeacon{};
-  ecdhBeacon.epochSec = epochSec;
-  memcpy(ecdhBeacon.ephemeralPublic, ecdhKeyMaterial_.ephemeralPublic(),
-         LoRaEcdhRekey::PUBLIC_KEY_BYTES);
-  memcpy(ecdhBeacon.staticPublic, ecdhKeyMaterial_.longTermPublic(),
-         LoRaEcdhRekey::PUBLIC_KEY_BYTES);
-  ecdhBeacon.valid = true;
+    LoRaEcdhRekey::Beacon ecdhBeacon{};
+    ecdhBeacon.epochSec = epochSec;
+    memcpy(ecdhBeacon.ephemeralPublic, ecdhKeyMaterial_.ephemeralPublic(),
+           LoRaEcdhRekey::PUBLIC_KEY_BYTES);
+    memcpy(ecdhBeacon.staticPublic, ecdhKeyMaterial_.longTermPublic(),
+           LoRaEcdhRekey::PUBLIC_KEY_BYTES);
+    ecdhBeacon.valid = true;
 
-  uint8_t payload[LoRaEcdhRekey::BEACON_BYTES] = {};
-  if (LoRaEcdhRekey::encodeBeacon(
-          ecdhBeacon, payload, sizeof(payload)) !=
-      LoRaEcdhRekey::BEACON_BYTES)
-    return;
+    uint8_t payload[LoRaEcdhRekey::BEACON_BYTES] = {};
+    if (LoRaEcdhRekey::encodeBeacon(
+            ecdhBeacon, payload, sizeof(payload)) !=
+        LoRaEcdhRekey::BEACON_BYTES)
+      return;
 
-  uint16_t seq = 0;
-  if (!nextTxSequence(seq)) return;
-  String packet;
-  // DECISION: carry the ECDH envelope inside authenticated V3 so the
-  // existing master-key trust anchor binds sourceId to the static key.
-  if (encryptPacketV3(payload, sizeof(payload),
-                      Config::LORA_TYPE_NEIGHBOR_BEACON, seq,
-                      computeHopIndex(hopFrame_), epochSec, packet)) {
-    if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
+    uint16_t seq = 0;
+    if (!nextTxSequence(seq)) return;
+    String packet;
+    if (encryptPacketV3(payload, sizeof(payload),
+                        Config::LORA_TYPE_NEIGHBOR_BEACON, seq,
+                        computeHopIndex(hopFrame_), epochSec, packet)) {
+      if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
+    }
+  } else {
+    uint8_t payload[8] = {};
+    payload[0] = BEACON_MAGIC;
+    payload[1] = Config::LORA_PROTOCOL_VERSION;
+    const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
+    memcpy(payload + 2, &sourceIdSnapshot, sizeof(sourceIdSnapshot));
+    uint16_t uptime10 = static_cast<uint16_t>(min<uint32_t>(65535U, now / 1000U));
+    memcpy(payload + 6, &uptime10, 2);
+    uint16_t seq = 0;
+    if (!nextTxSequence(seq)) return;
+    String packet;
+    if (encryptPacket(payload, sizeof(payload), Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
+      if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
+    }
   }
 #else
   uint8_t payload[8] = {};
@@ -5048,7 +5065,7 @@ bool LoRaManager::handleTextFragment(uint32_t sourceId, const uint8_t* payload, 
   const uint16_t totalLen = static_cast<uint16_t>(payload[6]) | (static_cast<uint16_t>(payload[7]) << 8);
   if (count == 0 || count > Config::LORA_FRAGMENT_MAX_COUNT || index >= count ||
       totalLen == 0 || totalLen > Config::LORA_FRAGMENT_MAX_BYTES) return false;
-  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_TX + PACKET_TAG +
+  if (Config::LORA_MAX_PACKET <= packetHeaderTxBytes() + PACKET_TAG +
                                   Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
     return false;
   const size_t chunkMax = Config::LORA_MAX_PACKET - PACKET_HEADER_V2 - PACKET_TAG -
@@ -5298,10 +5315,10 @@ bool LoRaManager::loadFragmentRx() {
 }
 
 bool LoRaManager::enqueueTextFragments(const String& text, uint32_t destination) {
-  if (text.length() <= Config::LORA_MAX_PACKET - PACKET_HEADER_TX - PACKET_TAG)
+  if (text.length() <= Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG)
     return false;
   if (text.length() > Config::LORA_FRAGMENT_MAX_BYTES) return false;
-  if (Config::LORA_MAX_PACKET <= PACKET_HEADER_TX + PACKET_TAG +
+  if (Config::LORA_MAX_PACKET <= packetHeaderTxBytes() + PACKET_TAG +
                                   Config::LORA_FRAGMENT_HEADER_BYTES + ROUTE_EXT_BYTES)
     return false;
 
