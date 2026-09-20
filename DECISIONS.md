@@ -84,9 +84,23 @@ keeps the feature disabled at runtime until explicitly selected by `ecdh_rekey_p
 Enabling the policy is not a production acceptance criterion by itself; multi-node
 interoperability and hardware validation remain required.
 
-## GAP O — configuration concurrency — DECISION LOCKED
-Runtime configuration uses **Mutex + snapshot** semantics. Persistence uses
-**transaction + generation counter**, values are **validate-before-persist**, and
-propagation uses the same **generation counter** so a task can reject stale snapshots.
-Direct cross-task mutation of `gConfig` is a defect to be removed during the configuration
-migration; callers must use a snapshot for long-running operations.
+## D-02 — configuration ownership — FINAL
+A dedicated Configuration Manager task is the sole owner of runtime `gConfig` mutation.
+Callers create validated candidates from snapshots and submit them through the transactional
+configuration queue with a generation check. Direct cross-task mutation is not permitted.
+Persistence is performed by the manager before the new snapshot is published.
+
+## Atomic NVS — FINAL
+Runtime configuration is persisted as two alternating NVS slots. Each slot contains a schema,
+generation, complete typed payload and CRC. A separate commit marker is written only after the
+slot has been written and read back successfully. Recovery selects the newest valid committed
+slot; an incomplete/corrupt slot is ignored in favour of the other slot.
+
+## Build-stack decision — UNRESOLVED
+The repository declares `espressif32 @ 6.13.0` with `framework = arduino, espidf`, while the
+HTTPS dependency is the `jackjansen/esp32_idf5_https_server_compat` fork. PlatformIO 6.13.0's
+Arduino 2.0.17 stack is based on ESP-IDF 4.4.7, whereas the selected HTTPS fork is explicitly
+for ESP-IDF 5.x. The repository does not contain evidence establishing a compatible mixed
+framework package set. Do not guess between switching to an IDF-5/Arduino-3 platform and
+switching back to an IDF-4-compatible HTTPS library; this requires an explicit build-stack
+decision and target compilation evidence.

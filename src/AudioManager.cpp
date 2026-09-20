@@ -1007,26 +1007,23 @@ bool AudioManager::splitRecording() {
   return true;
 }
 
-bool AudioManager::setRecordQuality(uint8_t level) {
+bool AudioManager::applyRecordQualityRuntime(uint8_t level) {
   if (level > 2 || !initialized_ || !mutex_) return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) return false;
-  bool recording = false;
-  {
-    StateLock lock(gState);
-    if (lock.ok()) recording = gState.recording;
-  }
-  if (recording) {
-    xSemaphoreGive(mutex_);
-    return false;
-  }
+  bool recording = false; { StateLock lock(gState); if (lock.ok()) recording = gState.recording; }
+  if (recording) { xSemaphoreGive(mutex_); return false; }
   recordQuality_ = level;
-  RuntimeConfig candidate = gConfig;
-  candidate.audioRecordQuality = level;
-  const bool ok = candidate.save();
-  if (ok) gConfig.audioRecordQuality = level;
-  else recordQuality_ = gConfig.audioRecordQuality;
   xSemaphoreGive(mutex_);
-  return ok;
+  return true;
+}
+
+bool AudioManager::setRecordQuality(uint8_t level) {
+  RuntimeConfig previous{}; if (!configSnapshot(previous)) return false;
+  RuntimeConfig candidate = previous; candidate.audioRecordQuality = level;
+  if (!applyRecordQualityRuntime(level)) return false;
+  if (configCommit(candidate)) return true;
+  (void)applyRecordQualityRuntime(previous.audioRecordQuality);
+  return false;
 }
 
 bool AudioManager::setAec(bool enabled) {
@@ -1582,10 +1579,10 @@ bool AudioManager::usbStart() {
 void AudioManager::task() {
   if (usbVolumeDirty_ && millis() - usbVolumeDirtyMs_ >= Config::USB_VOLUME_PERSIST_DELAY_MS) {
     const uint8_t volume = usbVolume_;
-    RuntimeConfig candidate = gConfig;
-    candidate.volume = volume;
-    if (candidate.save()) {
-      gConfig.volume = volume;
+    RuntimeConfig candidate{};
+    const bool snapshotOk = configSnapshot(candidate);
+    if (snapshotOk) candidate.volume = volume;
+    if (snapshotOk && configCommit(candidate)) {
       usbVolumeDirty_ = false;
     } else {
       StateLock lock(gState);

@@ -11,7 +11,7 @@
 | TinyGPSPlus | PlatformIO Registry | unpinned | `1.0.2` | Exact version pinned in `lib_deps`; registry metadata has a known issue, but the requested version is correct. |
 | Adafruit BME280 | PlatformIO Registry | `^2.2.4` (C3) | `2.3.0` | Exact version pinned in `lib_deps`. |
 | Adafruit NeoPixel | PlatformIO Registry | unpinned | `1.15.5` | Exact version pinned in `lib_deps`. |
-| ESPWebServerSecure | Git URL | git HEAD | `<COMMIT_SHA>` | Immutable git commit placeholder; replace only when the verified commit SHA is available. |
+| ESPWebServerSecure | Git URL | `jackjansen/esp32_idf5_https_server_compat` at unresolved placeholder | **UNRESOLVED** | The repository currently uses an IDF-5-oriented fork while PlatformIO 6.13.0 + Arduino resolves to the IDF-4.4.7 stack; choose the compatible build stack before pinning a commit. |
 | esp32-camera | PlatformIO/IDF | not present | `N/A` | No dependency found in current repository. |
 | mbedtls | ESP-IDF component | transitive | `2.28.x` | Bundled by ESP-IDF v4.4.7; cannot be independently pinned. |
 | esp-audio-simple-dec | ESP-IDF component | not present | `N/A` | No dependency found in current manifest. |

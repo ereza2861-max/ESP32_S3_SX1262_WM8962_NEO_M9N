@@ -1894,14 +1894,14 @@ void WebUi::handleBatteryCalibrate() {
     measured = gState.batteryV;
   }
   if (measured <= 0.1f) { server_.send(409, "text/plain", "invalid current measurement"); return; }
-  RuntimeConfig candidate = gConfig;
+  RuntimeConfig candidate{};
+  if (!configSnapshot(candidate)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
   candidate.batteryCalibration *= actual / measured;
   if (!isfinite(candidate.batteryCalibration) ||
       candidate.batteryCalibration < 0.5f || candidate.batteryCalibration > 1.5f ||
-      !candidate.save()) {
+      !configCommit(candidate)) {
     server_.send(503, "text/plain", "calibration save failed"); return;
   }
-  gConfig = candidate;
   server_.send(200, "text/plain", "Battery calibration saved: " +
                String(candidate.batteryCalibration, 5));
 }
@@ -2099,13 +2099,10 @@ void WebUi::handleHopEnable() {
   // persisted configuration on the same source of truth; updating only
   // gState.hopEnabled made the UI report HOP ENABLED while the radio kept
   // using the configured value.
-  const RuntimeConfig previous = gConfig;
-  gConfig.loraHopEnabled = on;
-  if (!gConfig.save()) {
-    gConfig = previous;
-    server_.send(503, "text/plain", "NVS save failed");
-    return;
-  }
+  RuntimeConfig candidate{};
+  if (!configSnapshot(candidate)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
+  candidate.loraHopEnabled = on;
+  if (!configCommit(candidate)) { server_.send(503, "text/plain", "NVS save failed"); return; }
   {
     StateLock lock(gState);
     if (lock.ok()) gState.hopEnabled = on;
@@ -2633,7 +2630,8 @@ void WebUi::handleTheme() {
 }
 
 void WebUi::handleConfigMigrate() {
-  const bool ok = gConfig.migrate();
+  RuntimeConfig candidate{};
+  const bool ok = configSnapshot(candidate) && configCommit(candidate);
   server_.send(ok ? 200 : 503, "text/plain", ok ? "OK" : "migration failed");
 }
 
@@ -3052,7 +3050,11 @@ static void auditConfigChange(const RuntimeConfig& previous,
 
 void WebUi::handleConfig() {
   if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
-  RuntimeConfig candidate = gConfig;
+  RuntimeConfig candidate{};
+  if (!configSnapshot(candidate)) {
+    server_.send(503, "text/plain", "configuration snapshot unavailable");
+    return;
+  }
   bool radioChanged = false;
 
   auto parseUnsigned = [](const String& raw, uint32_t maxValue, uint32_t& out) {
@@ -3396,60 +3398,40 @@ void WebUi::handleConfig() {
     return;
   }
 
-  const RuntimeConfig previous = gConfig;
+  RuntimeConfig previous{};
+  if (!configSnapshot(previous)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
   const uint8_t previousSource = audio.recordSource();
-  if (candidate.audioRecordSource != previousSource &&
-      !audio.setRecordSource(candidate.audioRecordSource)) {
-    server_.send(503, "text/plain", "Audio source is busy");
-    return;
-  }
-
-  gConfig = candidate;
-  if (!audio.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel) ||
-      !audio.setVox(gConfig.voxEnabled, gConfig.voxThreshold, gConfig.voxHangMs) ||
-      !audio.setAec(gConfig.aecEnabled) ||
-      !audio.setUsbMonitor(gConfig.usbMonitor) ||
-      !audio.setUsbPlaybackTransport(gConfig.usbPlaybackTransport) ||
-      !audio.setLoopback(gConfig.audioLoopback)) {
-    gConfig = previous;
+  auto rollback = [&]() {
+    (void)configCommit(previous);
     (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    (void)audio.setVox(previous.voxEnabled, previous.voxThreshold, previous.voxHangMs);
+    (void)audio.setAec(previous.aecEnabled);
+    (void)audio.setUsbMonitor(previous.usbMonitor);
+    (void)audio.setUsbPlaybackTransport(previous.usbPlaybackTransport);
+    (void)audio.setLoopback(previous.audioLoopback);
     (void)audio.setRecordSource(previousSource);
-    server_.send(503, "text/plain", "Class-D configuration rejected");
-    return;
-  }
-  if (!mqtt.applyConfig()) {
-    gConfig = previous;
+    (void)lora.setAdrEnabled(previous.loraAdrEnabled);
     (void)mqtt.applyConfig();
-    server_.send(503, "text/plain", "MQTT configuration rejected");
-    return;
-  }
-  if (!lora.setAdrEnabled(gConfig.loraAdrEnabled)) {
-    gConfig = previous;
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    mqtt.setEnabled(previous.mqttEnabled);
-    server_.send(503, "text/plain", "ADR configuration rejected");
-    return;
-  }
-  if (radioChanged && !lora.applyConfig()) {
-    gConfig = previous;
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    mqtt.setEnabled(previous.mqttEnabled);
-    (void)audio.setRecordSource(previousSource);
-    server_.send(503, "text/plain", "LoRa configuration rejected by radio");
-    return;
-  }
-  audio.setVolume(gConfig.volume);
-
-  if (!gConfig.save()) {
-    gConfig = previous;
     if (radioChanged) (void)lora.applyConfig();
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    mqtt.setEnabled(previous.mqttEnabled);
-    (void)audio.setRecordSource(previousSource);
-    audio.setVolume(gConfig.volume);
-    server_.send(503, "text/plain", "NVS save failed");
-    return;
+    audio.setVolume(previous.volume);
+  };
+  if (candidate.audioRecordSource != previousSource && !audio.setRecordSource(candidate.audioRecordSource)) {
+    server_.send(503, "text/plain", "Audio source is busy"); return;
   }
+  if (!configCommit(candidate)) {
+    (void)audio.setRecordSource(previousSource);
+    server_.send(503, "text/plain", "NVS save failed"); return;
+  }
+  if (!audio.setClassDConfig(candidate.classDEnabled,candidate.classDBoostLevel) ||
+      !audio.setVox(candidate.voxEnabled,candidate.voxThreshold,candidate.voxHangMs) ||
+      !audio.setAec(candidate.aecEnabled) || !audio.setUsbMonitor(candidate.usbMonitor) ||
+      !audio.setUsbPlaybackTransport(candidate.usbPlaybackTransport) || !audio.setLoopback(candidate.audioLoopback)) {
+    rollback(); server_.send(503,"text/plain","audio configuration rejected"); return;
+  }
+  if (!mqtt.applyConfig()) { rollback(); server_.send(503,"text/plain","MQTT configuration rejected"); return; }
+  if (!lora.setAdrEnabled(candidate.loraAdrEnabled)) { rollback(); server_.send(503,"text/plain","ADR configuration rejected"); return; }
+  if (radioChanged && !lora.applyConfig()) { rollback(); server_.send(503,"text/plain","LoRa configuration rejected by radio"); return; }
+  audio.setVolume(candidate.volume);
 
   {
     StateLock lock(gState);
@@ -3558,7 +3540,8 @@ void WebUi::handleConfigRestore() {
     return;
   }
 
-  RuntimeConfig candidate = gConfig;
+  RuntimeConfig candidate{};
+  if (!configSnapshot(candidate)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
   bool seenFreq = false, seenBw = false, seenSf = false, seenCr = false;
   int pos = 0;
   while (pos <= static_cast<int>(plain.length())) {
@@ -3625,53 +3608,30 @@ void WebUi::handleConfigRestore() {
     return;
   }
 
-  // Apply runtime state first. Persist only after every hardware-dependent
-  // change succeeds, so a failed restore cannot leave NVS ahead of RAM.
-  const RuntimeConfig previous = gConfig;
+  RuntimeConfig previous{};
+  if (!configSnapshot(previous)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
   const uint8_t previousSource = audio.recordSource();
-  gConfig = candidate;
-  if (!audio.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel)) {
-    gConfig = previous;
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    server_.send(503, "text/plain", "Class-D restore failed");
-    return;
+  if (!configCommit(candidate)) { server_.send(503, "text/plain", "NVS restore failed"); return; }
+  auto rollback = [&]() {
+    (void)configCommit(previous); (void)lora.applyConfig();
+    (void)audio.setClassDConfig(previous.classDEnabled,previous.classDBoostLevel);
+    (void)audio.setVox(previous.voxEnabled,previous.voxThreshold,previous.voxHangMs);
+    (void)audio.setAec(previous.aecEnabled); (void)audio.setUsbMonitor(previous.usbMonitor);
+    (void)audio.setUsbPlaybackTransport(previous.usbPlaybackTransport); (void)audio.setLoopback(previous.audioLoopback);
+    (void)audio.applyRecordQualityRuntime(previous.audioRecordQuality); (void)audio.setRecordSource(previousSource);
+    mqtt.setEnabled(previous.mqttEnabled); audio.setVolume(previous.volume);
+  };
+  if (!audio.setClassDConfig(candidate.classDEnabled,candidate.classDBoostLevel) ||
+      !audio.setVox(candidate.voxEnabled,candidate.voxThreshold,candidate.voxHangMs) ||
+      !audio.setAec(candidate.aecEnabled) || !audio.setUsbMonitor(candidate.usbMonitor) ||
+      !audio.setUsbPlaybackTransport(candidate.usbPlaybackTransport) || !audio.setLoopback(candidate.audioLoopback) ||
+      !audio.applyRecordQualityRuntime(candidate.audioRecordQuality)) {
+    rollback(); server_.send(503,"text/plain","audio restore failed"); return;
   }
-  mqtt.setEnabled(gConfig.mqttEnabled);
-  if (!lora.applyConfig()) {
-    gConfig = previous;
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    mqtt.setEnabled(previous.mqttEnabled);
-    (void)lora.applyConfig();
-    server_.send(503, "text/plain", "radio restore failed");
-    return;
-  }
-  if (!audio.setRecordQuality(gConfig.audioRecordQuality) ||
-      !audio.setRecordSource(gConfig.audioRecordSource)) {
-    gConfig = previous;
-    (void)lora.applyConfig();
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    mqtt.setEnabled(previous.mqttEnabled);
-    (void)audio.setRecordQuality(previous.audioRecordQuality);
-    (void)audio.setRecordSource(previousSource);
-    audio.setVolume(previous.volume);
-    (void)previous.save();
-    server_.send(503, "text/plain", "audio restore failed");
-    return;
-  }
-  audio.setVolume(gConfig.volume);
-
-  if (!gConfig.save()) {
-    gConfig = previous;
-    (void)lora.applyConfig();
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    mqtt.setEnabled(previous.mqttEnabled);
-    (void)audio.setRecordQuality(previous.audioRecordQuality);
-    (void)audio.setRecordSource(previousSource);
-    audio.setVolume(previous.volume);
-    (void)previous.save();
-    server_.send(503, "text/plain", "NVS restore failed");
-    return;
-  }
+  mqtt.setEnabled(candidate.mqttEnabled);
+  if (!lora.applyConfig()) { rollback(); server_.send(503,"text/plain","radio restore failed"); return; }
+  if (!audio.setRecordSource(candidate.audioRecordSource)) { rollback(); server_.send(503,"text/plain","audio source restore failed"); return; }
+  audio.setVolume(candidate.volume);
 
   lora.updateSourceId();
   server_.send(200, "text/plain", "OK; reboot recommended");
@@ -3768,16 +3728,15 @@ void WebUi::handleAudioSource() {
   }
 
   const uint8_t source = static_cast<uint8_t>(raw.toInt());
-  const uint8_t previous = gConfig.audioRecordSource;
+  RuntimeConfig previous{};
+  if (!configSnapshot(previous)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
   if (!audio.setRecordSource(source)) {
     server_.send(409, "text/plain", "audio source cannot change while recording/playback is active");
     return;
   }
-
-  gConfig.audioRecordSource = source;
-  if (!gConfig.save()) {
-    (void)audio.setRecordSource(previous);
-    gConfig.audioRecordSource = previous;
+  RuntimeConfig candidate = previous; candidate.audioRecordSource = source;
+  if (!configCommit(candidate)) {
+    (void)audio.setRecordSource(previous.audioRecordSource);
     server_.send(503, "text/plain", "audio source NVS save failed");
     return;
   }

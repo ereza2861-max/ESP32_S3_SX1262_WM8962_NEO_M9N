@@ -73,8 +73,8 @@ bool LoRaWANManager::begin() {
   Serial.println("LORAWAN: WARNING: CONFIG_NVS_ENCRYPTION is disabled; credentials are not protected at rest");
 #endif
 
-  // DevEUI is hardware-derived; never accept a mutable NVS DevEUI for OTAA.
-  gConfig.lorawanDevEui = deviceDevEuiFromEfuse();
+  // DevEUI is hardware-derived; never mutate RuntimeConfig from the LoRaWAN task.
+  hardwareDevEui_ = deviceDevEuiFromEfuse();
   region_ = static_cast<RegionalProfile>(gConfig.lorawanRegion <= 3 ?
                                           gConfig.lorawanRegion :
                                           Config::LORAWAN_REGION_DEFAULT);
@@ -216,9 +216,9 @@ void LoRaWANManager::updateState() {
   gState.lorawanRegion = static_cast<uint8_t>(region_);
   gState.lorawanDataRate = currentDataRate_;
   gState.lorawanLastError = lastError_;
-  if (gConfig.lorawanDevEui.length() == 16) {
+  if (hardwareDevEui_.length() == 16) {
     gState.lorawanDevEuiMasked =
-        String("****") + gConfig.lorawanDevEui.substring(12);
+        String("****") + hardwareDevEui_.substring(12);
   } else {
     gState.lorawanDevEuiMasked = "";
   }
@@ -235,7 +235,7 @@ bool LoRaWANManager::startActivation(uint8_t mode) {
   }
 
   uint64_t devEui = 0;
-  if (!parseEui(gConfig.lorawanDevEui, devEui)) {
+  if (!parseEui(hardwareDevEui_, devEui)) {
     setError("Invalid DevEUI");
     return false;
   }

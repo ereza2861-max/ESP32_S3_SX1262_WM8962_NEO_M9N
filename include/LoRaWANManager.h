@@ -61,6 +61,7 @@ private:
 
   LoRaManager& p2p_;
   LoRaWANNode* node_ = nullptr;
+  String hardwareDevEui_;
   SemaphoreHandle_t mutex_ = nullptr;
   QueueHandle_t downlinkQueue_ = nullptr;
   StaticQueue_t downlinkQueueStruct_{};

@@ -43,6 +43,7 @@ public:
   bool loopback() const { return loopback_; }
   uint8_t recordSource() const { return recordSource_; }
   bool setRecordQuality(uint8_t level);
+  bool applyRecordQualityRuntime(uint8_t level);
   uint8_t recordQuality() const { return recordQuality_; }
 
 private:

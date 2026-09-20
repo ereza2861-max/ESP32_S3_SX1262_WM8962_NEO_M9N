@@ -93,7 +93,7 @@ struct RuntimeConfig {
 
   void load();
   bool migrate();
-  bool save() const;
+  bool save();
   bool setRadio(float freqMHz, float bwKHz, uint8_t sf, uint8_t cr,
                 uint8_t syncWord, int8_t powerDbm);
   bool validRadio() const;
@@ -108,6 +108,7 @@ extern std::atomic<uint32_t> gConfigGeneration;
 
 bool configSnapshot(RuntimeConfig& out);
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation);
-bool configCommit(const RuntimeConfig& candidate);
+bool configCommit(RuntimeConfigbool configCommit(const RuntimeConfig& candidate) candidate);
 bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration);
 uint32_t configGeneration();
+bool configManagerBegin();

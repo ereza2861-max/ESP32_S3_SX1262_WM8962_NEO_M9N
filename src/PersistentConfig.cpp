@@ -3,6 +3,12 @@
 #include <Preferences.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/platform_util.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <cstring>
+#include <cstdint>
 
 RuntimeConfig gConfig{
     Config::LORA_FREQ_MHZ,
@@ -27,46 +33,80 @@ RuntimeConfig gConfig{
 SemaphoreHandle_t gConfigMutex = nullptr;
 std::atomic<uint32_t> gConfigGeneration{0};
 
-bool configSnapshot(RuntimeConfig& out) {
-  uint32_t unusedGeneration = 0;
-  return configSnapshot(out, unusedGeneration);
+namespace {
+struct ConfigCommand {
+  RuntimeConfig* candidate = nullptr;
+  uint32_t expectedGeneration = 0;
+  SemaphoreHandle_t done = nullptr;
+  bool* result = nullptr;
+};
+constexpr size_t CONFIG_COMMAND_QUEUE_DEPTH = 4;
+StaticQueue_t configQueueStruct{};
+uint8_t configQueueStorage[CONFIG_COMMAND_QUEUE_DEPTH * sizeof(ConfigCommand)]{};
+QueueHandle_t configQueue = nullptr;
+TaskHandle_t configTaskHandle = nullptr;
+
+void configManagerTask(void*) {
+  ConfigCommand command{};
+  for (;;) {
+    if (xQueueReceive(configQueue, &command, portMAX_DELAY) != pdTRUE ||
+        !command.candidate || !command.done || !command.result) continue;
+    bool ok = false;
+    if (gConfigMutex && xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+      if (gConfigGeneration.load(std::memory_order_acquire) == command.expectedGeneration) {
+        RuntimeConfig normalized = *command.candidate;
+        ok = normalized.save();
+        if (ok) {
+          gConfig = normalized;
+          *command.candidate = normalized;
+        }
+      }
+      xSemaphoreGive(gConfigMutex);
+    }
+    *command.result = ok;
+    (void)xSemaphoreGive(command.done);
+  }
 }
+} // namespace
+
+bool configSnapshot(RuntimeConfig& out) { uint32_t generation = 0; return configSnapshot(out, generation); }
 
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation) {
-  if (!gConfigMutex ||
-      xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(100)) != pdTRUE)
-    return false;
+  if (!gConfigMutex || xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
   out = gConfig;
   generation = gConfigGeneration.load(std::memory_order_acquire);
   xSemaphoreGive(gConfigMutex);
   return true;
 }
 
-bool configCommit(const RuntimeConfig& candidate) {
-  return configCommit(candidate, configGeneration());
-}
+bool configCommit(RuntimeConfigbool configCommit(const RuntimeConfig& candidate) candidate) { return configCommit(candidate, configGeneration()); }
 
 bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
-  if (!gConfigMutex ||
-      xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(500)) != pdTRUE)
-    return false;
-  if (gConfigGeneration.load(std::memory_order_acquire) != expectedGeneration) {
-    xSemaphoreGive(gConfigMutex);
+  if (!configQueue || !gConfigMutex) return false;
+  SemaphoreHandle_t done = xSemaphoreCreateBinary();
+  if (!done) return false;
+  bool result = false;
+  ConfigCommand command{&candidate, expectedGeneration, done, &result};
+  if (xQueueSend(configQueue, &command, pdMS_TO_TICKS(500)) != pdTRUE) {
+    vSemaphoreDelete(done);
     return false;
   }
-  const bool ok = candidate.save();
-  if (ok) {
-    gConfig = candidate;
-    uint32_t next = expectedGeneration + 1U;
-    if (next == 0) next = 1;
-    gConfigGeneration.store(next, std::memory_order_release);
-  }
-  xSemaphoreGive(gConfigMutex);
-  return ok;
+  (void)xSemaphoreTake(done, portMAX_DELAY);
+  vSemaphoreDelete(done);
+  return result;
 }
 
-uint32_t configGeneration() {
-  return gConfigGeneration.load(std::memory_order_acquire);
+uint32_t configGeneration() { return gConfigGeneration.load(std::memory_order_acquire); }
+
+bool configManagerBegin() {
+  if (configQueue) return true;
+  if (!gConfigMutex) return false;
+  configQueue = xQueueCreateStatic(CONFIG_COMMAND_QUEUE_DEPTH, sizeof(ConfigCommand), configQueueStorage, &configQueueStruct);
+  if (!configQueue) return false;
+  if (xTaskCreate(configManagerTask, "ConfigMgr", 6144, nullptr, 2, &configTaskHandle) != pdPASS) {
+    configQueue = nullptr; configTaskHandle = nullptr; return false;
+  }
+  return true;
 }
 
 namespace {
@@ -145,6 +185,69 @@ bool validCredential(const String& value, size_t maxLen) {
   return !value.isEmpty() && value.length() <= maxLen;
 }
 
+bool validHexKey(const String& value);
+bool validCallsign(const String& value);
+
+constexpr uint32_t ATOMIC_CONFIG_MAGIC = 0x43464732UL;
+constexpr uint16_t ATOMIC_CONFIG_SCHEMA = 1;
+constexpr uint8_t ATOMIC_CONFIG_COMMIT = 0xA5;
+constexpr char NVS_SLOT_A[] = "cfgslot_a";
+constexpr char NVS_SLOT_B[] = "cfgslot_b";
+constexpr char NVS_COMMIT_A[] = "cfgcommit_a";
+constexpr char NVS_COMMIT_B[] = "cfgcommit_b";
+
+struct __attribute__((packed)) PersistedConfigPayload {
+  float loraFreqMHz; float loraBwKHz; uint8_t loraSf; uint8_t loraCr; uint8_t loraSyncWord; int8_t loraPowerDbm;
+  uint8_t volume; uint8_t audioRecordSource; float batteryCalibration;
+  char callsign[17]; char loraKeyHex[33]; char apSsid[33]; char apPassword[64]; char webUser[33];
+  char webPasswordSaltHex[33]; char webPasswordHashHex[65]; uint8_t audioRecordQuality;
+  uint8_t lorawanEnabled; uint8_t lorawanMode; uint8_t lorawanRegion; char lorawanDevEui[17]; char lorawanJoinEui[17];
+  char lorawanAppKey[33]; char lorawanNwkSKey[33]; char lorawanAppSKey[33]; uint8_t lorawanDevAddr[4]; uint8_t lorawanFPort; uint16_t lorawanUplinkPeriodSec;
+  uint8_t blePairingEnabled; uint8_t mqttEnabled; uint32_t wakePeriodSec; uint8_t classDEnabled; uint8_t classDBoostLevel;
+  uint8_t deepSleepEnabled; uint32_t deepSleepIdleMs; uint32_t deepSleepWakeGraceMs; uint32_t criticalShutdownDelayMs;
+  float batteryLowThreshold; float batteryCriticalThreshold; char mqttHost[254]; uint16_t mqttPort; uint8_t mqttTlsRequired;
+  uint32_t mqttReconnectMinMs; uint32_t mqttReconnectMaxMs; uint32_t mqttTelemetryPeriodMs; uint32_t mqttHealthPeriodMs;
+  uint8_t mqttRetainTelemetry; uint8_t mqttRetainAvailability; uint16_t mqttCredentialRotationDays;
+  uint8_t voxEnabled; float voxThreshold; uint32_t voxHangMs; uint8_t aecEnabled; uint8_t usbMonitor; uint8_t usbPlaybackTransport; uint8_t audioLoopback;
+  uint8_t loraAdrEnabled; uint8_t loraHopEnabled; uint8_t loraHopChannelProfile; uint8_t loraRangeTestMode;
+  uint8_t sensorReaderEnabled; uint32_t sensorScanIntervalMs; uint16_t sensorScanWindowMs; uint32_t sensorScanDurationMs; uint32_t sensorConnectTimeoutMs;
+  uint32_t sensorNodeEvictionMs; uint8_t sensorMaxNodes; uint8_t sensorRequireEncryption; uint8_t blePairingFailureThreshold; uint32_t blePairingBlockMs; uint8_t sensorKeepAwake;
+  uint32_t webSessionTimeoutMs; uint32_t webAuthRateLimitMs; uint8_t csrfPolicy; uint8_t blePairingPolicy; uint8_t ecdhRekeyPolicy; uint8_t replayWindowBits;
+};
+struct __attribute__((packed)) AtomicConfigRecord { uint32_t magic; uint16_t schema; uint16_t payloadSize; uint32_t generation; PersistedConfigPayload payload; uint32_t crc; };
+static_assert(sizeof(AtomicConfigRecord) < 4096, "atomic config must fit in one NVS blob");
+
+uint32_t atomicCrc32(const uint8_t* data, size_t len) {
+  uint32_t crc=0xFFFFFFFFUL; for(size_t i=0;i<len;++i){ crc^=data[i]; for(uint8_t b=0;b<8;++b) crc=(crc&1U)?(crc>>1U)^0xEDB88320UL:crc>>1U; } return ~crc;
+}
+void putStr(char* dst,size_t cap,const String& v){ if(!dst||!cap)return; size_t n=min(v.length(),cap-1U); memcpy(dst,v.c_str(),n); dst[n]='\0'; }
+String getStr(const char* src,size_t cap){ if(!src||!cap)return String(); size_t n=0; while(n<cap&&src[n])++n; return n==cap?String():String(src); }
+
+void encodePayload(const RuntimeConfig& c, PersistedConfigPayload& p) {
+  memset(&p,0,sizeof(p)); p.loraFreqMHz=c.loraFreqMHz;p.loraBwKHz=c.loraBwKHz;p.loraSf=c.loraSf;p.loraCr=c.loraCr;p.loraSyncWord=c.loraSyncWord;p.loraPowerDbm=c.loraPowerDbm;p.volume=c.volume;p.audioRecordSource=c.audioRecordSource;p.batteryCalibration=c.batteryCalibration;
+  putStr(p.callsign,sizeof(p.callsign),c.callsign);putStr(p.loraKeyHex,sizeof(p.loraKeyHex),c.loraKeyHex);putStr(p.apSsid,sizeof(p.apSsid),c.apSsid);putStr(p.apPassword,sizeof(p.apPassword),c.apPassword);putStr(p.webUser,sizeof(p.webUser),c.webUser);putStr(p.webPasswordSaltHex,sizeof(p.webPasswordSaltHex),c.webPasswordSaltHex);putStr(p.webPasswordHashHex,sizeof(p.webPasswordHashHex),c.webPasswordHashHex);
+  p.audioRecordQuality=c.audioRecordQuality;p.lorawanEnabled=c.lorawanEnabled;p.lorawanMode=c.lorawanMode;p.lorawanRegion=c.lorawanRegion;putStr(p.lorawanDevEui,sizeof(p.lorawanDevEui),c.lorawanDevEui);putStr(p.lorawanJoinEui,sizeof(p.lorawanJoinEui),c.lorawanJoinEui);putStr(p.lorawanAppKey,sizeof(p.lorawanAppKey),c.lorawanAppKey);putStr(p.lorawanNwkSKey,sizeof(p.lorawanNwkSKey),c.lorawanNwkSKey);putStr(p.lorawanAppSKey,sizeof(p.lorawanAppSKey),c.lorawanAppSKey);memcpy(p.lorawanDevAddr,c.lorawanDevAddr,4);p.lorawanFPort=c.lorawanFPort;p.lorawanUplinkPeriodSec=c.lorawanUplinkPeriodSec;
+  p.blePairingEnabled=c.blePairingEnabled;p.mqttEnabled=c.mqttEnabled;p.wakePeriodSec=c.wakePeriodSec;p.classDEnabled=c.classDEnabled;p.classDBoostLevel=c.classDBoostLevel;p.deepSleepEnabled=c.deepSleepEnabled;p.deepSleepIdleMs=c.deepSleepIdleMs;p.deepSleepWakeGraceMs=c.deepSleepWakeGraceMs;p.criticalShutdownDelayMs=c.criticalShutdownDelayMs;p.batteryLowThreshold=c.batteryLowThreshold;p.batteryCriticalThreshold=c.batteryCriticalThreshold;putStr(p.mqttHost,sizeof(p.mqttHost),c.mqttHost);p.mqttPort=c.mqttPort;p.mqttTlsRequired=c.mqttTlsRequired;p.mqttReconnectMinMs=c.mqttReconnectMinMs;p.mqttReconnectMaxMs=c.mqttReconnectMaxMs;p.mqttTelemetryPeriodMs=c.mqttTelemetryPeriodMs;p.mqttHealthPeriodMs=c.mqttHealthPeriodMs;p.mqttRetainTelemetry=c.mqttRetainTelemetry;p.mqttRetainAvailability=c.mqttRetainAvailability;p.mqttCredentialRotationDays=c.mqttCredentialRotationDays;
+  p.voxEnabled=c.voxEnabled;p.voxThreshold=c.voxThreshold;p.voxHangMs=c.voxHangMs;p.aecEnabled=c.aecEnabled;p.usbMonitor=c.usbMonitor;p.usbPlaybackTransport=c.usbPlaybackTransport;p.audioLoopback=c.audioLoopback;p.loraAdrEnabled=c.loraAdrEnabled;p.loraHopEnabled=c.loraHopEnabled;p.loraHopChannelProfile=c.loraHopChannelProfile;p.loraRangeTestMode=c.loraRangeTestMode;
+  p.sensorReaderEnabled=c.sensorReaderEnabled;p.sensorScanIntervalMs=c.sensorScanIntervalMs;p.sensorScanWindowMs=c.sensorScanWindowMs;p.sensorScanDurationMs=c.sensorScanDurationMs;p.sensorConnectTimeoutMs=c.sensorConnectTimeoutMs;p.sensorNodeEvictionMs=c.sensorNodeEvictionMs;p.sensorMaxNodes=c.sensorMaxNodes;p.sensorRequireEncryption=c.sensorRequireEncryption;p.blePairingFailureThreshold=c.blePairingFailureThreshold;p.blePairingBlockMs=c.blePairingBlockMs;p.sensorKeepAwake=c.sensorKeepAwake;p.webSessionTimeoutMs=c.webSessionTimeoutMs;p.webAuthRateLimitMs=c.webAuthRateLimitMs;p.csrfPolicy=c.csrfPolicy;p.blePairingPolicy=c.blePairingPolicy;p.ecdhRekeyPolicy=c.ecdhRekeyPolicy;p.replayWindowBits=c.replayWindowBits;
+}
+
+bool decodePayload(const PersistedConfigPayload& p, RuntimeConfig& c) {
+  c.loraFreqMHz=p.loraFreqMHz;c.loraBwKHz=p.loraBwKHz;c.loraSf=p.loraSf;c.loraCr=p.loraCr;c.loraSyncWord=p.loraSyncWord;c.loraPowerDbm=p.loraPowerDbm;c.volume=p.volume;c.audioRecordSource=p.audioRecordSource;c.batteryCalibration=p.batteryCalibration;c.callsign=getStr(p.callsign,sizeof(p.callsign));c.loraKeyHex=getStr(p.loraKeyHex,sizeof(p.loraKeyHex));c.apSsid=getStr(p.apSsid,sizeof(p.apSsid));c.apPassword=getStr(p.apPassword,sizeof(p.apPassword));c.webUser=getStr(p.webUser,sizeof(p.webUser));c.webPassword.clear();c.webPasswordSaltHex=getStr(p.webPasswordSaltHex,sizeof(p.webPasswordSaltHex));c.webPasswordHashHex=getStr(p.webPasswordHashHex,sizeof(p.webPasswordHashHex));c.audioRecordQuality=p.audioRecordQuality;c.lorawanEnabled=p.lorawanEnabled!=0;c.lorawanMode=p.lorawanMode;c.lorawanRegion=p.lorawanRegion;c.lorawanDevEui=getStr(p.lorawanDevEui,sizeof(p.lorawanDevEui));c.lorawanJoinEui=getStr(p.lorawanJoinEui,sizeof(p.lorawanJoinEui));c.lorawanAppKey=getStr(p.lorawanAppKey,sizeof(p.lorawanAppKey));c.lorawanNwkSKey=getStr(p.lorawanNwkSKey,sizeof(p.lorawanNwkSKey));c.lorawanAppSKey=getStr(p.lorawanAppSKey,sizeof(p.lorawanAppSKey));memcpy(c.lorawanDevAddr,p.lorawanDevAddr,4);c.lorawanFPort=p.lorawanFPort;c.lorawanUplinkPeriodSec=p.lorawanUplinkPeriodSec;c.blePairingEnabled=p.blePairingEnabled!=0;c.mqttEnabled=p.mqttEnabled!=0;c.wakePeriodSec=p.wakePeriodSec;c.classDEnabled=p.classDEnabled!=0;c.classDBoostLevel=p.classDBoostLevel;c.deepSleepEnabled=p.deepSleepEnabled!=0;c.deepSleepIdleMs=p.deepSleepIdleMs;c.deepSleepWakeGraceMs=p.deepSleepWakeGraceMs;c.criticalShutdownDelayMs=p.criticalShutdownDelayMs;c.batteryLowThreshold=p.batteryLowThreshold;c.batteryCriticalThreshold=p.batteryCriticalThreshold;c.mqttHost=getStr(p.mqttHost,sizeof(p.mqttHost));c.mqttPort=p.mqttPort;c.mqttTlsRequired=p.mqttTlsRequired!=0;c.mqttReconnectMinMs=p.mqttReconnectMinMs;c.mqttReconnectMaxMs=p.mqttReconnectMaxMs;c.mqttTelemetryPeriodMs=p.mqttTelemetryPeriodMs;c.mqttHealthPeriodMs=p.mqttHealthPeriodMs;c.mqttRetainTelemetry=p.mqttRetainTelemetry!=0;c.mqttRetainAvailability=p.mqttRetainAvailability!=0;c.mqttCredentialRotationDays=p.mqttCredentialRotationDays;c.voxEnabled=p.voxEnabled!=0;c.voxThreshold=p.voxThreshold;c.voxHangMs=p.voxHangMs;c.aecEnabled=p.aecEnabled!=0;c.usbMonitor=p.usbMonitor!=0;c.usbPlaybackTransport=p.usbPlaybackTransport!=0;c.audioLoopback=p.audioLoopback!=0;c.loraAdrEnabled=p.loraAdrEnabled!=0;c.loraHopEnabled=p.loraHopEnabled!=0;c.loraHopChannelProfile=p.loraHopChannelProfile;c.loraRangeTestMode=p.loraRangeTestMode!=0;c.sensorReaderEnabled=p.sensorReaderEnabled!=0;c.sensorScanIntervalMs=p.sensorScanIntervalMs;c.sensorScanWindowMs=p.sensorScanWindowMs;c.sensorScanDurationMs=p.sensorScanDurationMs;c.sensorConnectTimeoutMs=p.sensorConnectTimeoutMs;c.sensorNodeEvictionMs=p.sensorNodeEvictionMs;c.sensorMaxNodes=p.sensorMaxNodes;c.sensorRequireEncryption=p.sensorRequireEncryption!=0;c.blePairingFailureThreshold=p.blePairingFailureThreshold;c.blePairingBlockMs=p.blePairingBlockMs;c.sensorKeepAwake=p.sensorKeepAwake!=0;c.webSessionTimeoutMs=p.webSessionTimeoutMs;c.webAuthRateLimitMs=p.webAuthRateLimitMs;c.csrfPolicy=p.csrfPolicy;c.blePairingPolicy=p.blePairingPolicy;c.ecdhRekeyPolicy=p.ecdhRekeyPolicy;c.replayWindowBits=p.replayWindowBits;return true;
+}
+
+bool generationNewer(uint32_t a,uint32_t b){return a!=b&&static_cast<int32_t>(a-b)>0;}
+bool readAtomicSlot(Preferences& p,const char* slot,const char* commit,AtomicConfigRecord& r){memset(&r,0,sizeof(r));if(p.getUChar(commit,0)!=ATOMIC_CONFIG_COMMIT)return false;if(p.getBytes(slot,&r,sizeof(r))!=sizeof(r))return false;return r.magic==ATOMIC_CONFIG_MAGIC&&r.schema==ATOMIC_CONFIG_SCHEMA&&r.payloadSize==sizeof(r.payload)&&r.generation!=0&&r.crc==atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));}
+
+bool validRuntimeConfig(const RuntimeConfig& c) {
+  return c.validRadio()&&c.volume<=100&&c.audioRecordSource<=Config::AUDIO_SOURCE_USB&&c.audioRecordQuality<=2&&c.classDBoostLevel<=7&&c.wakePeriodSec>=60UL&&c.wakePeriodSec<=7UL*24UL*60UL*60UL&&(!c.classDEnabled||Config::CLASS_D_ENABLED)&&c.deepSleepIdleMs>=60000UL&&c.deepSleepIdleMs<=24UL*60UL*60UL*1000UL&&c.deepSleepWakeGraceMs>=100UL&&c.deepSleepWakeGraceMs<=60000UL&&c.criticalShutdownDelayMs>=100UL&&c.criticalShutdownDelayMs<=600000UL&&isfinite(c.batteryLowThreshold)&&isfinite(c.batteryCriticalThreshold)&&c.batteryCriticalThreshold>=2.5f&&c.batteryLowThreshold>c.batteryCriticalThreshold&&c.batteryLowThreshold<=4.2f&&(!c.mqttEnabled||(!c.mqttHost.isEmpty()&&c.mqttHost.length()<=253&&c.mqttHost.indexOf('|')<0&&c.mqttPort!=0))&&c.mqttReconnectMinMs>=1000UL&&c.mqttReconnectMaxMs>=c.mqttReconnectMinMs&&c.mqttReconnectMaxMs<=3600000UL&&c.mqttTelemetryPeriodMs>=1000UL&&c.mqttTelemetryPeriodMs<=86400000UL&&c.mqttHealthPeriodMs>=1000UL&&c.mqttHealthPeriodMs<=86400000UL&&c.mqttCredentialRotationDays>=1&&c.mqttCredentialRotationDays<=3650&&c.voxThreshold>=0.005f&&c.voxThreshold<=1.0f&&c.voxHangMs>=50U&&c.voxHangMs<=10000U&&c.loraHopChannelProfile>=1&&c.loraHopChannelProfile<=Config::HOP_CHANNEL_MAX&&c.sensorScanIntervalMs>=100&&c.sensorScanIntervalMs<=60000&&c.sensorScanWindowMs>0&&c.sensorScanWindowMs<=c.sensorScanIntervalMs&&c.sensorScanDurationMs>=100&&c.sensorScanDurationMs<=60000&&c.sensorConnectTimeoutMs>=500&&c.sensorConnectTimeoutMs<=30000&&c.sensorNodeEvictionMs>=10000&&c.sensorNodeEvictionMs<=7UL*86400000UL&&c.sensorMaxNodes>=1&&c.sensorMaxNodes<=Config::SENSOR_MAX_NODES_VALUE&&c.blePairingFailureThreshold>=1&&c.blePairingFailureThreshold<=20&&c.blePairingBlockMs>=1000&&c.blePairingBlockMs<=86400000UL&&c.webSessionTimeoutMs>=60000UL&&c.webSessionTimeoutMs<=86400000UL&&c.webAuthRateLimitMs>=100&&c.webAuthRateLimitMs<=600000UL&&c.csrfPolicy<=1&&c.blePairingPolicy<=1&&c.ecdhRekeyPolicy<=1&&c.replayWindowBits>=8&&c.replayWindowBits<=Config::LORA_REPLAY_WINDOW_BITS&&isfinite(c.batteryCalibration)&&c.batteryCalibration>=0.5f&&c.batteryCalibration<=1.5f&&c.validLoRaWAN()&&validCallsign(c.callsign)&&validHexKey(c.loraKeyHex)&&!c.apSsid.isEmpty()&&c.apSsid.length()<=32&&c.apPassword.length()>=8&&c.apPassword.length()<=63&&!c.webUser.isEmpty()&&c.webUser.length()<=32&&c.webPasswordConfigured();
+}
+
+bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation){Preferences p;if(!p.begin(NVS_NS,true))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);if(!va&&!vb){p.end();return false;}const auto& chosen=va&&(!vb||generationNewer(a.generation,b.generation))?a:b;RuntimeConfig candidate=out;if(!decodePayload(chosen.payload,candidate)||!validRuntimeConfig(candidate)){p.end();return false;}out=candidate;generation=chosen.generation;p.end();return true;}
+
+bool saveAtomicConfig(const RuntimeConfig& source){Preferences p;if(!p.begin(NVS_NS,false))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);uint32_t current=0;bool writeA=true;if(va&&(!vb||generationNewer(a.generation,b.generation))){current=a.generation;writeA=false;}else if(vb){current=b.generation;writeA=true;}uint32_t next=current==UINT32_MAX?1U:current+1U;AtomicConfigRecord r{};r.magic=ATOMIC_CONFIG_MAGIC;r.schema=ATOMIC_CONFIG_SCHEMA;r.payloadSize=sizeof(r.payload);r.generation=next;encodePayload(source,r.payload);r.crc=atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));const char* sk=writeA?NVS_SLOT_A:NVS_SLOT_B;const char* ck=writeA?NVS_COMMIT_A:NVS_COMMIT_B;(void)p.remove(ck);if(p.putBytes(sk,&r,sizeof(r))!=sizeof(r)){p.end();return false;}AtomicConfigRecord verify{};if(p.getBytes(sk,&verify,sizeof(verify))!=sizeof(verify)||memcmp(&verify,&r,sizeof(r))!=0){p.end();return false;}if(p.putUChar(ck,ATOMIC_CONFIG_COMMIT)!=sizeof(uint8_t)){p.end();return false;}AtomicConfigRecord committed{};bool ok=readAtomicSlot(p,sk,ck,committed)&&committed.generation==next&&memcmp(&committed,&r,sizeof(r))==0;p.end();if(!ok)return false;gConfigGeneration.store(next,std::memory_order_release);Preferences legacy;if(legacy.begin(NVS_NS,false)){(void)legacy.remove("webpass");legacy.end();}return true;}
+
+
 bool validHexKey(const String& value) {
   if (value.length() != 32) return false;
   for (size_t i = 0; i < value.length(); ++i) {
@@ -206,6 +309,13 @@ bool RuntimeConfig::validLoRaWAN() const {
 }
 
 void RuntimeConfig::load() {
+  uint32_t atomicGeneration = 0;
+  RuntimeConfig atomicCandidate = *this;
+  if (loadAtomicConfig(atomicCandidate, atomicGeneration)) {
+    *this = atomicCandidate;
+    gConfigGeneration.store(atomicGeneration, std::memory_order_release);
+    return;
+  }
   Preferences prefs;
   if (!prefs.begin(NVS_NS, true)) return;
 
@@ -530,157 +640,17 @@ bool RuntimeConfig::migrate() {
   return save();
 }
 
-bool RuntimeConfig::save() const {
-  if (!validRadio() || volume > 100 || audioRecordSource > Config::AUDIO_SOURCE_USB ||
-      audioRecordQuality > 2 || classDBoostLevel > 7 ||
-      wakePeriodSec < 60UL || wakePeriodSec > 7UL * 24UL * 60UL * 60UL ||
-      (classDEnabled && !Config::CLASS_D_ENABLED) ||
-      deepSleepIdleMs < 60000UL ||
-      deepSleepIdleMs > 24UL * 60UL * 60UL * 1000UL ||
-      deepSleepWakeGraceMs < 100UL ||
-      deepSleepWakeGraceMs > 60000UL ||
-      criticalShutdownDelayMs < 100UL ||
-      criticalShutdownDelayMs > 600000UL ||
-      !isfinite(batteryLowThreshold) ||
-      !isfinite(batteryCriticalThreshold) ||
-      batteryCriticalThreshold < 2.5f ||
-      batteryLowThreshold <= batteryCriticalThreshold ||
-      batteryLowThreshold > 4.2f ||
-      (mqttEnabled && (mqttHost.isEmpty() || mqttHost.length() > 253 || mqttPort == 0)) ||
-      mqttReconnectMinMs < 1000UL || mqttReconnectMaxMs < mqttReconnectMinMs ||
-      mqttReconnectMaxMs > 3600000UL ||
-      mqttTelemetryPeriodMs < 1000UL || mqttTelemetryPeriodMs > 86400000UL ||
-      mqttHealthPeriodMs < 1000UL || mqttHealthPeriodMs > 86400000UL ||
-      mqttCredentialRotationDays < 1 || mqttCredentialRotationDays > 3650 ||
-      voxThreshold < 0.005f || voxThreshold > 1.0f ||
-      voxHangMs < 50U || voxHangMs > 10000U ||
-      loraHopChannelProfile < 1 || loraHopChannelProfile > Config::HOP_CHANNEL_MAX ||
-      sensorScanIntervalMs < 100 || sensorScanIntervalMs > 60000 ||
-      sensorScanWindowMs == 0 || sensorScanWindowMs > sensorScanIntervalMs ||
-      sensorScanDurationMs < 100 || sensorScanDurationMs > 60000 ||
-      sensorConnectTimeoutMs < 500 || sensorConnectTimeoutMs > 30000 ||
-      sensorNodeEvictionMs < 10000 || sensorNodeEvictionMs > 7UL * 86400000UL ||
-      sensorMaxNodes < 1 || sensorMaxNodes > Config::SENSOR_MAX_NODES_VALUE ||
-      blePairingFailureThreshold < 1 || blePairingFailureThreshold > 20 ||
-      blePairingBlockMs < 1000 || blePairingBlockMs > 86400000UL ||
-      webSessionTimeoutMs < 60000UL || webSessionTimeoutMs > 86400000UL ||
-      webAuthRateLimitMs < 100 || webAuthRateLimitMs > 600000UL ||
-      csrfPolicy > 1 || blePairingPolicy > 1 || ecdhRekeyPolicy > 1 ||
-      replayWindowBits < 8 || replayWindowBits > Config::LORA_REPLAY_WINDOW_BITS ||
-      !isfinite(batteryCalibration) ||
-      batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
-      !validLoRaWAN() ||
-!validCallsign(callsign) || !validHexKey(loraKeyHex) || apSsid.isEmpty() || apSsid.length() > 32 ||
-      apPassword.length() < 8 || apPassword.length() > 63 ||
-      webUser.isEmpty() || webUser.length() > 32 ||
-      !webPasswordConfigured())
-    return false;
-
-  Preferences prefs;
-  if (!prefs.begin(NVS_NS, false)) return false;
-  bool ok = prefs.putUInt("cfgver", CONFIG_VERSION) > 0 &&
-            prefs.putFloat("freq", loraFreqMHz) &&
-            prefs.putFloat("bw", loraBwKHz) &&
-            prefs.putUChar("sf", loraSf) &&
-            prefs.putUChar("cr", loraCr) &&
-            prefs.putUChar("sync", loraSyncWord) &&
-            prefs.putChar("power", loraPowerDbm) &&
-            prefs.putUChar("volume", volume) &&
-            prefs.putUChar("audsrc", audioRecordSource) &&
-            prefs.putFloat("batcal", batteryCalibration) &&
-            prefs.putString("callsign", callsign) > 0 &&
-            prefs.putString("lorakey", loraKeyHex) > 0 &&
-            prefs.putString("apssid", apSsid) > 0 &&
-            prefs.putString("appass", apPassword) > 0 &&
-            prefs.putString("webuser", webUser) > 0 &&
-            prefs.putUChar("recqual", audioRecordQuality) > 0 &&
-            prefs.putBool("lw_enabled", lorawanEnabled) &&
-            prefs.putUChar("lw_mode", lorawanMode) > 0 &&
-            prefs.putUChar("lw_region", lorawanRegion) > 0 &&
-            prefs.putString("lw_deveui", lorawanDevEui) > 0 &&
-            prefs.putString("lw_joineui", lorawanJoinEui) > 0 &&
-            prefs.putString("lw_appkey", lorawanAppKey) > 0 &&
-            prefs.putString("lw_nwkskey", lorawanNwkSKey) > 0 &&
-            prefs.putString("lw_appskey", lorawanAppSKey) > 0 &&
-            prefs.putBytes("lw_devaddr", lorawanDevAddr, sizeof(lorawanDevAddr)) == sizeof(lorawanDevAddr) &&
-            prefs.putUChar("lw_fport", lorawanFPort) > 0 &&
-            prefs.putUShort("lw_period", lorawanUplinkPeriodSec) > 0 &&
-            prefs.putBool("ble_pair", blePairingEnabled) &&
-             prefs.putBool("mqtt_en", mqttEnabled) &&
-             prefs.putUInt("wake_sec", wakePeriodSec) > 0 &&
-             prefs.putBool("classd_en", classDEnabled) &&
-             prefs.putUChar("classd_boost", classDBoostLevel) > 0 &&
-             prefs.putBool("sleep_en", deepSleepEnabled) &&
-             prefs.putUInt("sleep_idle", deepSleepIdleMs) > 0 &&
-             prefs.putUInt("wake_grace", deepSleepWakeGraceMs) > 0 &&
-             prefs.putUInt("bat_crit_delay", criticalShutdownDelayMs) > 0 &&
-             prefs.putFloat("bat_low", batteryLowThreshold) != 0 &&
-             prefs.putFloat("bat_critical", batteryCriticalThreshold) != 0 &&
-             prefs.putString("mqtt_host", mqttHost) > 0 &&
-             prefs.putUShort("mqtt_port", mqttPort) > 0 &&
-             prefs.putBool("mqtt_tls", mqttTlsRequired) &&
-             prefs.putUInt("mqtt_rmin", mqttReconnectMinMs) > 0 &&
-             prefs.putUInt("mqtt_rmax", mqttReconnectMaxMs) > 0 &&
-             prefs.putUInt("mqtt_tlm", mqttTelemetryPeriodMs) > 0 &&
-             prefs.putUInt("mqtt_hlt", mqttHealthPeriodMs) > 0 &&
-             prefs.putBool("mqtt_rt", mqttRetainTelemetry) &&
-             prefs.putBool("mqtt_ra", mqttRetainAvailability) &&
-             prefs.putUShort("mqtt_rot", mqttCredentialRotationDays) > 0 &&
-             prefs.putBool("vox_en", voxEnabled) &&
-             prefs.putFloat("vox_thr", voxThreshold) != 0 &&
-             prefs.putUInt("vox_hang", voxHangMs) > 0 &&
-             prefs.putBool("aec_en", aecEnabled) &&
-             prefs.putBool("usb_mon", usbMonitor) &&
-             prefs.putBool("usb_tx", usbPlaybackTransport) &&
-             prefs.putBool("loopback", audioLoopback) &&
-             prefs.putBool("lora_adr", loraAdrEnabled) &&
-             prefs.putBool("lora_hop", loraHopEnabled) &&
-             prefs.putUChar("lora_hprof", loraHopChannelProfile) > 0 &&
-             prefs.putBool("lora_range", loraRangeTestMode) &&
-             prefs.putBool("ble_en", sensorReaderEnabled) &&
-             prefs.putUInt("ble_si", sensorScanIntervalMs) > 0 &&
-             prefs.putUShort("ble_sw", sensorScanWindowMs) > 0 &&
-             prefs.putUInt("ble_sd", sensorScanDurationMs) > 0 &&
-             prefs.putUInt("ble_ct", sensorConnectTimeoutMs) > 0 &&
-             prefs.putUInt("ble_ev", sensorNodeEvictionMs) > 0 &&
-             prefs.putUChar("ble_max", sensorMaxNodes) > 0 &&
-             prefs.putBool("ble_enc", sensorRequireEncryption) &&
-             prefs.putUChar("ble_fail", blePairingFailureThreshold) > 0 &&
-             prefs.putUInt("ble_block", blePairingBlockMs) > 0 &&
-             prefs.putBool("ble_awake", sensorKeepAwake) &&
-             prefs.putUInt("web_sto", webSessionTimeoutMs) > 0 &&
-             prefs.putUInt("web_rl", webAuthRateLimitMs) > 0 &&
-             prefs.putUChar("web_csrf", csrfPolicy) > 0 &&
-             prefs.putUChar("ble_policy", blePairingPolicy) > 0 &&
-             prefs.putUChar("ecdh_policy", ecdhRekeyPolicy) > 0 &&
-             prefs.putUChar("replay_win", replayWindowBits) > 0;
-  if (ok) {
-    uint8_t salt[PASSWORD_SALT_BYTES] = {};
-    uint8_t hash[32] = {};
-    bool haveCredential = false;
-    if (!webPassword.isEmpty()) {
-      for (size_t i = 0; i < sizeof(salt); i += 4) {
-        const uint32_t r = esp_random();
-        memcpy(salt + i, &r, min<size_t>(4, sizeof(salt) - i));
-      }
-      haveCredential = passwordHash(webPassword, salt, hash);
-      if (haveCredential) {
-        ok = prefs.putString("websalt", hexEncode(salt, sizeof(salt))) > 0 &&
-             prefs.putString("webph", hexEncode(hash, sizeof(hash))) > 0;
-      }
-    } else {
-      uint8_t existingSalt[PASSWORD_SALT_BYTES] = {};
-      haveCredential = hexDecode(webPasswordSaltHex, existingSalt, sizeof(existingSalt)) &&
-                       webPasswordHashHex.length() == 64;
-      ok = haveCredential &&
-           prefs.putString("websalt", webPasswordSaltHex) > 0 &&
-           prefs.putString("webph", webPasswordHashHex) > 0;
-    }
-    // Deliberately remove the legacy plaintext key on every successful save.
-    if (ok) (void)prefs.remove("webpass");
+bool RuntimeConfig::save() {
+  if (!validRuntimeConfig(*this)) return false;
+  if (!webPassword.isEmpty()) {
+    uint8_t salt[PASSWORD_SALT_BYTES] = {}; uint8_t hash[32] = {};
+    for (size_t i=0;i<sizeof(salt);i+=4) { uint32_t r=esp_random(); memcpy(salt+i,&r,min<size_t>(4,sizeof(salt)-i)); }
+    if (!passwordHash(webPassword,salt,hash)) { mbedtls_platform_zeroize(salt,sizeof(salt)); mbedtls_platform_zeroize(hash,sizeof(hash)); return false; }
+    webPasswordSaltHex=hexEncode(salt,sizeof(salt)); webPasswordHashHex=hexEncode(hash,sizeof(hash));
+    mbedtls_platform_zeroize(salt,sizeof(salt)); mbedtls_platform_zeroize(hash,sizeof(hash));
   }
-  prefs.end();
-  return ok;
+  if (!webPasswordConfigured()) return false;
+  return saveAtomicConfig(*this);
 }
 
 bool RuntimeConfig::webPasswordConfigured() const {

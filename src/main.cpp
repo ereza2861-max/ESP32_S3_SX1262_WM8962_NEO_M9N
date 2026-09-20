@@ -845,17 +845,21 @@ static void handlePhysicalControls(uint32_t now) {
     if (!modeChordSince) modeChordSince = now;
     if (!modeChordHandled && now - modeChordSince >= 1500U) {
       modeChordHandled = true;
-      gConfig.lorawanEnabled = !gConfig.lorawanEnabled;
-      if (!gConfig.save()) {
-        gConfig.lorawanEnabled = !gConfig.lorawanEnabled;
-        Serial.println("LORAWAN: physical mode toggle failed to save");
-      } else if (gConfig.lorawanEnabled) {
-        Serial.println("LORAWAN: physical mode ON");
-        if (gConfig.lorawanMode == 0) (void)lorawan.connectOTAA();
-        else (void)lorawan.connectABP();
+      RuntimeConfig candidate{};
+      if (!configSnapshot(candidate)) {
+        Serial.println("LORAWAN: physical mode toggle failed to snapshot config");
       } else {
-        Serial.println("LORAWAN: physical mode OFF");
-        (void)lorawan.disconnect();
+        candidate.lorawanEnabled = !candidate.lorawanEnabled;
+        if (!configCommit(candidate)) {
+          Serial.println("LORAWAN: physical mode toggle failed to save");
+        } else if (candidate.lorawanEnabled) {
+          Serial.println("LORAWAN: physical mode ON");
+          if (candidate.lorawanMode == 0) (void)lorawan.connectOTAA();
+          else (void)lorawan.connectABP();
+        } else {
+          Serial.println("LORAWAN: physical mode OFF");
+          (void)lorawan.disconnect();
+        }
       }
     }
     lastPttButton = false;
@@ -1200,7 +1204,10 @@ void setup() {
     for (;;) delay(1000);
   }
   gConfig.load();
-  gConfigGeneration.store(1, std::memory_order_release);
+  if (!configManagerBegin()) {
+    Serial.println("FATAL: configuration manager initialization");
+    for (;;) delay(1000);
+  }
   watchdogInit();
 
   gState.mutex = xSemaphoreCreateMutex();

@@ -22,7 +22,7 @@ The repository contains:
 - Wi-Fi STA: partial manager/reconnect implementation without an end-to-end provisioning UI/workflow.
 - MQTT: production security provisioning from FASE 3 is now present; deployment still depends on the
   documented credential/TLS provisioning workflow.
-- X25519/ECDH key rotation: documented but not implemented.
+- X25519/ECDH key rotation: runtime lifecycle is implemented in the current source; target build/interoperability and HIL evidence remain pending.
 - Full selective-repeat/SACK fragmentation semantics: still incomplete.
 - Secure Boot/flash-encryption production provisioning: FASE 5 manufacturing workflow is being added;
   it remains intentionally explicit and does not burn eFuses during a normal development build.
@@ -30,14 +30,11 @@ The repository contains:
 
 The audit therefore does **not** classify BLE as the sole remaining scaffold.
 
-### 3. MQTT port/security mismatch — retained as a documented gate
+### 3. MQTT TLS verification gate
 
-`MqttClientManager` uses `WiFiClient`, while the default configured port is `8883`. Port 8883
-does not itself enable TLS, so a deployment could incorrectly assume the link is encrypted.
-The patch does not silently convert this into `setInsecure()` TLS, because that would provide
-encryption without server authentication and could create a false sense of production security.
-A production implementation should use a TLS-capable client, explicit CA/server trust policy,
-credential provisioning, and a testable failure mode.
+`MqttClientManager` uses a TLS-capable client when `mqttTlsRequired` is enabled and loads the
+provisioned broker CA before connecting. The remaining production gate is credential rotation:
+`mqttCredentialRotationDays` is policy state, not by itself a broker credential-rotation protocol.
 
 ### 4. GPIO/PCB status language was stronger than the actual project state — normalized
 
@@ -97,3 +94,16 @@ parsing is now strict and the save path verifies each NVS write.
 BLE samples are still best-effort across the downstream MQTT/LoRa boundary.
 The current patch does not silently invent persistent store-and-forward semantics;
 see GAP E in `DECISIONS.md` for the required product decision.
+
+### 11. Configuration ownership and persistence closure — 2026-09-21
+Runtime configuration mutation has been moved behind a dedicated Configuration Manager task and
+transactional command queue. Direct runtime `gConfig` writers were removed from WebUI, audio,
+LoRaWAN hardware-identity handling and physical-mode paths. Persistence now uses two alternating
+NVS slots with generation, CRC and a post-write commit marker; legacy configuration is retained
+only as a boot-time migration fallback.
+
+### 12. Build-stack gate remains unresolved
+The repository declares PlatformIO 6.13.0 with Arduino + ESP-IDF and also selects the
+`esp32_idf5_https_server_compat` fork. PlatformIO 6.13.0's Arduino 2.0.17 stack is based on
+ESP-IDF 4.4.7, so the repository does not currently contain evidence for a compatible IDF-5
+HTTPS dependency stack. This is an architectural build decision, not a safe version guess.
