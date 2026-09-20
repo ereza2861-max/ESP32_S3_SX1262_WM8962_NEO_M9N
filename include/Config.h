@@ -138,11 +138,13 @@ constexpr uint8_t LORA_TAG_BYTES = 16;
 // configured legal band; deployments can change the spacing without changing
 // the packet format.
 constexpr uint8_t HOP_CHANNEL_MAX = 8;
-constexpr float HOP_CHANNEL_STEP_MHZ = 0.4f;
+constexpr float HOP_CHANNEL_FREQ_MHZ[HOP_CHANNEL_MAX] = {
+    920.2f, 920.6f, 921.0f, 921.4f,
+    921.8f, 922.2f, 922.6f, 923.0f};
 constexpr uint32_t HOP_DWELL_MS = 1000UL;
 static_assert(HOP_CHANNEL_MAX == 0 ||
-              LORA_MIN_FREQ_MHZ + static_cast<float>(HOP_CHANNEL_MAX - 1U) * HOP_CHANNEL_STEP_MHZ <= LORA_MAX_FREQ_MHZ,
-              "Rev-C hop channel plan exceeds configured legal LoRa band");
+              HOP_CHANNEL_FREQ_MHZ[HOP_CHANNEL_MAX - 1U] <= LORA_MAX_FREQ_MHZ,
+              "Rev-C hop channel profile exceeds configured legal LoRa band");
 constexpr uint8_t HOP_LEGACY_RX_EVERY = 3;
 constexpr uint32_t SCANNER_DEFAULT_DWELL_MS = 100;
 constexpr uint32_t SCANNER_MIN_DWELL_MS = 25;
@@ -227,7 +229,11 @@ constexpr uint32_t LORA_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t HEALTH_LOG_ROTATE_BYTES = 64UL * 1024UL;
 constexpr uint32_t LOG_PERSIST_PERIOD_MS = 5000UL;
 constexpr uint32_t RANGE_TEST_PERIOD_MS = 5000UL;
-constexpr uint8_t CONFIG_VERSION = 7;
+constexpr uint8_t LORA_RANGE_TEST_MAGIC = 0xD4;
+constexpr uint8_t LORA_RANGE_TEST_ACK_MAGIC = 0xD5;
+constexpr uint8_t LORA_RANGE_TEST_VERSION = 1;
+constexpr uint32_t RANGE_TEST_MAX_DURATION_MS = 30UL * 60UL * 1000UL;
+constexpr uint8_t CONFIG_VERSION = 8;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
 constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;

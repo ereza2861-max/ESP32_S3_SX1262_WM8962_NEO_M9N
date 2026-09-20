@@ -767,7 +767,7 @@ bool WebUi::sessionValid() {
   if (tokenDiff != 0) return false;
   return static_cast<int32_t>(millis() - authBlockedUntilMs_) >= 0 &&
          static_cast<uint32_t>(millis() - sessionIssuedMs_) <
-             Config::WEB_SESSION_TIMEOUT_MS;
+             gConfig.webSessionTimeoutMs;
 }
 
 bool WebUi::csrfValid() {
@@ -825,7 +825,7 @@ bool WebUi::issueSession() {
   }
   server_.sendHeader("Set-Cookie",
       "FR-SESSION=" + hex + "; Max-Age=" +
-      String(Config::WEB_SESSION_TIMEOUT_MS / 1000) +
+      String(gConfig.webSessionTimeoutMs / 1000) +
       "; HttpOnly; Secure; SameSite=Strict");
 
   return true;
@@ -914,11 +914,11 @@ bool WebUi::auth() {
     auditAuth(true);
   }
   if (server_.method() == HTTP_POST || server_.method() == HTTP_DELETE) {
-    if (!sameOrigin()) {
+    if (gConfig.csrfPolicy != 2 && gConfig.csrfPolicy == 0 && !sameOrigin()) {
       server_.send(403, "text/plain", "forbidden origin");
       return false;
     }
-    if (!csrfValid()) {
+    if (gConfig.csrfPolicy != 2 && !csrfValid()) {
       server_.send(403, "text/plain", "invalid CSRF token");
       return false;
     }
@@ -1003,6 +1003,8 @@ void WebUi::begin() {
   server_.on("/api/rf/detector", HTTP_GET, [this]{ if (auth()) handleRfDetector(); });
   server_.on("/api/radio/tune", HTTP_POST, [this]{ if (auth()) handleRadioTune(); });
   server_.on("/api/range-test", HTTP_POST, [this]{ if (auth()) handleRangeTest(); });
+  server_.on("/api/range-test/status", HTTP_GET, [this]{ if (auth()) handleRangeTestStatus(); });
+  server_.on("/api/range-test/export", HTTP_GET, [this]{ if (auth()) handleRangeTestStatus(); });
   server_.on("/api/storage/info", HTTP_GET, [this]{ if (auth()) handleStorageInfo(); });
   server_.on("/api/storage/checksum", HTTP_GET, [this]{ if (auth()) handleChecksum(); });
   server_.on("/api/storage/checksum-sha256", HTTP_GET, [this]{ if (auth()) handleChecksumSha256(); });
@@ -1269,20 +1271,25 @@ void WebUi::handleLoRaWANStatus() {
 }
 
 void WebUi::handleLoRaWANConnect() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const bool ok = gConfig.lorawanMode == 0 ? lorawan.connectOTAA() : lorawan.connectABP();
   server_.send(ok ? 202 : 400, "text/plain", ok ? "LoRaWAN connect requested" : "LoRaWAN connect rejected");
 }
 
 void WebUi::handleLoRaWANDisconnect() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const bool ok = lorawan.disconnect();
   server_.send(ok ? 202 : 400, "text/plain", ok ? "LoRaWAN disconnect requested" : "LoRaWAN disconnect rejected");
 }
 
 void WebUi::handleLoRaWANConfig() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
-  RuntimeConfig candidate = gConfig;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig candidate;
+  uint32_t configGenerationSnapshot = 0;
+  if (!configSnapshot(candidate, configGenerationSnapshot)) {
+    server_.send(503, "text/plain", "configuration busy");
+    return;
+  }
 
   auto hexField = [](const String& v, size_t n) {
     if (v.length() != n) return false;
@@ -1369,23 +1376,26 @@ void WebUi::handleLoRaWANConfig() {
     server_.send(400, "text/plain", "invalid LoRaWAN configuration"); return;
   }
 
-  const RuntimeConfig previous = gConfig;
-  const bool wasJoined = lorawan.isJoined();
-  if (wasJoined) (void)lorawan.disconnect();
-  gConfig = candidate;
-  if (!gConfig.save()) {
-    gConfig = previous;
-    server_.send(503, "text/plain", "NVS save failed");
+  RuntimeConfig previous;
+  if (!configSnapshot(previous)) {
+    server_.send(503, "text/plain", "configuration busy");
     return;
   }
-  lorawan.setRegionalProfile(static_cast<RegionalProfile>(gConfig.lorawanRegion));
-  if (!gConfig.lorawanEnabled) (void)lorawan.disconnect();
-  auditConfigChange(previous, gConfig, "lorawan-web");
+  const bool wasJoined = lorawan.isJoined();
+  if (wasJoined) (void)lorawan.disconnect();
+  if (!configCommit(candidate, configGenerationSnapshot)) {
+    server_.send(409, "text/plain", "configuration changed; retry");
+    return;
+  }
+  if (candidate.lorawanRegion != previous.lorawanRegion)
+    lorawan.setRegionalProfile(static_cast<RegionalProfile>(candidate.lorawanRegion));
+  if (!candidate.lorawanEnabled) (void)lorawan.disconnect();
+  auditConfigChange(previous, candidate, "lorawan-web");
   server_.send(200, "text/plain", "LoRaWAN configuration saved");
 }
 
 void WebUi::handleLoRaWANUplink() {
-  if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastMessageMs_, gConfig.webAuthRateLimitMs)) return;
   const String text = server_.arg("text");
   const String raw = server_.arg("hex");
   uint8_t payload[Config::LORAWAN_MAX_PAYLOAD] = {};
@@ -1561,7 +1571,7 @@ void WebUi::handleMessageRead() {
 }
 
 void WebUi::handleMessageReply() {
-  if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastMessageMs_, gConfig.webAuthRateLimitMs)) return;
   const String target = server_.arg("source");
   const String text = server_.arg("plain");
   if (target.isEmpty() || target.length() > 10 || text.isEmpty() ||
@@ -1650,7 +1660,7 @@ void WebUi::handleRadioHistory() {
 }
 
 void WebUi::handleRadioTune() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const String raw = server_.arg("freq");
   char* end = nullptr;
   const float freq = strtof(raw.c_str(), &end);
@@ -1778,7 +1788,7 @@ void WebUi::handleBatteryCalibrate() {
 }
 
 void WebUi::handleMessage() {
-  if (!rateLimit(lastMessageMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastMessageMs_, gConfig.webAuthRateLimitMs)) return;
   if (server_.contentLength() > Config::MAX_WEB_BODY) {
     server_.send(413, "text/plain", "payload too large");
     return;
@@ -1854,7 +1864,7 @@ void WebUi::handleScanStatus() {
 }
 
 void WebUi::handleScanStart() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const String modeRaw = server_.arg("mode");
   const String dwellRaw = server_.arg("dwell");
   if (modeRaw != "1" && modeRaw != "2") {
@@ -1906,7 +1916,7 @@ void WebUi::handleScanResults() {
 }
 
 void WebUi::handleHopSuggest() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   uint8_t suggested[Config::HOP_CHANNEL_MAX] = {};
   const size_t n = lora.scannerSuggestBestChannels(
       suggested, Config::HOP_CHANNEL_MAX);
@@ -1952,7 +1962,7 @@ void WebUi::handleHopStatus() {
 }
 
 void WebUi::handleHopEnable() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid enable"); return;
@@ -1964,13 +1974,28 @@ void WebUi::handleHopEnable() {
     if (on && gState.hopChannelCount == 0) {
       server_.send(409, "text/plain", "no channels suggested"); return;
     }
-    gState.hopEnabled = on;
+  }
+
+  // LoRaManager consumes gConfig.loraHopEnabled. Keep the runtime toggle and
+  // persisted configuration on the same source of truth; updating only
+  // gState.hopEnabled made the UI report HOP ENABLED while the radio kept
+  // using the configured value.
+  const RuntimeConfig previous = gConfig;
+  gConfig.loraHopEnabled = on;
+  if (!gConfig.save()) {
+    gConfig = previous;
+    server_.send(503, "text/plain", "NVS save failed");
+    return;
+  }
+  {
+    StateLock lock(gState);
+    if (lock.ok()) gState.hopEnabled = on;
   }
   server_.send(200, "text/plain", on ? "HOP ENABLED" : "HOP DISABLED");
 }
 
 void WebUi::handlePtt() {
-  if (!rateLimit(lastPttMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastPttMs_, gConfig.webAuthRateLimitMs)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid ptt");
@@ -2219,7 +2244,7 @@ static String sensorNodeJson(size_t index, const SensorRegistry::Node& node, boo
 }
 
 void WebUi::handleSensorNodes() {
-  if (!rateLimit(lastSensorNodesMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorNodesMs_, gConfig.webAuthRateLimitMs)) return;
   size_t count = 0;
   if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) {
     server_.send(503, "application/json", "{\"ok\":false,\"error\":\"sensor snapshot unavailable\"}"); return;
@@ -2230,7 +2255,7 @@ void WebUi::handleSensorNodes() {
 }
 
 void WebUi::handleSensorNodeDetail() {
-  if (!rateLimit(lastSensorNodesMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorNodesMs_, gConfig.webAuthRateLimitMs)) return;
   const String raw = server_.arg("id");
   if (raw.isEmpty()) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"missing id\"}"); return; }
   const long id = raw.toInt();
@@ -2241,7 +2266,7 @@ void WebUi::handleSensorNodeDetail() {
 }
 
 void WebUi::handleSensorLive() {
-  if (!rateLimit(lastSensorLiveMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorLiveMs_, gConfig.webAuthRateLimitMs)) return;
   size_t count = 0;
   if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) { server_.send(503, "application/json", "{\"ok\":false}"); return; }
   String j = "{\"ok\":true,\"sensorDropped\":" + String(bleSensorReader.sensorReader().droppedSamples()) + ",\"queueDepth\":" + String(bleSensorReader.sensorReader().queueDepth()) + ",\"nodes\":[";
@@ -2258,7 +2283,7 @@ bool parseSensorNodeId(ESPWebServerSecure& server, size_t& id) {
 }
 
 void WebUi::handleSensorForget() {
-  if (!rateLimit(lastSensorActionMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorActionMs_, gConfig.webAuthRateLimitMs)) return;
   size_t id = 0;
   if (!parseSensorNodeId(server_, id)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
   if (!bleSensorReader.sensorReader().requestForgetNode(id)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
@@ -2266,7 +2291,7 @@ void WebUi::handleSensorForget() {
 }
 
 void WebUi::handleSensorRefresh() {
-  if (!rateLimit(lastSensorActionMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorActionMs_, gConfig.webAuthRateLimitMs)) return;
   size_t id = 0;
   if (!parseSensorNodeId(server_, id)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
   if (!bleSensorReader.sensorReader().requestRefreshNode(id)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
@@ -2297,7 +2322,7 @@ static bool parseBleAddressArg(ESPWebServerSecure& server, SensorProtocol::BleAd
 }
 
 void WebUi::handleBlePasskeySet() {
-  if (!rateLimit(lastBlePasskeyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastBlePasskeyMs_, gConfig.webAuthRateLimitMs)) return;
   SensorProtocol::BleAddress address{};
   const String pass = server_.arg("passkey");
   if (!parseBleAddressArg(server_, address) || pass.length() != 6) {
@@ -2314,7 +2339,7 @@ void WebUi::handleBlePasskeySet() {
 }
 
 void WebUi::handleBlePasskeyDelete() {
-  if (!rateLimit(lastBlePasskeyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastBlePasskeyMs_, gConfig.webAuthRateLimitMs)) return;
   SensorProtocol::BleAddress address{};
   if (!parseBleAddressArg(server_, address) || !bleSensorReader.forgetPeerPasskey(address)) {
     server_.send(404, "application/json", "{\"ok\":false,\"error\":\"peer not found\"}"); return;
@@ -2323,13 +2348,13 @@ void WebUi::handleBlePasskeyDelete() {
 }
 
 void WebUi::handleBlePasskeyList() {
-  if (!rateLimit(lastBlePasskeyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastBlePasskeyMs_, gConfig.webAuthRateLimitMs)) return;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", "{\"ok\":true,\"peers\":" + bleSensorReader.peersJson() + "}");
 }
 
 void WebUi::handleSensorQueuePolicy() {
-  if (!rateLimit(lastSensorQueuePolicyMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorQueuePolicyMs_, gConfig.webAuthRateLimitMs)) return;
   const String policy = server_.arg("policy");
   if (policy == "oldest") bleSensorReader.sensorReader().setQueuePolicy(SensorReader::SampleQueuePolicy::DROP_OLDEST);
   else if (policy == "newest") bleSensorReader.sensorReader().setQueuePolicy(SensorReader::SampleQueuePolicy::DROP_NEWEST);
@@ -2340,7 +2365,7 @@ void WebUi::handleSensorQueuePolicy() {
 
 void WebUi::handleMqttProvision() {
   static uint32_t lastMqttProvisionMs = 0;
-  if (!rateLimit(lastMqttProvisionMs, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastMqttProvisionMs, gConfig.webAuthRateLimitMs)) return;
   const String host = server_.arg("host");
   const String rawPort = server_.arg("port");
   const String user = server_.arg("user");
@@ -2378,7 +2403,7 @@ void WebUi::handleMqttProvision() {
 
 void WebUi::handleMqttStatus() {
   static uint32_t lastMqttStatusMs = 0;
-  if (!rateLimit(lastMqttStatusMs, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastMqttStatusMs, gConfig.webAuthRateLimitMs)) return;
   String j = "{\"ok\":true,\"provisioned\":";
   j += mqtt.credentialsProvisioned() ? "true" : "false";
   j += ",\"connected\":";
@@ -2695,7 +2720,7 @@ void WebUi::handleRadioStats() {
 }
 
 void WebUi::handleRangeTest() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid range-test");
@@ -2707,8 +2732,14 @@ void WebUi::handleRangeTest() {
   server_.send(200, "text/plain", gState.rangeTest ? "RANGE TEST ON" : "RANGE TEST OFF");
 }
 
+void WebUi::handleRangeTestStatus() {
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", lora.rangeTestStatusJson());
+}
+
 void WebUi::handleHopSetChannels() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   const String raw = server_.arg("list");
   if (raw.isEmpty() || raw.length() > 32) {
     server_.send(400, "text/plain", "invalid channel list"); return;
@@ -2868,7 +2899,7 @@ static void auditConfigChange(const RuntimeConfig& previous,
 }
 
 void WebUi::handleConfig() {
-  if (!rateLimit(lastConfigMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   RuntimeConfig candidate = gConfig;
   bool radioChanged = false;
 
@@ -2994,6 +3025,48 @@ void WebUi::handleConfig() {
     }
     candidate.mqttEnabled = raw == "1";
   }
+  if (server_.hasArg("mqtt_host")) {
+    candidate.mqttHost = server_.arg("mqtt_host");
+    if (candidate.mqttHost.isEmpty() || candidate.mqttHost.length() > 253 ||
+        candidate.mqttHost.indexOf('|') >= 0) {
+      server_.send(400, "text/plain", "invalid MQTT host"); return;
+    }
+  }
+  if (server_.hasArg("mqtt_port")) {
+    if (!parseUnsigned(server_.arg("mqtt_port"), 65535, value) || value == 0) {
+      server_.send(400, "text/plain", "invalid MQTT port"); return;
+    }
+    candidate.mqttPort = static_cast<uint16_t>(value);
+  }
+  if (server_.hasArg("mqtt_tls")) {
+    const String raw = server_.arg("mqtt_tls");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid MQTT TLS setting"); return;
+    }
+    candidate.mqttTlsRequired = raw == "1";
+  }
+  if (server_.hasArg("mqtt_reconnect_min_ms"))
+    if (!parseUnsigned(server_.arg("mqtt_reconnect_min_ms"), 3600000, value) || value < 1000) {
+      server_.send(400, "text/plain", "invalid MQTT reconnect minimum"); return;
+    } else candidate.mqttReconnectMinMs = value;
+  if (server_.hasArg("mqtt_reconnect_max_ms"))
+    if (!parseUnsigned(server_.arg("mqtt_reconnect_max_ms"), 3600000, value) || value < 1000) {
+      server_.send(400, "text/plain", "invalid MQTT reconnect maximum"); return;
+    } else candidate.mqttReconnectMaxMs = value;
+  if (server_.hasArg("mqtt_telemetry_period_ms"))
+    if (!parseUnsigned(server_.arg("mqtt_telemetry_period_ms"), 86400000, value) || value < 1000) {
+      server_.send(400, "text/plain", "invalid MQTT telemetry period"); return;
+    } else candidate.mqttTelemetryPeriodMs = value;
+  if (server_.hasArg("mqtt_health_period_ms"))
+    if (!parseUnsigned(server_.arg("mqtt_health_period_ms"), 86400000, value) || value < 1000) {
+      server_.send(400, "text/plain", "invalid MQTT health period"); return;
+    } else candidate.mqttHealthPeriodMs = value;
+  if (server_.hasArg("mqtt_retain_telemetry")) candidate.mqttRetainTelemetry = server_.arg("mqtt_retain_telemetry") == "1";
+  if (server_.hasArg("mqtt_retain_availability")) candidate.mqttRetainAvailability = server_.arg("mqtt_retain_availability") == "1";
+  if (server_.hasArg("mqtt_rotation_days"))
+    if (!parseUnsigned(server_.arg("mqtt_rotation_days"), 3650, value) || value < 1) {
+      server_.send(400, "text/plain", "invalid MQTT rotation policy"); return;
+    } else candidate.mqttCredentialRotationDays = static_cast<uint16_t>(value);
   if (server_.hasArg("wake_period_sec")) {
     if (!parseUnsigned(server_.arg("wake_period_sec"), 604800, value) || value < 60) {
       server_.send(400, "text/plain", "invalid wake period"); return;
@@ -3055,6 +3128,88 @@ void WebUi::handleConfig() {
     }
     candidate.classDBoostLevel = static_cast<uint8_t>(value);
   }
+  if (server_.hasArg("vox_enabled")) candidate.voxEnabled = server_.arg("vox_enabled") == "1";
+  if (server_.hasArg("vox_threshold")) {
+    candidate.voxThreshold = server_.arg("vox_threshold").toFloat();
+  }
+  if (server_.hasArg("vox_hang_ms")) {
+    if (!parseUnsigned(server_.arg("vox_hang_ms"), 10000, value) || value < 50) {
+      server_.send(400, "text/plain", "invalid VOX hang time"); return;
+    }
+    candidate.voxHangMs = value;
+  }
+  if (server_.hasArg("aec_enabled")) candidate.aecEnabled = server_.arg("aec_enabled") == "1";
+  if (server_.hasArg("usb_monitor")) candidate.usbMonitor = server_.arg("usb_monitor") == "1";
+  if (server_.hasArg("usb_transport")) candidate.usbPlaybackTransport = server_.arg("usb_transport") == "1";
+  if (server_.hasArg("loopback")) candidate.audioLoopback = server_.arg("loopback") == "1";
+  if (server_.hasArg("adr_enabled")) candidate.loraAdrEnabled = server_.arg("adr_enabled") == "1";
+  if (server_.hasArg("hop_enabled")) candidate.loraHopEnabled = server_.arg("hop_enabled") == "1";
+  if (server_.hasArg("hop_profile")) {
+    if (!parseUnsigned(server_.arg("hop_profile"), Config::HOP_CHANNEL_MAX, value) || value == 0) {
+      server_.send(400, "text/plain", "invalid hop profile"); return;
+    }
+    candidate.loraHopChannelProfile = static_cast<uint8_t>(value);
+  }
+  if (server_.hasArg("ble_enabled")) candidate.sensorReaderEnabled = server_.arg("ble_enabled") == "1";
+  if (server_.hasArg("ble_scan_interval_ms"))
+    if (!parseUnsigned(server_.arg("ble_scan_interval_ms"), 60000, value) || value < 100) {
+      server_.send(400, "text/plain", "invalid BLE scan interval"); return;
+    } else candidate.sensorScanIntervalMs = value;
+  if (server_.hasArg("ble_scan_window_ms"))
+    if (!parseUnsigned(server_.arg("ble_scan_window_ms"), 60000, value) || value == 0) {
+      server_.send(400, "text/plain", "invalid BLE scan window"); return;
+    } else candidate.sensorScanWindowMs = static_cast<uint16_t>(value);
+  if (server_.hasArg("ble_scan_duration_ms"))
+    if (!parseUnsigned(server_.arg("ble_scan_duration_ms"), 60000, value) || value < 100) {
+      server_.send(400, "text/plain", "invalid BLE scan duration"); return;
+    } else candidate.sensorScanDurationMs = value;
+  if (server_.hasArg("ble_connect_timeout_ms"))
+    if (!parseUnsigned(server_.arg("ble_connect_timeout_ms"), 30000, value) || value < 500) {
+      server_.send(400, "text/plain", "invalid BLE connect timeout"); return;
+    } else candidate.sensorConnectTimeoutMs = value;
+  if (server_.hasArg("ble_eviction_ms"))
+    if (!parseUnsigned(server_.arg("ble_eviction_ms"), 7UL * 86400000UL, value) || value < 10000) {
+      server_.send(400, "text/plain", "invalid BLE eviction timeout"); return;
+    } else candidate.sensorNodeEvictionMs = value;
+  if (server_.hasArg("ble_max_nodes"))
+    if (!parseUnsigned(server_.arg("ble_max_nodes"), Config::SENSOR_MAX_NODES_VALUE, value) || value == 0) {
+      server_.send(400, "text/plain", "invalid BLE maximum nodes"); return;
+    } else candidate.sensorMaxNodes = static_cast<uint8_t>(value);
+  if (server_.hasArg("ble_encryption")) candidate.sensorRequireEncryption = server_.arg("ble_encryption") == "1";
+  if (server_.hasArg("ble_failure_threshold"))
+    if (!parseUnsigned(server_.arg("ble_failure_threshold"), 20, value) || value == 0) {
+      server_.send(400, "text/plain", "invalid BLE pairing failure threshold"); return;
+    } else candidate.blePairingFailureThreshold = static_cast<uint8_t>(value);
+  if (server_.hasArg("ble_block_ms"))
+    if (!parseUnsigned(server_.arg("ble_block_ms"), 86400000UL, value) || value < 1000) {
+      server_.send(400, "text/plain", "invalid BLE pairing block time"); return;
+    } else candidate.blePairingBlockMs = value;
+  if (server_.hasArg("ble_keep_awake")) candidate.sensorKeepAwake = server_.arg("ble_keep_awake") == "1";
+  if (server_.hasArg("web_session_timeout_ms"))
+    if (!parseUnsigned(server_.arg("web_session_timeout_ms"), 86400000UL, value) || value < 60000) {
+      server_.send(400, "text/plain", "invalid web session timeout"); return;
+    } else candidate.webSessionTimeoutMs = value;
+  if (server_.hasArg("web_auth_rate_limit_ms"))
+    if (!parseUnsigned(server_.arg("web_auth_rate_limit_ms"), 600000, value) || value < 100) {
+      server_.send(400, "text/plain", "invalid auth rate limit"); return;
+    } else candidate.webAuthRateLimitMs = value;
+  if (server_.hasArg("csrf_policy"))
+    if (!parseUnsigned(server_.arg("csrf_policy"), 1, value)) {
+      server_.send(400, "text/plain", "invalid CSRF policy"); return;
+    } else candidate.csrfPolicy = static_cast<uint8_t>(value);
+  if (server_.hasArg("ble_pairing_policy"))
+    if (!parseUnsigned(server_.arg("ble_pairing_policy"), 1, value)) {
+      server_.send(400, "text/plain", "invalid BLE pairing policy"); return;
+    } else candidate.blePairingPolicy = static_cast<uint8_t>(value);
+  if (server_.hasArg("ecdh_rekey_policy"))
+    if (!parseUnsigned(server_.arg("ecdh_rekey_policy"), 1, value)) {
+      server_.send(400, "text/plain", "invalid ECDH rekey policy"); return;
+    } else candidate.ecdhRekeyPolicy = static_cast<uint8_t>(value);
+  if (server_.hasArg("replay_window_bits"))
+    if (!parseUnsigned(server_.arg("replay_window_bits"), Config::LORA_REPLAY_WINDOW_BITS, value) ||
+        value != Config::LORA_REPLAY_WINDOW_BITS) {
+      server_.send(400, "text/plain", "replay window is fixed at 32 bits"); return;
+    } else candidate.replayWindowBits = Config::LORA_REPLAY_WINDOW_BITS;
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
@@ -3091,7 +3246,12 @@ void WebUi::handleConfig() {
   }
 
   gConfig = candidate;
-  if (!audio.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel)) {
+  if (!audio.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel) ||
+      !audio.setVox(gConfig.voxEnabled, gConfig.voxThreshold, gConfig.voxHangMs) ||
+      !audio.setAec(gConfig.aecEnabled) ||
+      !audio.setUsbMonitor(gConfig.usbMonitor) ||
+      !audio.setUsbPlaybackTransport(gConfig.usbPlaybackTransport) ||
+      !audio.setLoopback(gConfig.audioLoopback)) {
     gConfig = previous;
     (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
     (void)audio.setRecordSource(previousSource);
@@ -3099,6 +3259,13 @@ void WebUi::handleConfig() {
     return;
   }
   mqtt.setEnabled(gConfig.mqttEnabled);
+  if (!lora.setAdrEnabled(gConfig.loraAdrEnabled)) {
+    gConfig = previous;
+    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
+    mqtt.setEnabled(previous.mqttEnabled);
+    server_.send(503, "text/plain", "ADR configuration rejected");
+    return;
+  }
   if (radioChanged && !lora.applyConfig()) {
     gConfig = previous;
     (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
@@ -3138,6 +3305,43 @@ void WebUi::handleConfigExport() {
   j += ",\"ble_pairing\":" + String(c.blePairingEnabled ? "true" : "false");
   j += ",\"battery_calibration\":" + String(c.batteryCalibration, 5);
   j += ",\"mqtt_enabled\":" + String(c.mqttEnabled ? "true" : "false");
+  j += ",\"mqtt_host\":\"" + jsonEscape(c.mqttHost) + "\"";
+  j += ",\"mqtt_port\":" + String(c.mqttPort);
+  j += ",\"mqtt_tls\":" + String(c.mqttTlsRequired ? "true" : "false");
+  j += ",\"mqtt_reconnect_min_ms\":" + String(c.mqttReconnectMinMs);
+  j += ",\"mqtt_reconnect_max_ms\":" + String(c.mqttReconnectMaxMs);
+  j += ",\"mqtt_telemetry_period_ms\":" + String(c.mqttTelemetryPeriodMs);
+  j += ",\"mqtt_health_period_ms\":" + String(c.mqttHealthPeriodMs);
+  j += ",\"mqtt_retain_telemetry\":" + String(c.mqttRetainTelemetry ? "true" : "false");
+  j += ",\"mqtt_retain_availability\":" + String(c.mqttRetainAvailability ? "true" : "false");
+  j += ",\"mqtt_rotation_days\":" + String(c.mqttCredentialRotationDays);
+  j += ",\"vox_enabled\":" + String(c.voxEnabled ? "true" : "false");
+  j += ",\"vox_threshold\":" + String(c.voxThreshold, 4);
+  j += ",\"vox_hang_ms\":" + String(c.voxHangMs);
+  j += ",\"aec_enabled\":" + String(c.aecEnabled ? "true" : "false");
+  j += ",\"usb_monitor\":" + String(c.usbMonitor ? "true" : "false");
+  j += ",\"usb_transport\":" + String(c.usbPlaybackTransport ? "true" : "false");
+  j += ",\"loopback\":" + String(c.audioLoopback ? "true" : "false");
+  j += ",\"adr_enabled\":" + String(c.loraAdrEnabled ? "true" : "false");
+  j += ",\"hop_enabled\":" + String(c.loraHopEnabled ? "true" : "false");
+  j += ",\"hop_profile\":" + String(c.loraHopChannelProfile);
+  j += ",\"ble_enabled\":" + String(c.sensorReaderEnabled ? "true" : "false");
+  j += ",\"ble_scan_interval_ms\":" + String(c.sensorScanIntervalMs);
+  j += ",\"ble_scan_window_ms\":" + String(c.sensorScanWindowMs);
+  j += ",\"ble_scan_duration_ms\":" + String(c.sensorScanDurationMs);
+  j += ",\"ble_connect_timeout_ms\":" + String(c.sensorConnectTimeoutMs);
+  j += ",\"ble_eviction_ms\":" + String(c.sensorNodeEvictionMs);
+  j += ",\"ble_max_nodes\":" + String(c.sensorMaxNodes);
+  j += ",\"ble_encryption\":" + String(c.sensorRequireEncryption ? "true" : "false");
+  j += ",\"ble_failure_threshold\":" + String(c.blePairingFailureThreshold);
+  j += ",\"ble_block_ms\":" + String(c.blePairingBlockMs);
+  j += ",\"ble_keep_awake\":" + String(c.sensorKeepAwake ? "true" : "false");
+  j += ",\"web_session_timeout_ms\":" + String(c.webSessionTimeoutMs);
+  j += ",\"web_auth_rate_limit_ms\":" + String(c.webAuthRateLimitMs);
+  j += ",\"csrf_policy\":" + String(c.csrfPolicy);
+  j += ",\"ble_pairing_policy\":" + String(c.blePairingPolicy);
+  j += ",\"ecdh_rekey_policy\":" + String(c.ecdhRekeyPolicy);
+  j += ",\"replay_window_bits\":" + String(c.replayWindowBits);
   j += ",\"wake_period_sec\":" + String(c.wakePeriodSec);
   j += ",\"deep_sleep_enabled\":" + String(c.deepSleepEnabled ? "true" : "false");
   j += ",\"deep_sleep_idle_sec\":" + String(c.deepSleepIdleMs / 1000UL);
@@ -3405,13 +3609,13 @@ void WebUi::handleAudioSource() {
 }
 
 void WebUi::handleSensorSpool() {
-  if (!rateLimit(lastSensorNodesMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorNodesMs_, gConfig.webAuthRateLimitMs)) return;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", sensorSpool.statusJson());
 }
 
 void WebUi::handleSensorSpoolClear() {
-  if (!rateLimit(lastSensorActionMs_, Config::WEB_RATE_LIMIT_MS)) return;
+  if (!rateLimit(lastSensorActionMs_, gConfig.webAuthRateLimitMs)) return;
   if (!sensorSpool.clear()) {
     server_.send(503, "application/json", "{\"ok\":false,\"error\":\"spool clear failed\"}");
     return;

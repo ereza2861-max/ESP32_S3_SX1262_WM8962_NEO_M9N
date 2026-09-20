@@ -270,7 +270,12 @@ bool AudioManager::begin() {
 
   initialized_ = true;
   (void)setRecordSource(gConfig.audioRecordSource);
-  setVolume(volume_);
+  (void)setVox(gConfig.voxEnabled, gConfig.voxThreshold, gConfig.voxHangMs);
+  (void)setAec(gConfig.aecEnabled);
+  (void)setUsbMonitor(gConfig.usbMonitor);
+  (void)setUsbPlaybackTransport(gConfig.usbPlaybackTransport);
+  (void)setLoopback(gConfig.audioLoopback);
+  setVolume(gConfig.volume);
   StateLock lock(gState);
   if (lock.ok()) {
     gState.codecReady = true;

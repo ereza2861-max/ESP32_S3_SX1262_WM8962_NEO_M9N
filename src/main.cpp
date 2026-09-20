@@ -79,7 +79,6 @@ static uint16_t lastBuzzerSosSeq = 0;
 static uint32_t lastLogPersistMs = 0;
 static size_t lastPersistedLoraLogCount = 0;
 static size_t lastPersistedHealthLogCount = 0;
-static uint32_t lastRangeReportMs = 0;
 
 static void pulseAuxiliary(uint16_t ms) {
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, HIGH);
@@ -1195,7 +1194,13 @@ void setup() {
     Serial.println("EMERGENCY WIPE: SOS+PTT held for 10s");
     executeEmergencyWipe();
   }
+  gConfigMutex = xSemaphoreCreateMutex();
+  if (!gConfigMutex) {
+    Serial.println("FATAL: config mutex initialization");
+    for (;;) delay(1000);
+  }
   gConfig.load();
+  gConfigGeneration.store(1, std::memory_order_release);
   watchdogInit();
 
   gState.mutex = xSemaphoreCreateMutex();
@@ -1343,21 +1348,13 @@ void loop() {
     }
   }
 
-  bool rangeTest = false;
-  {
-    StateLock lock(gState);
-    if (lock.ok()) rangeTest = gState.rangeTest;
-  }
   bool lorawanJoined = false;
   {
     StateLock lock(gState);
     if (lock.ok()) lorawanJoined = gState.lorawanJoined;
   }
-  if (!lorawanJoined &&
-      (now - lastReport >= Config::GPS_REPORT_PERIOD_MS ||
-       (rangeTest && now - lastRangeReportMs >= Config::RANGE_TEST_PERIOD_MS))) {
+  if (!lorawanJoined && now - lastReport >= Config::GPS_REPORT_PERIOD_MS) {
     lastReport = now;
-    lastRangeReportMs = now;
     lora.sendPosition();
   }
 

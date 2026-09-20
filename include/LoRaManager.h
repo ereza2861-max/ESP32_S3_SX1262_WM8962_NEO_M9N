@@ -61,6 +61,7 @@ public:
   bool captureStop();
   bool captureActive() const;
   String captureDumpJson() const;
+  String rangeTestStatusJson() const;
   String ecdhStatusJson() const;
   bool setAdrEnabled(bool enabled);
   bool adrEnabled() const { return adrEnabled_; }
@@ -218,6 +219,27 @@ private:
   size_t captureNext_ = 0;
   size_t captureCount_ = 0;
   uint32_t captureUntilMs_ = 0;
+  void serviceRangeTest();
+  bool sendRangeTestPacket();
+  bool sendRangeTestAck(uint32_t destination, uint32_t counter,
+                        uint32_t txTimestampMs);
+  void handleRangeTestPayload(uint32_t sourceId, const uint8_t* payload,
+                              size_t len, int16_t rssi, float snr);
+  std::atomic<uint32_t> rangeTestCounter_{0};
+  std::atomic<uint32_t> rangeTestStartMs_{0};
+  std::atomic<uint32_t> rangeTestEndMs_{0};
+  std::atomic<uint32_t> rangeTestLastTxMs_{0};
+  std::atomic<uint32_t> rangeTestTx_{0};
+  std::atomic<uint32_t> rangeTestRx_{0};
+  std::atomic<uint32_t> rangeTestAck_{0};
+  std::atomic<uint32_t> rangeTestLastAckCounter_{0};
+  std::atomic<int16_t> rangeTestLastRssi_{-127};
+  std::atomic<float> rangeTestLastSnr_{-20.0f};
+  std::atomic<bool> rangeTestWasActive_{false};
+  bool rangeAckPending_ = false;
+  uint32_t rangeAckSourceId_ = 0;
+  uint32_t rangeAckCounter_ = 0;
+  uint32_t rangeAckTxTimestampMs_ = 0;
   uint32_t replayRejects_ = 0;
   uint32_t dedupHits_ = 0;
   uint32_t dedupMisses_ = 0;

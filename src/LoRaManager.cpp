@@ -340,7 +340,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   const uint16_t delta = static_cast<uint16_t>(seq - slot->highestSeq);
   if (delta != 0 && delta < 0x8000U) {
     const uint8_t shift = static_cast<uint8_t>(
-        min<uint16_t>(delta, Config::LORA_REPLAY_WINDOW_BITS));
+        min<uint16_t>(delta, gConfig.replayWindowBits));
     slot->bitmap = shift >= 32 ? 1U : (slot->bitmap << shift) | 1U;
     slot->highestSeq = seq;
     slot->highestPayloadHash = payloadHash;
@@ -359,7 +359,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   }
 
   const uint16_t age = static_cast<uint16_t>(slot->highestSeq - seq);
-  if (age >= Config::LORA_REPLAY_WINDOW_BITS &&
+  if (age >= gConfig.replayWindowBits &&
       age < 0x8000U) {
     ++replayRejects_;
     return true;
@@ -369,7 +369,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     return true;
   }
   const uint8_t clampedAge = static_cast<uint8_t>(
-      min<uint16_t>(age, Config::LORA_REPLAY_WINDOW_BITS - 1U));
+      min<uint16_t>(age, static_cast<uint16_t>(gConfig.replayWindowBits - 1U)));
   const uint32_t bit = 1UL << clampedAge;
   if (slot->bitmap & bit) {
     ++replayRejects_;
@@ -982,9 +982,18 @@ bool LoRaManager::retuneToHopChannelLocked(uint8_t index) {
     count = gState.hopChannelCount;
     if (count == 0 || index >= count) return false;
   }
-  const float freq = Config::LORA_MIN_FREQ_MHZ +
-                     static_cast<float>(index) * Config::HOP_CHANNEL_STEP_MHZ;
-  if (freq > Config::LORA_MAX_FREQ_MHZ) return false;
+  uint8_t channel = 0;
+  {
+    StateLock lock(gState);
+    if (!lock.ok() || index >= gState.hopChannelCount ||
+        index >= Config::HOP_CHANNEL_MAX)
+      return false;
+    channel = gState.hopChannelList[index];
+  }
+  if (channel >= Config::HOP_CHANNEL_MAX) return false;
+  const float freq = Config::HOP_CHANNEL_FREQ_MHZ[channel];
+  if (!isfinite(freq) || freq < Config::LORA_MIN_FREQ_MHZ ||
+      freq > Config::LORA_MAX_FREQ_MHZ) return false;
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
   return radio_.setFrequency(freq) == RADIOLIB_ERR_NONE &&
@@ -1021,7 +1030,7 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
   {
     StateLock lock(gState);
     if (!lock.ok()) return false;
-    hopOn = gState.hopEnabled && gState.hopChannelCount > 0;
+    hopOn = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
   }
 
   bool textStateHeld = false;
@@ -2151,7 +2160,7 @@ void LoRaManager::serviceSosRetry() {
   bool hopEnabled = false;
   {
     StateLock lock(gState);
-    if (lock.ok()) hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
+    if (lock.ok()) hopEnabled = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
   }
   if (hopEnabled && retryPacket.length() >= PACKET_HEADER_V2 &&
       static_cast<uint8_t>(retryPacket[1]) == Config::LORA_PROTOCOL_VERSION) {
@@ -2295,7 +2304,7 @@ void LoRaManager::serviceTextRetry() {
   {
     StateLock stateLock(gState);
     if (stateLock.ok())
-      hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
+      hopEnabled = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
   }
   {
     if (!textStateMutex_ ||
@@ -2614,6 +2623,8 @@ bool LoRaManager::processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
       if (lock.ok()) gState.lastError = "ECDH beacon key derivation failed";
       return false;
     }
+    ecdhKeyEpoch_ = LoRaEcdhRekey::epochNumber(beacon.epochSec);
+    ecdhActive_ = true;
   }
   return true;
 }
@@ -2629,6 +2640,16 @@ bool LoRaManager::begin() {
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_.store(sourceIdFromCallsign(gConfig.callsign), std::memory_order_release);
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) return false;
+    const uint8_t profileCount = min<uint8_t>(
+        max<uint8_t>(1U, gConfig.loraHopChannelProfile),
+        Config::HOP_CHANNEL_MAX);
+    gState.hopChannelCount = profileCount;
+    for (uint8_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
+      gState.hopChannelList[i] = i < profileCount ? i : 0;
+  }
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   // DECISION: fail closed if ECDH key material cannot be initialized while
   // the feature flag is enabled; do not start a partially initialized node.
@@ -2640,13 +2661,14 @@ bool LoRaManager::begin() {
   const uint32_t bootEpochSec = currentEpochSec();
   ecdhKeyEpoch_ = bootEpochSec != 0
       ? LoRaEcdhRekey::epochNumber(bootEpochSec) : 0;
-  ecdhActive_ = ecdhKeyMaterial_.hasEphemeralKey();
+  ecdhActive_ = false;
 #endif
   if (rtcRadioState.magic == RTC_RADIO_MAGIC && rtcRadioState.crc == stateCrc(rtcRadioState)) {
     hopFrame_ = rtcRadioState.hopFrame;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
     ecdhKeyEpoch_ = rtcRadioState.ecdhKeyEpoch;
-    ecdhActive_ = rtcRadioState.ecdhActive;
+    // RTC state cannot prove that a peer handshake for the current epoch
+    // survived reset. Require a fresh authenticated beacon before activation.
 #endif
     sosSeq_.store(rtcRadioState.sosSeq, std::memory_order_release);
     sosRetryCount_ = rtcRadioState.sosRetryCount;
@@ -2781,11 +2803,17 @@ void LoRaManager::task() {
           peer.sourceId, peer.epochSec, keyProbe);
       mbedtls_platform_zeroize(keyProbe, sizeof(keyProbe));
       if (!haveKey &&
-          !ecdhKeyMaterial_.deriveSessionKey(
+          ecdhKeyMaterial_.deriveSessionKey(
               peer.ephemeralPublic, sourceId_, peer.sourceId,
               peer.epochSec)) {
+        ecdhActive_ = true;
+        ecdhKeyEpoch_ = ecdhKeyMaterial_.ephemeralEpoch();
+      } else if (!haveKey) {
         StateLock lock(gState);
         if (lock.ok()) gState.lastError = "ECDH beacon key derivation failed";
+      } else if (ecdhKeyMaterial_.ephemeralEpoch() ==
+                 LoRaEcdhRekey::epochNumber(peer.epochSec)) {
+        ecdhActive_ = true;
       }
     }
   }
@@ -2807,8 +2835,11 @@ void LoRaManager::task() {
     if (now - scanner_.lastSampleMs < scanner_.dwellMs) return;
     if (xSemaphoreTake(mutex_, 0) != pdTRUE) return;
     const uint8_t index = scanner_.index;
-    const float freq = Config::LORA_MIN_FREQ_MHZ +
-                       static_cast<float>(index) * Config::HOP_CHANNEL_STEP_MHZ;
+    if (index >= Config::HOP_CHANNEL_MAX) {
+      xSemaphoreGive(mutex_);
+      return;
+    }
+    const float freq = Config::HOP_CHANNEL_FREQ_MHZ[index];
     int16_t scanSt = RADIOLIB_ERR_UNKNOWN;
     int16_t rxSt = RADIOLIB_ERR_NONE;
     int16_t rssi = -127;
@@ -2895,7 +2926,7 @@ void LoRaManager::task() {
     {
       StateLock lock(gState);
       if (lock.ok()) {
-        hopEnabled = gState.hopEnabled && gState.hopChannelCount > 0;
+        hopEnabled = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
         busy = gState.ptt || gState.recording;
       }
     }
@@ -2945,11 +2976,13 @@ void LoRaManager::task() {
       if (ecdhKeyMaterial_.hasEphemeralKey() &&
           ecdhKeyMaterial_.ephemeralEpoch() == epoch) {
         ecdhKeyEpoch_ = epoch;
-        ecdhActive_ = true;
+        // Activation requires a peer handshake in this epoch; possession of
+        // our own ephemeral key is not sufficient.
       }
     }
   }
 #endif
+  serviceRangeTest();
   serviceNeighborBeacon();
   serviceVoiceReorder();
 
@@ -3099,9 +3132,15 @@ void LoRaManager::task() {
         hopLastSyncMs_ = millis();
       }
     }
+    const bool rangeTestFrame =
+        authenticatedV3 && type == Config::LORA_TYPE_NEIGHBOR_BEACON &&
+        plainLen >= 2 &&
+        (plain[0] == Config::LORA_RANGE_TEST_MAGIC ||
+         plain[0] == Config::LORA_RANGE_TEST_ACK_MAGIC);
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
     const bool ecdhPolicyAccepted =
         authenticatedV5 ||
+        rangeTestFrame ||
         (authenticatedV3 &&
          type == Config::LORA_TYPE_NEIGHBOR_BEACON &&
          processEcdhBeacon(rxSourceId, epochSec, plain, plainLen));
@@ -3170,6 +3209,10 @@ void LoRaManager::task() {
     {
       StateLock stateLock(gState);
       if (stateLock.ok()) pttOrRecording = gState.ptt || gState.recording;
+    }
+    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_NEIGHBOR_BEACON &&
+        !duplicateV2 && rangeTestFrame) {
+      handleRangeTestPayload(rxSourceId, appPayload, appPayloadLen, rssi, snr);
     }
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_NEIGHBOR_BEACON && !duplicateV2 &&
         appPayloadLen >= 8 && appPayload[0] == BEACON_MAGIC) {
@@ -3375,6 +3418,14 @@ void LoRaManager::task() {
     }
   }
   xSemaphoreGive(mutex_);
+
+  if (rangeAckPending_) {
+    const uint32_t destination = rangeAckSourceId_;
+    const uint32_t counter = rangeAckCounter_;
+    const uint32_t txTimestampMs = rangeAckTxTimestampMs_;
+    rangeAckPending_ = false;
+    (void)sendRangeTestAck(destination, counter, txTimestampMs);
+  }
 
   if (sosAckPending_) {
     const uint16_t ackSeq = sosAckPendingSeq_;
@@ -4140,6 +4191,181 @@ String LoRaManager::captureDumpJson() const {
   return out;
 }
 
+void LoRaManager::handleRangeTestPayload(uint32_t sourceId, const uint8_t* payload,
+                                          size_t len, int16_t rssi, float snr) {
+  if (sourceId == 0 || !payload || len < 2 ||
+      payload[1] != Config::LORA_RANGE_TEST_VERSION)
+    return;
+  if (payload[0] == Config::LORA_RANGE_TEST_MAGIC && len == 14) {
+    uint32_t counter = 0;
+    uint32_t txTimestampMs = 0;
+    memcpy(&counter, payload + 2, sizeof(counter));
+    memcpy(&txTimestampMs, payload + 10, sizeof(txTimestampMs));
+    ++rangeTestRx_;
+    rangeTestLastRssi_ = rssi;
+    rangeTestLastSnr_ = snr;
+    StateLock lock(gState);
+    if (lock.ok()) {
+      ++gState.rangeTestRx;
+      gState.rangeTestLastRssi = rssi;
+      gState.rangeTestLastSnr = snr;
+      gState.rangeTestLastMs = millis();
+    }
+    rangeAckSourceId_ = sourceId;
+    rangeAckCounter_ = counter;
+    rangeAckTxTimestampMs_ = txTimestampMs;
+    rangeAckPending_ = true;
+    return;
+  }
+  if (payload[0] == Config::LORA_RANGE_TEST_ACK_MAGIC && len == 14) {
+    uint32_t counter = 0;
+    memcpy(&counter, payload + 2, sizeof(counter));
+    if (counter > rangeTestLastAckCounter_ && counter <= rangeTestCounter_) {
+      rangeTestLastAckCounter_ = counter;
+      ++rangeTestAck_;
+      rangeTestLastRssi_ = rssi;
+      rangeTestLastSnr_ = snr;
+      StateLock lock(gState);
+      if (lock.ok()) {
+        ++gState.rangeTestAck;
+        gState.rangeTestLastRssi = rssi;
+        gState.rangeTestLastSnr = snr;
+        gState.rangeTestLastMs = millis();
+      }
+    }
+  }
+}
+
+bool LoRaManager::sendRangeTestAck(uint32_t destination, uint32_t counter,
+                                   uint32_t txTimestampMs) {
+  uint8_t payload[14] = {};
+  payload[0] = Config::LORA_RANGE_TEST_ACK_MAGIC;
+  payload[1] = Config::LORA_RANGE_TEST_VERSION;
+  memcpy(payload + 2, &counter, sizeof(counter));
+  memcpy(payload + 6, &txTimestampMs, sizeof(txTimestampMs));
+  const uint32_t rxTimestampMs = millis();
+  memcpy(payload + 10, &rxTimestampMs, sizeof(rxTimestampMs));
+
+  uint8_t routed[Config::LORA_MAX_PACKET] = {};
+  const size_t routedLen = addRouteExtension(
+      payload, sizeof(payload), destination, 0, routed, sizeof(routed));
+  uint16_t seq = 0;
+  if (!routedLen || !nextTxSequence(seq)) return false;
+  String packet;
+  const uint32_t epochSec = currentEpochSec();
+  if (!encryptPacketV3(routed, routedLen, Config::LORA_TYPE_NEIGHBOR_BEACON,
+                       seq, computeHopIndex(hopFrame_), epochSec, packet))
+    return false;
+  return transmit(packet, true);
+}
+
+bool LoRaManager::sendRangeTestPacket() {
+  if (!ready_) return false;
+  uint8_t payload[14] = {};
+  payload[0] = Config::LORA_RANGE_TEST_MAGIC;
+  payload[1] = Config::LORA_RANGE_TEST_VERSION;
+  const uint32_t counter = ++rangeTestCounter_;
+  const uint32_t epochSec = currentEpochSec();
+  const uint32_t txTimestampMs = millis();
+  memcpy(payload + 2, &counter, sizeof(counter));
+  memcpy(payload + 6, &epochSec, sizeof(epochSec));
+  memcpy(payload + 10, &txTimestampMs, sizeof(txTimestampMs));
+
+  uint16_t seq = 0;
+  if (!nextTxSequence(seq)) return false;
+  String packet;
+  if (!encryptPacketV3(payload, sizeof(payload), Config::LORA_TYPE_NEIGHBOR_BEACON,
+                       seq, computeHopIndex(hopFrame_), epochSec, packet))
+    return false;
+  if (!transmit(packet, true)) return false;
+  ++rangeTestTx_;
+  rangeTestLastTxMs_ = txTimestampMs;
+  StateLock lock(gState);
+  if (lock.ok()) {
+    ++gState.rangeTestTx;
+    gState.rangeTestLastMs = txTimestampMs;
+  }
+  return true;
+}
+
+void LoRaManager::serviceRangeTest() {
+  bool active = false;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) active = gState.rangeTest;
+  }
+  if (!active) {
+    if (rangeTestWasActive_) {
+      rangeTestWasActive_ = false;
+      rangeTestEndMs_ = millis();
+      StateLock lock(gState);
+      if (lock.ok()) gState.rangeTestLastMs = millis();
+    }
+    return;
+  }
+  if (!rangeTestWasActive_) {
+    rangeTestWasActive_ = true;
+    rangeTestStartMs_ = millis();
+    rangeTestEndMs_ = 0;
+    rangeTestCounter_ = 0;
+    rangeTestTx_ = rangeTestRx_ = rangeTestAck_ = 0;
+    rangeTestLastAckCounter_ = 0;
+    rangeTestLastTxMs_ = 0;
+    rangeTestLastRssi_ = -127;
+    rangeTestLastSnr_ = -20.0f;
+    StateLock lock(gState);
+    if (lock.ok()) {
+      gState.rangeTestTx = 0;
+      gState.rangeTestRx = 0;
+      gState.rangeTestAck = 0;
+      gState.rangeTestStartedMs = rangeTestStartMs_;
+      gState.rangeTestLastMs = rangeTestStartMs_;
+      gState.rangeTestLastRssi = -127;
+      gState.rangeTestLastSnr = -20.0f;
+    }
+  }
+  const uint32_t now = millis();
+  if (now - rangeTestStartMs_ >= Config::RANGE_TEST_MAX_DURATION_MS) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.rangeTest = false;
+    return;
+  }
+  if (rangeTestLastTxMs_ == 0 ||
+      now - rangeTestLastTxMs_ >= Config::RANGE_TEST_PERIOD_MS)
+    (void)sendRangeTestPacket();
+}
+
+String LoRaManager::rangeTestStatusJson() const {
+  const uint32_t now = millis();
+  const bool active = rangeTestWasActive_.load(std::memory_order_acquire);
+  const uint32_t startMs = rangeTestStartMs_.load(std::memory_order_acquire);
+  const uint32_t endMs = rangeTestEndMs_.load(std::memory_order_acquire);
+  const uint32_t tx = rangeTestTx_.load(std::memory_order_acquire);
+  const uint32_t rx = rangeTestRx_.load(std::memory_order_acquire);
+  const uint32_t ack = rangeTestAck_.load(std::memory_order_acquire);
+  const uint32_t lastTxMs = rangeTestLastTxMs_.load(std::memory_order_acquire);
+  const int16_t lastRssi = rangeTestLastRssi_.load(std::memory_order_acquire);
+  const float lastSnr = rangeTestLastSnr_.load(std::memory_order_acquire);
+  const uint32_t durationMs = startMs == 0
+      ? 0
+      : (active ? now - startMs : endMs - startMs);
+  const float per = tx == 0
+      ? 0.0f
+      : 100.0f * static_cast<float>(tx - min(tx, ack)) /
+          static_cast<float>(tx);
+  return String("{\"active\":") + (active ? "true" : "false") +
+         ",\"tx\":" + String(tx) +
+         ",\"rx\":" + String(rx) +
+         ",\"ack\":" + String(ack) +
+         ",\"per\":" + String(per, 2) +
+         ",\"durationMs\":" + String(durationMs) +
+         ",\"startMs\":" + String(startMs) +
+         ",\"lastTxMs\":" + String(lastTxMs) +
+         ",\"lastEventMs\":" + String(startMs == 0 ? 0U : (active ? now : endMs)) +
+         ",\"lastRssi\":" + String(lastRssi) +
+         ",\"lastSnr\":" + String(lastSnr, 1) + "}";
+}
+
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
 String LoRaManager::ecdhStatusJson() const {
   size_t peerCount = 0;
@@ -4182,17 +4408,21 @@ void LoRaManager::serviceAdr() {
   const uint8_t quality = bestNeighborQuality();
   const uint8_t target = quality > 70 ? 7 : (quality >= 40 ? 9 : 11);
   if (target == currentAdrSf_) return;
+  RuntimeConfig configSnapshotValue;
+  uint32_t configGenerationSnapshot = 0;
+  if (!configSnapshot(configSnapshotValue, configGenerationSnapshot)) return;
   if (!mutex_ || xSemaphoreTake(mutex_, 0) != pdTRUE) return;
-  const uint8_t oldSf = gConfig.loraSf;
-  gConfig.loraSf = target;
+  const uint8_t oldSf = configSnapshotValue.loraSf;
+  RuntimeConfig candidate = configSnapshotValue;
+  candidate.loraSf = target;
   currentAdrSf_ = target;
-  bool ok = false;
+  bool ok = candidate.validRadio();
   {
     SpiLock spiLock(pdMS_TO_TICKS(100));
     if (spiLock.ok()) {
       const int16_t st = radio_.begin(
-          gConfig.loraFreqMHz, gConfig.loraBwKHz, target,
-          gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
+          candidate.loraFreqMHz, candidate.loraBwKHz, target,
+          candidate.loraCr, candidate.loraSyncWord, candidate.loraPowerDbm,
           Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
       if (st == RADIOLIB_ERR_NONE) {
         radio_.setPacketReceivedAction(onDio1);
@@ -4200,10 +4430,8 @@ void LoRaManager::serviceAdr() {
       }
     }
   }
-  if (!ok) {
-    gConfig.loraSf = oldSf;
-    currentAdrSf_ = oldSf;
-  }
+  if (ok && !configCommit(candidate, configGenerationSnapshot)) ok = false;
+  if (!ok) currentAdrSf_ = oldSf;
   xSemaphoreGive(mutex_);
 }
 
@@ -4425,7 +4653,9 @@ void LoRaManager::serviceScheduledMessages() {
 
 
 void LoRaManager::updateSourceId() {
-  const uint32_t next = sourceIdFromCallsign(gConfig.callsign);
+  RuntimeConfig config;
+  if (!configSnapshot(config)) return;
+  const uint32_t next = sourceIdFromCallsign(config.callsign);
   if (next == 0) return;
   if (textStateMutex_ &&
       xSemaphoreTake(textStateMutex_, pdMS_TO_TICKS(50)) == pdTRUE) {

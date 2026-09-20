@@ -158,6 +158,13 @@ struct RuntimeState {
   uint32_t rxPackets = 0;
   uint32_t rxDrops = 0;
   uint32_t audioDrops = 0;
+  uint32_t rangeTestTx = 0;
+  uint32_t rangeTestRx = 0;
+  uint32_t rangeTestAck = 0;
+  uint32_t rangeTestStartedMs = 0;
+  uint32_t rangeTestLastMs = 0;
+  int16_t rangeTestLastRssi = -127;
+  float rangeTestLastSnr = -20.0f;
   uint32_t voiceTxPackets = 0;
   uint32_t voiceRxPackets = 0;
   uint32_t voiceDrops = 0;

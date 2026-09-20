@@ -24,6 +24,51 @@ RuntimeConfig gConfig{
     "",
     2};
 
+SemaphoreHandle_t gConfigMutex = nullptr;
+std::atomic<uint32_t> gConfigGeneration{0};
+
+bool configSnapshot(RuntimeConfig& out) {
+  uint32_t unusedGeneration = 0;
+  return configSnapshot(out, unusedGeneration);
+}
+
+bool configSnapshot(RuntimeConfig& out, uint32_t& generation) {
+  if (!gConfigMutex ||
+      xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(100)) != pdTRUE)
+    return false;
+  out = gConfig;
+  generation = gConfigGeneration.load(std::memory_order_acquire);
+  xSemaphoreGive(gConfigMutex);
+  return true;
+}
+
+bool configCommit(const RuntimeConfig& candidate) {
+  return configCommit(candidate, configGeneration());
+}
+
+bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
+  if (!gConfigMutex ||
+      xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+    return false;
+  if (gConfigGeneration.load(std::memory_order_acquire) != expectedGeneration) {
+    xSemaphoreGive(gConfigMutex);
+    return false;
+  }
+  const bool ok = candidate.save();
+  if (ok) {
+    gConfig = candidate;
+    uint32_t next = expectedGeneration + 1U;
+    if (next == 0) next = 1;
+    gConfigGeneration.store(next, std::memory_order_release);
+  }
+  xSemaphoreGive(gConfigMutex);
+  return ok;
+}
+
+uint32_t configGeneration() {
+  return gConfigGeneration.load(std::memory_order_acquire);
+}
+
 namespace {
 constexpr char NVS_NS[] = "fieldradio";
 constexpr uint32_t CONFIG_VERSION = Config::CONFIG_VERSION;
@@ -208,6 +253,44 @@ void RuntimeConfig::load() {
       prefs.getUInt("bat_crit_delay", criticalShutdownDelayMs);
   const float savedBatteryLow = prefs.getFloat("bat_low", batteryLowThreshold);
   const float savedBatteryCritical = prefs.getFloat("bat_critical", batteryCriticalThreshold);
+  const String savedMqttHost = prefs.getString("mqtt_host", mqttHost);
+  const uint16_t savedMqttPort = prefs.getUShort("mqtt_port", mqttPort);
+  const bool savedMqttTls = prefs.getBool("mqtt_tls", mqttTlsRequired);
+  const uint32_t savedMqttRetryMin = prefs.getUInt("mqtt_rmin", mqttReconnectMinMs);
+  const uint32_t savedMqttRetryMax = prefs.getUInt("mqtt_rmax", mqttReconnectMaxMs);
+  const uint32_t savedMqttTelemetry = prefs.getUInt("mqtt_tlm", mqttTelemetryPeriodMs);
+  const uint32_t savedMqttHealth = prefs.getUInt("mqtt_hlt", mqttHealthPeriodMs);
+  const bool savedMqttRetainTelemetry = prefs.getBool("mqtt_rt", mqttRetainTelemetry);
+  const bool savedMqttRetainAvailability = prefs.getBool("mqtt_ra", mqttRetainAvailability);
+  const uint16_t savedMqttRotation = prefs.getUShort("mqtt_rot", mqttCredentialRotationDays);
+  const bool savedVox = prefs.getBool("vox_en", voxEnabled);
+  const float savedVoxThreshold = prefs.getFloat("vox_thr", voxThreshold);
+  const uint32_t savedVoxHang = prefs.getUInt("vox_hang", voxHangMs);
+  const bool savedAec = prefs.getBool("aec_en", aecEnabled);
+  const bool savedUsbMonitor = prefs.getBool("usb_mon", usbMonitor);
+  const bool savedUsbTransport = prefs.getBool("usb_tx", usbPlaybackTransport);
+  const bool savedLoopback = prefs.getBool("loopback", audioLoopback);
+  const bool savedAdr = prefs.getBool("lora_adr", loraAdrEnabled);
+  const bool savedHop = prefs.getBool("lora_hop", loraHopEnabled);
+  const uint8_t savedHopProfile = prefs.getUChar("lora_hprof", loraHopChannelProfile);
+  const bool savedRange = prefs.getBool("lora_range", loraRangeTestMode);
+  const bool savedSensorEnabled = prefs.getBool("ble_en", sensorReaderEnabled);
+  const uint32_t savedScanInterval = prefs.getUInt("ble_si", sensorScanIntervalMs);
+  const uint16_t savedScanWindow = prefs.getUShort("ble_sw", sensorScanWindowMs);
+  const uint32_t savedScanDuration = prefs.getUInt("ble_sd", sensorScanDurationMs);
+  const uint32_t savedConnectTimeout = prefs.getUInt("ble_ct", sensorConnectTimeoutMs);
+  const uint32_t savedEviction = prefs.getUInt("ble_ev", sensorNodeEvictionMs);
+  const uint8_t savedMaxNodes = prefs.getUChar("ble_max", sensorMaxNodes);
+  const bool savedBleEncryption = prefs.getBool("ble_enc", sensorRequireEncryption);
+  const uint8_t savedBleFailures = prefs.getUChar("ble_fail", blePairingFailureThreshold);
+  const uint32_t savedBleBlock = prefs.getUInt("ble_block", blePairingBlockMs);
+  const bool savedKeepAwake = prefs.getBool("ble_awake", sensorKeepAwake);
+  const uint32_t savedSessionTimeout = prefs.getUInt("web_sto", webSessionTimeoutMs);
+  const uint32_t savedAuthRate = prefs.getUInt("web_rl", webAuthRateLimitMs);
+  const uint8_t savedCsrf = prefs.getUChar("web_csrf", csrfPolicy);
+  const uint8_t savedPairPolicy = prefs.getUChar("ble_policy", blePairingPolicy);
+  const uint8_t savedEcdhPolicy = prefs.getUChar("ecdh_policy", ecdhRekeyPolicy);
+  const uint8_t savedReplayWindow = prefs.getUChar("replay_win", replayWindowBits);
   prefs.end();
 
   RuntimeConfig candidate = *this;
@@ -251,6 +334,44 @@ void RuntimeConfig::load() {
   candidate.criticalShutdownDelayMs = savedCriticalShutdownMs;
   candidate.batteryLowThreshold = savedBatteryLow;
   candidate.batteryCriticalThreshold = savedBatteryCritical;
+  candidate.mqttHost = savedMqttHost;
+  candidate.mqttPort = savedMqttPort;
+  candidate.mqttTlsRequired = savedMqttTls;
+  candidate.mqttReconnectMinMs = savedMqttRetryMin;
+  candidate.mqttReconnectMaxMs = savedMqttRetryMax;
+  candidate.mqttTelemetryPeriodMs = savedMqttTelemetry;
+  candidate.mqttHealthPeriodMs = savedMqttHealth;
+  candidate.mqttRetainTelemetry = savedMqttRetainTelemetry;
+  candidate.mqttRetainAvailability = savedMqttRetainAvailability;
+  candidate.mqttCredentialRotationDays = savedMqttRotation;
+  candidate.voxEnabled = savedVox;
+  candidate.voxThreshold = savedVoxThreshold;
+  candidate.voxHangMs = savedVoxHang;
+  candidate.aecEnabled = savedAec;
+  candidate.usbMonitor = savedUsbMonitor;
+  candidate.usbPlaybackTransport = savedUsbTransport;
+  candidate.audioLoopback = savedLoopback;
+  candidate.loraAdrEnabled = savedAdr;
+  candidate.loraHopEnabled = savedHop;
+  candidate.loraHopChannelProfile = savedHopProfile;
+  candidate.loraRangeTestMode = savedRange;
+  candidate.sensorReaderEnabled = savedSensorEnabled;
+  candidate.sensorScanIntervalMs = savedScanInterval;
+  candidate.sensorScanWindowMs = savedScanWindow;
+  candidate.sensorScanDurationMs = savedScanDuration;
+  candidate.sensorConnectTimeoutMs = savedConnectTimeout;
+  candidate.sensorNodeEvictionMs = savedEviction;
+  candidate.sensorMaxNodes = savedMaxNodes;
+  candidate.sensorRequireEncryption = savedBleEncryption;
+  candidate.blePairingFailureThreshold = savedBleFailures;
+  candidate.blePairingBlockMs = savedBleBlock;
+  candidate.sensorKeepAwake = savedKeepAwake;
+  candidate.webSessionTimeoutMs = savedSessionTimeout;
+  candidate.webAuthRateLimitMs = savedAuthRate;
+  candidate.csrfPolicy = savedCsrf;
+  candidate.blePairingPolicy = savedPairPolicy;
+  candidate.ecdhRekeyPolicy = savedEcdhPolicy;
+  candidate.replayWindowBits = savedReplayWindow;
   if (version == 4) {
     // v4 had no BLE pairing field. Keep legacy values and initialize the
     // pairing flag from the compile-time default; no passkey is migrated.
@@ -318,6 +439,70 @@ void RuntimeConfig::load() {
       batteryCriticalThreshold = candidate.batteryCriticalThreshold;
     }
   deepSleepEnabled = candidate.deepSleepEnabled;
+  if (candidate.mqttHost.length() <= 253 && candidate.mqttHost.indexOf('|') < 0)
+    mqttHost = candidate.mqttHost;
+  if (candidate.mqttPort > 0) mqttPort = candidate.mqttPort;
+  if (candidate.mqttReconnectMinMs >= 1000UL &&
+      candidate.mqttReconnectMaxMs >= candidate.mqttReconnectMinMs &&
+      candidate.mqttReconnectMaxMs <= 3600000UL) {
+    mqttReconnectMinMs = candidate.mqttReconnectMinMs;
+    mqttReconnectMaxMs = candidate.mqttReconnectMaxMs;
+  }
+  if (candidate.mqttTelemetryPeriodMs >= 1000UL && candidate.mqttTelemetryPeriodMs <= 86400000UL)
+    mqttTelemetryPeriodMs = candidate.mqttTelemetryPeriodMs;
+  if (candidate.mqttHealthPeriodMs >= 1000UL && candidate.mqttHealthPeriodMs <= 86400000UL)
+    mqttHealthPeriodMs = candidate.mqttHealthPeriodMs;
+  mqttTlsRequired = candidate.mqttTlsRequired;
+  mqttRetainTelemetry = candidate.mqttRetainTelemetry;
+  mqttRetainAvailability = candidate.mqttRetainAvailability;
+  if (candidate.mqttCredentialRotationDays >= 1 && candidate.mqttCredentialRotationDays <= 3650)
+    mqttCredentialRotationDays = candidate.mqttCredentialRotationDays;
+  voxEnabled = candidate.voxEnabled;
+  if (candidate.voxThreshold >= 0.005f && candidate.voxThreshold <= 1.0f) voxThreshold = candidate.voxThreshold;
+  if (candidate.voxHangMs >= 50U && candidate.voxHangMs <= 10000U) voxHangMs = candidate.voxHangMs;
+  aecEnabled = candidate.aecEnabled;
+  usbMonitor = candidate.usbMonitor;
+  usbPlaybackTransport = candidate.usbPlaybackTransport;
+  audioLoopback = candidate.audioLoopback;
+  loraAdrEnabled = candidate.loraAdrEnabled;
+  loraHopEnabled = candidate.loraHopEnabled;
+  if (candidate.loraHopChannelProfile >= 1 && candidate.loraHopChannelProfile <= Config::HOP_CHANNEL_MAX)
+    loraHopChannelProfile = candidate.loraHopChannelProfile;
+  loraRangeTestMode = candidate.loraRangeTestMode;
+  sensorReaderEnabled = candidate.sensorReaderEnabled;
+  if (candidate.sensorScanIntervalMs >= 100 && candidate.sensorScanIntervalMs <= 60000 &&
+      candidate.sensorScanWindowMs > 0 && candidate.sensorScanWindowMs <= candidate.sensorScanIntervalMs) {
+    sensorScanIntervalMs = candidate.sensorScanIntervalMs;
+    sensorScanWindowMs = candidate.sensorScanWindowMs;
+  }
+  if (candidate.sensorScanDurationMs >= 100 && candidate.sensorScanDurationMs <= 60000)
+    sensorScanDurationMs = candidate.sensorScanDurationMs;
+  if (candidate.sensorConnectTimeoutMs >= 500 && candidate.sensorConnectTimeoutMs <= 30000)
+    sensorConnectTimeoutMs = candidate.sensorConnectTimeoutMs;
+  if (candidate.sensorNodeEvictionMs >= 10000 && candidate.sensorNodeEvictionMs <= 7UL * 86400000UL)
+    sensorNodeEvictionMs = candidate.sensorNodeEvictionMs;
+  if (candidate.sensorMaxNodes >= 1 && candidate.sensorMaxNodes <= Config::SENSOR_MAX_NODES_VALUE)
+    sensorMaxNodes = candidate.sensorMaxNodes;
+  sensorRequireEncryption = candidate.sensorRequireEncryption;
+  if (candidate.blePairingFailureThreshold >= 1 && candidate.blePairingFailureThreshold <= 20)
+    blePairingFailureThreshold = candidate.blePairingFailureThreshold;
+  if (candidate.blePairingBlockMs >= 1000 && candidate.blePairingBlockMs <= 86400000UL)
+    blePairingBlockMs = candidate.blePairingBlockMs;
+  sensorKeepAwake = candidate.sensorKeepAwake;
+  if (candidate.webSessionTimeoutMs >= 60000UL && candidate.webSessionTimeoutMs <= 86400000UL)
+    webSessionTimeoutMs = candidate.webSessionTimeoutMs;
+  if (candidate.webAuthRateLimitMs >= 100 && candidate.webAuthRateLimitMs <= 600000UL)
+    webAuthRateLimitMs = candidate.webAuthRateLimitMs;
+  // CSRF-disabled mode is not a production-safe runtime policy. Treat
+  // legacy/invalid value 2 as the strict default during load.
+  if (candidate.csrfPolicy <= 1) csrfPolicy = candidate.csrfPolicy;
+  else csrfPolicy = 0;
+  if (candidate.blePairingPolicy <= 1) blePairingPolicy = candidate.blePairingPolicy;
+  if (candidate.ecdhRekeyPolicy <= 1) ecdhRekeyPolicy = candidate.ecdhRekeyPolicy;
+  // Replay acceptance is deliberately fixed to the 32-bit bitmap used by
+  // LoRaManager; accepting a smaller persisted value would silently change
+  // the security window.
+  replayWindowBits = Config::LORA_REPLAY_WINDOW_BITS;
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
   uint8_t passwordSaltCheck[PASSWORD_SALT_BYTES] = {};
   if (hexDecode(candidate.webPasswordSaltHex, passwordSaltCheck, sizeof(passwordSaltCheck)) &&
@@ -360,6 +545,27 @@ bool RuntimeConfig::save() const {
       batteryCriticalThreshold < 2.5f ||
       batteryLowThreshold <= batteryCriticalThreshold ||
       batteryLowThreshold > 4.2f ||
+      (mqttEnabled && (mqttHost.isEmpty() || mqttHost.length() > 253 || mqttPort == 0)) ||
+      mqttReconnectMinMs < 1000UL || mqttReconnectMaxMs < mqttReconnectMinMs ||
+      mqttReconnectMaxMs > 3600000UL ||
+      mqttTelemetryPeriodMs < 1000UL || mqttTelemetryPeriodMs > 86400000UL ||
+      mqttHealthPeriodMs < 1000UL || mqttHealthPeriodMs > 86400000UL ||
+      mqttCredentialRotationDays < 1 || mqttCredentialRotationDays > 3650 ||
+      voxThreshold < 0.005f || voxThreshold > 1.0f ||
+      voxHangMs < 50U || voxHangMs > 10000U ||
+      loraHopChannelProfile < 1 || loraHopChannelProfile > Config::HOP_CHANNEL_MAX ||
+      sensorScanIntervalMs < 100 || sensorScanIntervalMs > 60000 ||
+      sensorScanWindowMs == 0 || sensorScanWindowMs > sensorScanIntervalMs ||
+      sensorScanDurationMs < 100 || sensorScanDurationMs > 60000 ||
+      sensorConnectTimeoutMs < 500 || sensorConnectTimeoutMs > 30000 ||
+      sensorNodeEvictionMs < 10000 || sensorNodeEvictionMs > 7UL * 86400000UL ||
+      sensorMaxNodes < 1 || sensorMaxNodes > Config::SENSOR_MAX_NODES_VALUE ||
+      blePairingFailureThreshold < 1 || blePairingFailureThreshold > 20 ||
+      blePairingBlockMs < 1000 || blePairingBlockMs > 86400000UL ||
+      webSessionTimeoutMs < 60000UL || webSessionTimeoutMs > 86400000UL ||
+      webAuthRateLimitMs < 100 || webAuthRateLimitMs > 600000UL ||
+      csrfPolicy > 1 || blePairingPolicy > 1 || ecdhRekeyPolicy > 1 ||
+      replayWindowBits < 1 || replayWindowBits > Config::LORA_REPLAY_WINDOW_BITS ||
       !isfinite(batteryCalibration) ||
       batteryCalibration < 0.5f || batteryCalibration > 1.5f ||
       !validLoRaWAN() ||
@@ -408,7 +614,45 @@ bool RuntimeConfig::save() const {
              prefs.putUInt("wake_grace", deepSleepWakeGraceMs) > 0 &&
              prefs.putUInt("bat_crit_delay", criticalShutdownDelayMs) > 0 &&
              prefs.putFloat("bat_low", batteryLowThreshold) != 0 &&
-             prefs.putFloat("bat_critical", batteryCriticalThreshold) != 0;
+             prefs.putFloat("bat_critical", batteryCriticalThreshold) != 0 &&
+             prefs.putString("mqtt_host", mqttHost) > 0 &&
+             prefs.putUShort("mqtt_port", mqttPort) > 0 &&
+             prefs.putBool("mqtt_tls", mqttTlsRequired) &&
+             prefs.putUInt("mqtt_rmin", mqttReconnectMinMs) > 0 &&
+             prefs.putUInt("mqtt_rmax", mqttReconnectMaxMs) > 0 &&
+             prefs.putUInt("mqtt_tlm", mqttTelemetryPeriodMs) > 0 &&
+             prefs.putUInt("mqtt_hlt", mqttHealthPeriodMs) > 0 &&
+             prefs.putBool("mqtt_rt", mqttRetainTelemetry) &&
+             prefs.putBool("mqtt_ra", mqttRetainAvailability) &&
+             prefs.putUShort("mqtt_rot", mqttCredentialRotationDays) > 0 &&
+             prefs.putBool("vox_en", voxEnabled) &&
+             prefs.putFloat("vox_thr", voxThreshold) != 0 &&
+             prefs.putUInt("vox_hang", voxHangMs) > 0 &&
+             prefs.putBool("aec_en", aecEnabled) &&
+             prefs.putBool("usb_mon", usbMonitor) &&
+             prefs.putBool("usb_tx", usbPlaybackTransport) &&
+             prefs.putBool("loopback", audioLoopback) &&
+             prefs.putBool("lora_adr", loraAdrEnabled) &&
+             prefs.putBool("lora_hop", loraHopEnabled) &&
+             prefs.putUChar("lora_hprof", loraHopChannelProfile) > 0 &&
+             prefs.putBool("lora_range", loraRangeTestMode) &&
+             prefs.putBool("ble_en", sensorReaderEnabled) &&
+             prefs.putUInt("ble_si", sensorScanIntervalMs) > 0 &&
+             prefs.putUShort("ble_sw", sensorScanWindowMs) > 0 &&
+             prefs.putUInt("ble_sd", sensorScanDurationMs) > 0 &&
+             prefs.putUInt("ble_ct", sensorConnectTimeoutMs) > 0 &&
+             prefs.putUInt("ble_ev", sensorNodeEvictionMs) > 0 &&
+             prefs.putUChar("ble_max", sensorMaxNodes) > 0 &&
+             prefs.putBool("ble_enc", sensorRequireEncryption) &&
+             prefs.putUChar("ble_fail", blePairingFailureThreshold) > 0 &&
+             prefs.putUInt("ble_block", blePairingBlockMs) > 0 &&
+             prefs.putBool("ble_awake", sensorKeepAwake) &&
+             prefs.putUInt("web_sto", webSessionTimeoutMs) > 0 &&
+             prefs.putUInt("web_rl", webAuthRateLimitMs) > 0 &&
+             prefs.putUChar("web_csrf", csrfPolicy) > 0 &&
+             prefs.putUChar("ble_policy", blePairingPolicy) > 0 &&
+             prefs.putUChar("ecdh_policy", ecdhRekeyPolicy) > 0 &&
+             prefs.putUChar("replay_win", replayWindowBits) > 0;
   if (ok) {
     uint8_t salt[PASSWORD_SALT_BYTES] = {};
     uint8_t hash[32] = {};

@@ -31,7 +31,6 @@ extern StorageManager storage;
 namespace {
 constexpr char NVS_NS[] = "mqtt_creds";
 constexpr time_t MIN_VALID_EPOCH = 1700000000;
-constexpr time_t MQTT_PASSWORD_MAX_AGE_SEC = 90LL * 24LL * 60LL * 60LL;
 constexpr size_t MQTT_MAX_BLOB = 1024;
 constexpr char CRED_MAGIC[] = "FRMQ1";
 }
@@ -200,18 +199,23 @@ bool MqttClientManager::loadCredentials() {
   if (!credentialsProvisioned_ || blob.isEmpty()) return false;
 #else
   if (!credentialsProvisioned_ || blob.isEmpty()) {
-    host_ = Config::MQTT_HOST;
-    port_ = Config::MQTT_PORT;
+    host_ = gConfig.mqttHost;
+    port_ = gConfig.mqttPort;
     user_ = Config::MQTT_USERNAME;
     pass_ = Config::MQTT_PASSWORD;
     return !host_.isEmpty() && port_ != 0;
   }
 #endif
   if (!decryptCredentials(blob)) return false;
+  // Credentials and endpoint are separate runtime concerns. The encrypted
+  // credential blob remains the source of username/password, while endpoint
+  // policy is taken from the validated RuntimeConfig snapshot.
+  host_ = gConfig.mqttHost;
+  port_ = gConfig.mqttPort;
 #if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (port_ == 1883) return false;
+  if (!gConfig.mqttTlsRequired) return false;
 #endif
-  return true;
+  return !host_.isEmpty() && port_ != 0;
 }
 
 bool MqttClientManager::saveCredentials() {
@@ -243,9 +247,9 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
 
   plain_.stop();
   secure_.stop();
-  useTls_ = port_ != 1883;
+  useTls_ = gConfig.mqttTlsRequired;
 #if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (port_ == 1883) return false;
+  if (!gConfig.mqttTlsRequired) return false;
 #endif
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
@@ -257,7 +261,7 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
   client_.setServer(host_.c_str(), port_);
   connected_ = false;
   nextRetryMs_ = 0;
-  retryDelayMs_ = Config::MQTT_RECONNECT_MIN_MS;
+  retryDelayMs_ = gConfig.mqttReconnectMinMs;
   auditEvent("PROVISIONED");
   return true;
 }
@@ -267,7 +271,8 @@ bool MqttClientManager::passwordRotationWarning() const {
   if (passwordProvisionedEpoch_ <= 0) return true;
   const time_t now = time(nullptr);
   return now >= MIN_VALID_EPOCH &&
-         now - passwordProvisionedEpoch_ >= MQTT_PASSWORD_MAX_AGE_SEC;
+         now - passwordProvisionedEpoch_ >=
+             static_cast<time_t>(gConfig.mqttCredentialRotationDays) * 24LL * 60LL * 60LL;
 }
 
 void MqttClientManager::auditEvent(const char* event, int mqttState) {
@@ -311,7 +316,7 @@ bool MqttClientManager::begin() {
 
   plain_.stop();
   secure_.stop();
-  useTls_ = port_ != 1883;
+  useTls_ = gConfig.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     secure_.setHandshakeTimeout(10);
@@ -330,7 +335,7 @@ bool MqttClientManager::connect(const String& host, uint16_t port,
   host_ = host; port_ = port; user_ = user; pass_ = pass;
   plain_.stop();
   secure_.stop();
-  useTls_ = port_ != 1883;
+  useTls_ = gConfig.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     secure_.setHandshakeTimeout(10);
@@ -441,7 +446,7 @@ void MqttClientManager::setEnabled(bool enabled) {
     return;
   }
   nextRetryMs_ = 0;
-  retryDelayMs_ = Config::MQTT_RECONNECT_MIN_MS;
+  retryDelayMs_ = gConfig.mqttReconnectMinMs;
   if (host_.isEmpty()) (void)begin();
 }
 
@@ -481,28 +486,28 @@ void MqttClientManager::task() {
       if (!secure_.connected()) {
         if (!secure_.connect(host_.c_str(), port_)) {
           nextRetryMs_ = millis() + retryDelayMs_;
-          retryDelayMs_ = min<uint32_t>(Config::MQTT_RECONNECT_MAX_MS, retryDelayMs_ * 2U);
+          retryDelayMs_ = min<uint32_t>(gConfig.mqttReconnectMaxMs, retryDelayMs_ * 2U);
           return;
         }
       }
     }
     if (user_.isEmpty()) {
       ok = client_.connect(clientId.c_str(), nullptr, nullptr, willTopic.c_str(),
-                           0, Config::MQTT_RETAIN_AVAILABILITY, willPayload, true);
+                           0, gConfig.mqttRetainAvailability, willPayload, true);
     } else {
       ok = client_.connect(clientId.c_str(), user_.c_str(), pass_.c_str(),
-                           willTopic.c_str(), 0, Config::MQTT_RETAIN_AVAILABILITY,
+                           willTopic.c_str(), 0, gConfig.mqttRetainAvailability,
                            willPayload, true);
     }
     if (ok) {
       connected_ = true;
       auditEvent("CONNECT_OK", client_.state());
-      retryDelayMs_ = Config::MQTT_RECONNECT_MIN_MS;
-      publish(willTopic, "online", Config::MQTT_RETAIN_AVAILABILITY);
+      retryDelayMs_ = gConfig.mqttReconnectMinMs;
+      publish(willTopic, "online", gConfig.mqttRetainAvailability);
     } else {
       if (client_.state() == MQTT_CONNECT_BAD_CREDENTIALS) auditEvent("AUTH_FAIL", client_.state());
       else auditEvent("CONNECT_FAIL", client_.state());
-      retryDelayMs_ = min<uint32_t>(Config::MQTT_RECONNECT_MAX_MS, retryDelayMs_ * 2U);
+      retryDelayMs_ = min<uint32_t>(gConfig.mqttReconnectMaxMs, retryDelayMs_ * 2U);
       nextRetryMs_ = millis() + retryDelayMs_;
     }
     return;
@@ -517,11 +522,20 @@ void MqttClientManager::task() {
     }
   }
   static uint32_t lastPublishMs = 0;
-  if (connected_ && millis() - lastPublishMs >= Config::MQTT_PUBLISH_PERIOD_MS) {
+  if (connected_ && millis() - lastPublishMs >= gConfig.mqttTelemetryPeriodMs) {
     const String payload = makeLoRaWANUplinkJson();
     if (!payload.isEmpty() &&
-        publish(topic("telemetry"), payload, Config::MQTT_RETAIN_TELEMETRY)) {
+        publish(topic("telemetry"), payload, gConfig.mqttRetainTelemetry)) {
       lastPublishMs = millis();
     }
+  }
+
+  static uint32_t lastHealthMs = 0;
+  if (connected_ && millis() - lastHealthMs >= gConfig.mqttHealthPeriodMs) {
+    const String health = String("{\"uptime_ms\":") + String(millis()) +
+                          ",\"free_heap\":" + String(ESP.getFreeHeap()) +
+                          ",\"mqtt_connected\":true}";
+    if (publish(topic("health"), health, gConfig.mqttRetainAvailability))
+      lastHealthMs = millis();
   }
 }

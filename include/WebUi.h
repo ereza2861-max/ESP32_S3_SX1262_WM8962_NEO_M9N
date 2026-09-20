@@ -121,6 +121,7 @@ private:
   void handleRadioStats();
   void handleRfDetector();
   void handleRangeTest();
+  void handleRangeTestStatus();
   void handleHopSetChannels();
   void handleReboot();
   bool rateLimit(uint32_t& last, uint32_t interval);

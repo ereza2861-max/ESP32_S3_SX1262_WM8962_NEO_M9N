@@ -1,6 +1,7 @@
 // G14/G15/G16: queue saturation, BLE identity resolution, and peer passkey storage.
 #include "SensorReader.h"
 #include "Config.h"
+#include "PersistentConfig.h"
 #include "MqttClientManager.h"
 #include "SensorTelemetry.h"
 #include "BlePeerStore.h"
@@ -72,8 +73,8 @@ void pairingFailure(const SensorProtocol::BleAddress& address) {
   if (!selected) selected = &gPairingFailures[0];
   selected->address = address;
   if (selected->failures < 0xFF) ++selected->failures;
-  if (selected->failures >= Config::BLE_PAIRING_MAX_FAILURES_VALUE)
-    selected->blockUntilMs = millis() + Config::BLE_PAIRING_BLOCK_MS_VALUE;
+  if (selected->failures >= gConfig.blePairingFailureThreshold)
+    selected->blockUntilMs = millis() + gConfig.blePairingBlockMs;
 }
 
 void pairingSuccess(const SensorProtocol::BleAddress& address) {
@@ -307,7 +308,7 @@ void notifyCallback(NimBLERemoteCharacteristic* characteristic,
                     uint8_t* data, size_t length, bool) {
   if (!gReader || !characteristic || !data || length != sizeof(SensorProtocol::SensorValue)) return;
 
-  for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
     ClientSlot& slot = gSlots[i];
     if (!slot.inUse || slot.value != characteristic) continue;
 
@@ -422,7 +423,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
           address, advertisedName, device->getRSSI(), millis(), nodeIndex);
     } else {
       if (addressIsRpa || gReader->registry().isFull() &&
-          !gReader->registry().evictDisconnected(millis(), Config::SENSOR_NODE_EVICTION_MS_VALUE, nodeIndex)) {
+          !gReader->registry().evictDisconnected(millis(), gConfig.sensorNodeEvictionMs, nodeIndex)) {
         return false;
       }
       if (!gReader->registry().upsertNode(
@@ -434,7 +435,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
   if (bondedRpaPending) gBlePasskey = 0;
 
   ClientSlot* slot = nullptr;
-  for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
     if (!gSlots[i].inUse) {
       slot = &gSlots[i];
       break;
@@ -447,7 +448,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     gReader->registry().markConnected(nodeIndex, false, millis());
     return false;
   }
-  slot->client->setConnectTimeout(Config::SENSOR_CONNECT_TIMEOUT_MS_VALUE);
+  slot->client->setConnectTimeout(gConfig.sensorConnectTimeoutMs);
   slot->client->setClientCallbacks(&gClientCallbacks, false);
 
   esp_task_wdt_reset();
@@ -491,7 +492,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     } else {
       if (gReader->registry().isFull() &&
           !gReader->registry().evictDisconnected(
-              millis(), Config::SENSOR_NODE_EVICTION_MS_VALUE, nodeIndex)) {
+              millis(), gConfig.sensorNodeEvictionMs, nodeIndex)) {
         (void)NimBLEDevice::deleteClient(slot->client);
         slot->client = nullptr;
         return false;
@@ -615,13 +616,13 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
 } // namespace
 
 bool SensorReader::begin(const String& gatewayName) {
-  if (!Config::SENSOR_READER_ENABLED_VALUE) return false;
+  if (!gConfig.sensorReaderEnabled) return false;
   if (initialized_) return true;
   (void)peerMutexLock();
   peerMutexUnlock();
   if (!NimBLEDevice::isInitialized() &&
       !NimBLEDevice::init(std::string(gatewayName.c_str()))) return false;
-  if (Config::SENSOR_REQUIRE_ENCRYPTION_VALUE && !gConfig.blePairingEnabled) {
+  if (gConfig.sensorRequireEncryption && !gConfig.blePairingEnabled) {
     // The current sensor-node contract requires an authenticated connection.
     // Refuse an incompatible encryption-only configuration rather than
     // silently negotiating Just Works and failing the node-side auth gate.
@@ -636,9 +637,9 @@ bool SensorReader::begin(const String& gatewayName) {
   gScan = NimBLEDevice::getScan();
   if (!gScan) return false;
   gScan->setActiveScan(Config::SENSOR_ACTIVE_SCAN_VALUE);
-  gScan->setInterval(Config::SENSOR_SCAN_INTERVAL_MS_VALUE);
-  gScan->setWindow(Config::SENSOR_SCAN_WINDOW_MS_VALUE);
-  gScan->setMaxResults(static_cast<uint8_t>(Config::SENSOR_MAX_NODES_VALUE));
+  gScan->setInterval(gConfig.sensorScanIntervalMs);
+  gScan->setWindow(gConfig.sensorScanWindowMs);
+  gScan->setMaxResults(static_cast<uint8_t>(gConfig.sensorMaxNodes));
   sensorQueue_ = xQueueCreateStatic(Config::SENSOR_LORA_QUEUE_DEPTH, sizeof(SensorSample),
                                     sensorQueueStorage_, &sensorQueueStruct_);
   if (!sensorQueue_) return false;
@@ -646,32 +647,32 @@ bool SensorReader::begin(const String& gatewayName) {
   initialized_ = true;
   Serial.printf("SENSOR: reader enabled, NimBLE=%s maxNodes=%u maxSensors=%u\n",
                 NimBLEDevice::getVersion(),
-                static_cast<unsigned>(Config::SENSOR_MAX_NODES_VALUE),
+                static_cast<unsigned>(gConfig.sensorMaxNodes),
                 static_cast<unsigned>(Config::SENSOR_MAX_SENSORS_PER_NODE_VALUE));
   return true;
 }
 
 void SensorReader::task() {
-  if (!initialized_ || !Config::SENSOR_READER_ENABLED_VALUE || !gScan) return;
+  if (!initialized_ || !gConfig.sensorReaderEnabled || !gScan) return;
 
   // WebUI actions are consumed by the BLE task; the HTTP handler never tears
   // down a NimBLE client or mutates the registry directly.
-  for (size_t nodeIndex = 0; nodeIndex < Config::SENSOR_MAX_NODES_VALUE; ++nodeIndex) {
+  for (size_t nodeIndex = 0; nodeIndex < gConfig.sensorMaxNodes; ++nodeIndex) {
     if (forgetRequested_[nodeIndex].exchange(false, std::memory_order_acq_rel)) {
-      for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+      for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
         if (gSlots[i].inUse && gSlots[i].nodeIndex == nodeIndex) cleanupSlot(gSlots[i], true);
       }
       (void)registry_.forgetNode(nodeIndex);
       refreshRequested_[nodeIndex].store(false, std::memory_order_release);
     } else if (refreshRequested_[nodeIndex].exchange(false, std::memory_order_acq_rel)) {
-      for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+      for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
         if (gSlots[i].inUse && gSlots[i].nodeIndex == nodeIndex) cleanupSlot(gSlots[i], true);
       }
       refreshRequested_[nodeIndex] = false;
     }
   }
 
-  for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
     ClientSlot& slot = gSlots[i];
     if (!slot.inUse) continue;
     if (!slot.client || !slot.client->isConnected() || slot.descriptorRefreshRequested)
@@ -679,11 +680,11 @@ void SensorReader::task() {
   }
 
   size_t active = 0;
-  for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) active += gSlots[i].inUse ? 1U : 0U;
-  if (active < Config::SENSOR_MAX_NODES_VALUE) {
+  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) active += gSlots[i].inUse ? 1U : 0U;
+  if (active < gConfig.sensorMaxNodes) {
     esp_task_wdt_reset();
-    const NimBLEScanResults results = gScan->getResults(Config::SENSOR_SCAN_DURATION_MS_VALUE, false);
-    for (int i = 0; i < results.getCount() && active < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+    const NimBLEScanResults results = gScan->getResults(gConfig.sensorScanDurationMs, false);
+    for (int i = 0; i < results.getCount() && active < gConfig.sensorMaxNodes; ++i) {
       esp_task_wdt_reset();
       const NimBLEAdvertisedDevice* device = results.getDevice(static_cast<uint32_t>(i));
       if (!device || !device->isAdvertisingService(NimBLEUUID(SensorProtocol::SERVICE_UUID))) continue;
@@ -704,7 +705,7 @@ void SensorReader::task() {
     gScan->clearResults();
   }
 
-  vTaskDelay(pdMS_TO_TICKS(Config::SENSOR_TASK_PERIOD_MS_VALUE));
+  vTaskDelay(pdMS_TO_TICKS( max<uint32_t>(100, gConfig.sensorScanIntervalMs / 2U) ));
 }
 
 bool SensorReader::enqueueSensorForLoRa(const SensorSample& sample) {
@@ -758,10 +759,10 @@ bool SensorReader::requestRefreshNode(size_t nodeIndex) {
 
 uint32_t SensorReader::peerMacFailures() const { return gPeerMacFailures.load(std::memory_order_relaxed); }
 
-bool SensorReader::isEnabled() const { return Config::SENSOR_READER_ENABLED_VALUE; }
+bool SensorReader::isEnabled() const { return gConfig.sensorReaderEnabled; }
 
 bool SensorReader::hasConnectedNode() const {
-  for (size_t i = 0; i < Config::SENSOR_MAX_NODES_VALUE; ++i) {
+  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
     SensorRegistry::Node nodeSnapshot{};
     if (registry_.snapshotNode(i, nodeSnapshot) && nodeSnapshot.connected) return true;
   }
