@@ -44,8 +44,10 @@ bool isAllZero(const uint8_t* data, size_t length) {
 
 KeyMaterial::~KeyMaterial() {
   clearEphemeral();
-  clearSessionSlot(currentSession_);
-  clearSessionSlot(previousSession_);
+  for (size_t i = 0; i < SESSION_PEER_CACHE_SIZE; ++i) {
+    clearSessionSlot(sessionSlots_[i][0]);
+    clearSessionSlot(sessionSlots_[i][1]);
+  }
   mbedtls_platform_zeroize(longTermPrivate_, sizeof(longTermPrivate_));
   mbedtls_platform_zeroize(longTermPublic_, sizeof(longTermPublic_));
   longTermValid_ = false;
@@ -281,59 +283,66 @@ bool KeyMaterial::deriveSessionKey(
     return false;
   }
 
-  if (currentSession_.valid &&
-      currentSession_.epoch == epoch &&
-      currentSession_.peerSourceId == peerSourceId) {
-    mbedtls_platform_zeroize(currentSession_.key,
-                             sizeof(currentSession_.key));
-  } else if (currentSession_.valid && currentSession_.epoch != epoch) {
-    clearSessionSlot(previousSession_);
-    previousSession_ = currentSession_;
-    mbedtls_platform_zeroize(currentSession_.key,
-                             sizeof(currentSession_.key));
-    currentSession_.epoch = 0;
-    currentSession_.peerSourceId = 0;
-    currentSession_.valid = false;
-  } else if (currentSession_.valid &&
-             currentSession_.peerSourceId != peerSourceId) {
-    // DECISION: retain one peer's current/previous pair. Do not expose a
-    // previous key belonging to a different peer.
-    clearSessionSlot(currentSession_);
-    clearSessionSlot(previousSession_);
+  size_t peerSlot = SESSION_PEER_CACHE_SIZE;
+  for (size_t i = 0; i < SESSION_PEER_CACHE_SIZE; ++i) {
+    if (sessionSlots_[i][0].valid &&
+        sessionSlots_[i][0].peerSourceId == peerSourceId) {
+      peerSlot = i;
+      break;
+    }
+    if (peerSlot == SESSION_PEER_CACHE_SIZE && !sessionSlots_[i][0].valid)
+      peerSlot = i;
+  }
+  if (peerSlot == SESSION_PEER_CACHE_SIZE) {
+    peerSlot = sessionNextPeer_;
+    sessionNextPeer_ = (sessionNextPeer_ + 1U) % SESSION_PEER_CACHE_SIZE;
+    clearSessionSlot(sessionSlots_[peerSlot][0]);
+    clearSessionSlot(sessionSlots_[peerSlot][1]);
   }
 
-  memcpy(currentSession_.key, derivedKey, sizeof(derivedKey));
-  currentSession_.epoch = epoch;
-  currentSession_.peerSourceId = peerSourceId;
-  currentSession_.valid = true;
+  SessionKeySlot& current = sessionSlots_[peerSlot][0];
+  SessionKeySlot& previous = sessionSlots_[peerSlot][1];
+  if (current.valid && current.epoch != epoch) {
+    clearSessionSlot(previous);
+    previous = current;
+    mbedtls_platform_zeroize(current.key, sizeof(current.key));
+    current.epoch = 0;
+    current.peerSourceId = 0;
+    current.valid = false;
+  }
+
+  memcpy(current.key, derivedKey, sizeof(derivedKey));
+  current.epoch = epoch;
+  current.peerSourceId = peerSourceId;
+  current.valid = true;
   mbedtls_platform_zeroize(derivedKey, sizeof(derivedKey));
   return true;
 }
 
 bool KeyMaterial::getSessionKey(uint32_t peerSourceId, uint32_t epochSec,
                                 uint8_t out[SESSION_KEY_BYTES]) const {
-  if (!out || epochSec == 0) return false;
+  if (!out || epochSec == 0 || peerSourceId == 0) return false;
   const uint32_t epoch = epochNumber(epochSec);
-  const SessionKeySlot* slot = nullptr;
-
-  if (currentSession_.valid && currentSession_.peerSourceId == peerSourceId &&
-      currentSession_.epoch == epoch) {
-    slot = &currentSession_;
-  } else if (previousSession_.valid &&
-             previousSession_.peerSourceId == peerSourceId &&
-             previousSession_.epoch == epoch) {
-    slot = &previousSession_;
+  for (size_t i = 0; i < SESSION_PEER_CACHE_SIZE; ++i) {
+    for (size_t generation = 0; generation < 2; ++generation) {
+      const SessionKeySlot& slot = sessionSlots_[i][generation];
+      if (slot.valid && slot.peerSourceId == peerSourceId &&
+          slot.epoch == epoch) {
+        memcpy(out, slot.key, SESSION_KEY_BYTES);
+        return true;
+      }
+    }
   }
-  if (!slot) return false;
-
-  memcpy(out, slot->key, SESSION_KEY_BYTES);
-  return true;
+  return false;
 }
 
 bool KeyMaterial::begin(uint32_t epochSec) {
   clearEphemeral();
-  clearSessionSlot(currentSession_);
-  clearSessionSlot(previousSession_);
+  for (size_t i = 0; i < SESSION_PEER_CACHE_SIZE; ++i) {
+    clearSessionSlot(sessionSlots_[i][0]);
+    clearSessionSlot(sessionSlots_[i][1]);
+  }
+  sessionNextPeer_ = 0;
   longTermValid_ = false;
   if (!loadOrCreateLongTerm()) return false;
 

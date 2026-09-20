@@ -21,7 +21,7 @@
 | BLE Sensor Reader | **Implemented / hardware-validation pending** | NimBLE central membaca descriptor + notification sensor dinamis; perlu node BLE GATT nyata untuk validasi lapangan |
 | Wi-Fi STA | **Partial / scaffold** | Manager/reconnect path ada, tetapi provisioning/configuration workflow end-to-end belum tersedia |
 | MQTT | **Production security workflow implemented (FASE 3)** | Credential provisioning, production-build separation, TLS handshake timeout, CA verification, audit logging, rotation/warning controls are present; deployment still requires the documented production provisioning workflow |
-| X25519/ECDH key rotation | **Scaffold / not implemented** | Belum ada protokol rotasi kunci end-to-end |
+| X25519/ECDH key rotation | **Implemented behind runtime policy; HIL pending** | V5 framing, authenticated beacon/key derivation, epoch retention, and runtime policy are implemented; interoperability and multi-node hardware validation remain pending |
 | Fragment selective-repeat / full SACK | **Implemented in firmware; HIL pending** | Window 8, bounded 8-bit SACK, per-fragment retry and hard 2048-byte/16-fragment limits; real RF loss testing remains pending |
 | Secure Boot + flash encryption production provisioning | **Procedure only** | Sengaja tidak diaktifkan otomatis |
 | HIL/factory test/fuzz/native unit test | **Not complete** | Repository belum memiliki hardware fixture/test harness lengkap |

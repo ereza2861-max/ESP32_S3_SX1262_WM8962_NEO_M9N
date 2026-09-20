@@ -324,6 +324,8 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   }
   if (!slot) {
     slot = &replayCache_[replayNext_];
+    const size_t previousReplayNext = replayNext_;
+    const ReplayEntry previousSlot = *slot;
     replayNext_ = (replayNext_ + 1) % Config::LORA_REPLAY_SOURCE_CACHE_SIZE;
     slot->sourceId = sourceId;
     slot->type = type;
@@ -332,7 +334,12 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     slot->highestPayloadHash = payloadHash;
     slot->seenMs = now;
     slot->lastEpochSec = packetEpochSec;
-    (void)persistReplayEntry(*slot);
+    if (!persistReplayEntry(*slot)) {
+      *slot = previousSlot;
+      replayNext_ = previousReplayNext;
+      ++replayRejects_;
+      return true;
+    }
     return false;
   }
 
@@ -340,6 +347,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   // than half the 16-bit sequence space, including across 0xFFFF -> 0x0000.
   const uint16_t delta = static_cast<uint16_t>(seq - slot->highestSeq);
   if (delta != 0 && delta < 0x8000U) {
+    const ReplayEntry previousSlot = *slot;
     const uint8_t shift = static_cast<uint8_t>(
         min<uint16_t>(delta, gConfig.replayWindowBits));
     slot->bitmap = shift >= 32 ? 1U : (slot->bitmap << shift) | 1U;
@@ -347,6 +355,11 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     slot->highestPayloadHash = payloadHash;
     slot->seenMs = now;
     slot->lastEpochSec = packetEpochSec;
+    if (!persistReplayEntry(*slot)) {
+      *slot = previousSlot;
+      ++replayRejects_;
+      return true;
+    }
     return false;
   }
 

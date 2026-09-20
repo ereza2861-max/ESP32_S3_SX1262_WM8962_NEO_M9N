@@ -421,7 +421,7 @@ function sensorBadge(q){let a=[];if(q&1)a.push('STALE');if(q&2)a.push('RANGE');i
 function sensorEscape(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function sensorAction(id,action){if(!confirm(action==='forget'?'Forget this sensor node?':'Reconnect this sensor node?'))return;try{const r=await fetch(`/api/sensors/${action}?id=${encodeURIComponent(id)}`,{method:'POST',headers:{'X-CSRF-Token':CSRF_TOKEN}});toast(await r.text());await refreshSensorNodes()}catch(e){toast('Sensor action failed')}}
 async function refreshSensorDetail(id){try{const n=await (await fetch('/api/sensors/nodes?id='+encodeURIComponent(id))).json();if(!n.ok){sensorDetail.textContent=n.error||'Node unavailable';return}let h=`<h4>Node ${n.id} — ${sensorEscape(n.name||'(unnamed)')}</h4><table><thead><tr><th>ID</th><th>Name</th><th>Unit</th><th>Value</th><th>Timestamp</th><th>Quality</th></tr></thead><tbody>`;for(const x of n.sensors||[]){h+=`<tr><td>${x.id}</td><td>${sensorEscape(x.name)}</td><td>${sensorEscape(x.unit)}</td><td>${x.valueValid?x.value:'—'}</td><td>${x.timestamp||'—'}</td><td>${sensorBadge(x.quality)}</td></tr>`}sensorDetail.dataset.nodeId=String(n.id);sensorDetail.innerHTML=h+'</tbody></table>'}catch(e){toast('Sensor detail failed')}}
-async function refreshSensorNodes(){try{const a=await (await fetch('/api/sensors/nodes')).json();sensorNodesBody.innerHTML=(a.nodes||[]).map(n=>`<tr><td><button onclick="refreshSensorDetail(${n.id})">${n.id}</button></td><td>${sensorEscape(n.address)}</td><td>${n.rssi}</td><td>${n.sensorCount}</td><td>${n.lastSeenMs} ms</td><td>${n.connected?'CONNECTED':'OFFLINE'}</td><td><button onclick="sensorAction(${n.id},'refresh')">Refresh</button><button onclick="sensorAction(${n.id},'refresh')">Reconnect</button><button onclick="sensorAction(${n.id},'forget')">Forget</button></td></tr>`).join('')}catch(e){toast('Sensor inventory failed')}}
+async function refreshSensorNodes(){try{const a=await (await fetch('/api/sensors/nodes')).json();sensorNodesBody.innerHTML=(a.nodes||[]).map(n=>`<tr><td><button onclick="refreshSensorDetail(${n.id})">${n.id}</button></td><td>${sensorEscape(n.address)}</td><td>${n.rssi}</td><td>${n.sensorCount}</td><td>${n.lastSeenMs} ms</td><td>${n.connected?'CONNECTED':'OFFLINE'}</td><td><button onclick="sensorAction(${n.id},'refresh')">Refresh</button><button onclick="sensorAction(${n.id},'forget')">Forget</button></td></tr>`).join('')}catch(e){toast('Sensor inventory failed')}}
 async function refreshSensorLive(){try{const a=await (await fetch('/api/sensors/live')).json();if(a.nodes) for(const n of a.nodes){const open=document.getElementById('sensorDetail');if(open.dataset.nodeId==n.id) await refreshSensorDetail(n.id)}}catch(e){}}
 refreshSensorNodes();setInterval(refreshSensorNodes,5000);setInterval(refreshSensorLive,2000);
 
@@ -2238,8 +2238,30 @@ void WebUi::handleRecordQuality() {
     server_.send(400, "text/plain", "invalid record quality");
     return;
   }
-  const bool ok = audio.setRecordQuality(value);
-  server_.send(ok ? 200 : 409, "text/plain", ok ? "OK" : "recording active or save failed");
+
+  RuntimeConfig candidate;
+  uint32_t generation = 0;
+  if (!configSnapshot(candidate, generation)) {
+    server_.send(503, "text/plain", "configuration busy");
+    return;
+  }
+  const uint8_t previous = candidate.audioRecordQuality;
+  if (previous == value) {
+    server_.send(200, "text/plain", "OK");
+    return;
+  }
+  candidate.audioRecordQuality = value;
+
+  if (!audio.setRecordQuality(value)) {
+    server_.send(409, "text/plain", "recording active or hardware rejected quality");
+    return;
+  }
+  if (!configCommit(candidate, generation)) {
+    (void)audio.setRecordQuality(previous);
+    server_.send(409, "text/plain", "configuration changed; retry");
+    return;
+  }
+  server_.send(200, "text/plain", "OK");
 }
 
 void WebUi::handleVad() {
@@ -2845,13 +2867,17 @@ void WebUi::handleRangeTest() {
     server_.send(400, "text/plain", "invalid range-test");
     return;
   }
-  RuntimeConfig candidate = gConfig;
-  candidate.loraRangeTestMode = raw == "1";
-  if (!candidate.save()) {
-    server_.send(503, "text/plain", "range-test configuration save failed");
+  RuntimeConfig candidate;
+  uint32_t generation = 0;
+  if (!configSnapshot(candidate, generation)) {
+    server_.send(503, "text/plain", "configuration busy");
     return;
   }
-  gConfig = candidate;
+  candidate.loraRangeTestMode = raw == "1";
+  if (!configCommit(candidate, generation)) {
+    server_.send(409, "text/plain", "configuration changed; retry");
+    return;
+  }
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
   gState.rangeTest = candidate.loraRangeTestMode;
@@ -3427,7 +3453,15 @@ void WebUi::handleConfig() {
 
   {
     StateLock lock(gState);
-    if (lock.ok()) gState.rangeTest = gConfig.loraRangeTestMode;
+    if (lock.ok()) {
+      gState.rangeTest = gConfig.loraRangeTestMode;
+      const uint8_t profileCount = min<uint8_t>(
+          max<uint8_t>(1U, gConfig.loraHopChannelProfile),
+          Config::HOP_CHANNEL_MAX);
+      gState.hopChannelCount = profileCount;
+      for (uint8_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
+        gState.hopChannelList[i] = i < profileCount ? i : 0;
+    }
   }
   lora.updateSourceId();
   auditConfigChange(previous, gConfig, "web");

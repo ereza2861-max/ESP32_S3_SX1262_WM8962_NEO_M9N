@@ -78,10 +78,11 @@ Use a **full automated hardware rack** for factory/HIL acceptance. Host-only tes
 allowed to claim RF, audio, PPS, sleep/wake, power-loss, or provisioning acceptance.
 
 ## GAP N — ECDH lifecycle — DECISION LOCKED
-Use a **protocol Hybrid** refactor with **Epoch + handshake** rekey triggers and **bounded
-retention** of the old key. The current repository keeps ECDH behind its build flag until
-the complete peer handshake is validated; enabling the flag is not a production acceptance
-criterion by itself.
+Use a **protocol Hybrid** with **Epoch + authenticated beacon** rekey triggers and bounded
+retention of the previous key. The current repository compiles ECDH support by default but
+keeps the feature disabled at runtime until explicitly selected by `ecdh_rekey_policy`.
+Enabling the policy is not a production acceptance criterion by itself; multi-node
+interoperability and hardware validation remain required.
 
 ## GAP O — configuration concurrency — DECISION LOCKED
 Runtime configuration uses **Mutex + snapshot** semantics. Persistence uses

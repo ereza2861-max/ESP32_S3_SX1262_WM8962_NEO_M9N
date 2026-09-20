@@ -4,9 +4,9 @@
 #include "Config.h"
 
 /*
- * FASE 4 X25519/ECDH scaffold.
+ * X25519/ECDH rekey protocol implementation.
  *
- * The wire envelope is deliberately specified here before enabling crypto:
+ * The wire envelope is authenticated by the existing P2P trust anchor:
  *   byte 0     magic
  *   byte 1     version
  *   byte 2..5  epochSec, little-endian
@@ -16,9 +16,9 @@
  * This envelope is intended to be carried inside the existing authenticated
  * LoRa beacon. It is NOT a standalone authenticated protocol.
  *
- * Crypto implementation is intentionally inactive until
- * FIELDRADIO_LORA_ECDH_REKEY_ENABLED=1 is selected and hardware
- * interoperability testing is complete.
+ * The implementation is compiled when
+ * FIELDRADIO_LORA_ECDH_REKEY_ENABLED=1; runtime activation remains
+ * controlled by `ecdhRekeyPolicy` until hardware interoperability testing is complete.
  */
 
 namespace LoRaEcdhRekey {
@@ -223,8 +223,9 @@ private:
   uint32_t ephemeralEpoch_ = 0;
   bool longTermValid_ = false;
   bool ephemeralValid_ = false;
-  SessionKeySlot currentSession_{};
-  SessionKeySlot previousSession_{};
+  static constexpr size_t SESSION_PEER_CACHE_SIZE = 16;
+  SessionKeySlot sessionSlots_[SESSION_PEER_CACHE_SIZE][2] = {};
+  size_t sessionNextPeer_ = 0;
 };
 
 #endif

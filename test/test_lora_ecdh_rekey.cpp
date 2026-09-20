@@ -158,6 +158,25 @@ void test_hkdf_binds_pair_and_epoch() {
   assert(std::memcmp(keyA, keyOtherEpoch, sizeof(keyA)) != 0);
 }
 
+void test_multi_peer_key_retention() {
+  LoRaEcdhRekey::KeyMaterial gateway;
+  LoRaEcdhRekey::KeyMaterial peerA;
+  LoRaEcdhRekey::KeyMaterial peerB;
+  constexpr uint32_t epoch = 12U * Config::LORA_REKEY_PERIOD_SEC;
+  assert(gateway.begin(epoch));
+  assert(peerA.begin(epoch));
+  assert(peerB.begin(epoch));
+
+  assert(gateway.deriveSessionKey(peerA.ephemeralPublic(), 0x1000U, 0x2000U, epoch));
+  assert(gateway.deriveSessionKey(peerB.ephemeralPublic(), 0x1000U, 0x3000U, epoch));
+
+  uint8_t keyA[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};
+  uint8_t keyB[LoRaEcdhRekey::SESSION_KEY_BYTES] = {};
+  assert(gateway.getSessionKey(0x2000U, epoch, keyA));
+  assert(gateway.getSessionKey(0x3000U, epoch, keyB));
+  assert(std::memcmp(keyA, keyB, sizeof(keyA)) != 0);
+}
+
 void test_epoch_key_retention() {
   LoRaEcdhRekey::KeyMaterial a;
   LoRaEcdhRekey::KeyMaterial b;
@@ -204,6 +223,7 @@ int main() {
   test_x25519_shared_secret_matches();
   test_hkdf_binds_pair_and_epoch();
   test_epoch_key_retention();
+  test_multi_peer_key_retention();
 #endif
   return 0;
 }

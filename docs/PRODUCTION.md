@@ -1,9 +1,9 @@
 # FieldRadio production manufacturing
 
 > **Scope: FASE 5 only.** This document covers manufacturing documentation and
-> production provisioning for the ESP32-S3-WROOM-1-N16R8 target. It does not
-> enable the FASE 4 X25519/ECDH scaffold and does not change the existing LoRa
-> encryption protocol.
+> production provisioning for the ESP32-S3-WROOM-1-N16R8 target. X25519/ECDH
+> rekey support is compiled in but remains a runtime opt-in and is not a
+> production acceptance claim; hardware interoperability validation is still pending.
 
 ## 1. Production boundary
 
