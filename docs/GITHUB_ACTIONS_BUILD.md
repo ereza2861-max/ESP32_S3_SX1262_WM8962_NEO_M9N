@@ -38,4 +38,4 @@ make download-artifacts CI_RUN_ID=123456789
 
 The workflow does not need a personal access token. Checkout uses the workflow token with read-only repository contents and does not persist credentials into the Git configuration.
 
-The cloud build uses the same PlatformIO/Makefile build entry point as a local build. The workflow pins the Espressif platform version through `platformio.ini`; PlatformIO and its libraries may still resolve according to the dependency constraints in that file.
+The cloud build uses the same PlatformIO/Makefile build entry point as a local build. The workflow uses the pinned pioarduino platform artifact from `platformio.ini`; registry/Git libraries still resolve according to the dependency constraints in that file. The IDF-5 HTTPS compatibility dependency remains remote and should be immutable-pinned after target validation.

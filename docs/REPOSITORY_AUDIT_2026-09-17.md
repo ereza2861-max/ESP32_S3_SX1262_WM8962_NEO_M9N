@@ -102,8 +102,8 @@ LoRaWAN hardware-identity handling and physical-mode paths. Persistence now uses
 NVS slots with generation, CRC and a post-write commit marker; legacy configuration is retained
 only as a boot-time migration fallback.
 
-### 12. Build-stack gate remains unresolved
-The repository declares PlatformIO 6.13.0 with Arduino + ESP-IDF and also selects the
-`esp32_idf5_https_server_compat` fork. PlatformIO 6.13.0's Arduino 2.0.17 stack is based on
-ESP-IDF 4.4.7, so the repository does not currently contain evidence for a compatible IDF-5
-HTTPS dependency stack. This is an architectural build decision, not a safe version guess.
+### 12. Build-stack decision closure — 2026-09-21
+The repository now uses pioarduino `55.03.39` with Arduino-ESP32 3.3.9 / ESP-IDF 5.5.4,
+aligned with the `esp32_idf5_https_server_compat` dependency. Remote dependency resolution,
+target compilation, startup and TLS handshake remain `NOT VERIFIED` in an environment without
+network/package access or the physical target.

@@ -79,7 +79,7 @@ bool configSnapshot(RuntimeConfig& out, uint32_t& generation) {
   return true;
 }
 
-bool configCommit(RuntimeConfigbool configCommit(const RuntimeConfig& candidate) candidate) { return configCommit(candidate, configGeneration()); }
+bool configCommit(const RuntimeConfig& candidate) { return configCommit(candidate, configGeneration()); }
 
 bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
   if (!configQueue || !gConfigMutex) return false;

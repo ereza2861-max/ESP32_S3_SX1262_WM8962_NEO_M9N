@@ -96,11 +96,18 @@ generation, complete typed payload and CRC. A separate commit marker is written 
 slot has been written and read back successfully. Recovery selects the newest valid committed
 slot; an incomplete/corrupt slot is ignored in favour of the other slot.
 
-## Build-stack decision — UNRESOLVED
-The repository declares `espressif32 @ 6.13.0` with `framework = arduino, espidf`, while the
-HTTPS dependency is the `jackjansen/esp32_idf5_https_server_compat` fork. PlatformIO 6.13.0's
-Arduino 2.0.17 stack is based on ESP-IDF 4.4.7, whereas the selected HTTPS fork is explicitly
-for ESP-IDF 5.x. The repository does not contain evidence establishing a compatible mixed
-framework package set. Do not guess between switching to an IDF-5/Arduino-3 platform and
-switching back to an IDF-4-compatible HTTPS library; this requires an explicit build-stack
-decision and target compilation evidence.
+## BD-001 — Build-stack decision — FINAL
+Use the pioarduino PlatformIO platform with an Arduino core based on ESP-IDF 5.x.
+The active environments use pioarduino `55.03.39`, which corresponds to Arduino-ESP32
+3.3.9 / ESP-IDF 5.5.4. The HTTPS dependency remains the
+`jackjansen/esp32_idf5_https_server_compat` fork because it explicitly targets the
+ESP-IDF 5.x family.
+
+The repository must still record target build, link, startup, and TLS handshake evidence
+separately; unavailable hardware or dependency-resolution evidence is `NOT VERIFIED`, not PASS.
+
+## MQTT-001 — MQTT credential rotation — FINAL
+Use a PKI/certificate-based MQTT credential design. Automatic certificate rotation is
+deferred until the formal MQTT protocol specification is complete and approved. The
+existing username/password provisioning path is therefore not treated as proof of the
+final PKI design and must not be represented as production-complete PKI support.

@@ -108,7 +108,7 @@ extern std::atomic<uint32_t> gConfigGeneration;
 
 bool configSnapshot(RuntimeConfig& out);
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation);
-bool configCommit(RuntimeConfigbool configCommit(const RuntimeConfig& candidate) candidate);
+bool configCommit(const RuntimeConfig& candidate);
 bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration);
 uint32_t configGeneration();
 bool configManagerBegin();
