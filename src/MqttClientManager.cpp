@@ -191,32 +191,22 @@ bool MqttClientManager::loadCredentials() {
   Preferences prefs;
   if (!prefs.begin(NVS_NS, true)) return false;
   credentialsProvisioned_ = prefs.getBool("provisioned", false);
-  const String blob = prefs.getString("blob", "");
+  clientCertificatePem_ = prefs.getString("cert", "");
+  clientPrivateKeyPem_ = prefs.getString("key", "");
+  pkiProvisioned_ = !clientCertificatePem_.isEmpty() && !clientPrivateKeyPem_.isEmpty();
   passwordProvisionedEpoch_ = static_cast<time_t>(prefs.getLong64("pass_epoch", 0));
   prefs.end();
 
-#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (!credentialsProvisioned_ || blob.isEmpty()) return false;
-#else
-  if (!credentialsProvisioned_ || blob.isEmpty()) {
-    host_ = gConfig.mqttHost;
-    port_ = gConfig.mqttPort;
-    user_ = Config::MQTT_USERNAME;
-    pass_ = Config::MQTT_PASSWORD;
-    return !host_.isEmpty() && port_ != 0;
-  }
-#endif
-  if (!decryptCredentials(blob)) return false;
-  // Credentials and endpoint are separate runtime concerns. The encrypted
-  // credential blob remains the source of username/password, while endpoint
-  // policy is taken from the validated RuntimeConfig snapshot.
+  // D-06: the broker credential authority is the device-specific X.509
+  // certificate/private key. Username/password is no longer a connection
+  // prerequisite and is not used by the MQTT task.
+  if (!credentialsProvisioned_ || !pkiProvisioned_) return false;
   host_ = gConfig.mqttHost;
   port_ = gConfig.mqttPort;
-#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (!gConfig.mqttTlsRequired) return false;
-#endif
-  return !host_.isEmpty() && port_ != 0;
+  if (!gConfig.mqttTlsRequired || host_.isEmpty() || port_ == 0) return false;
+  return true;
 }
+
 
 bool MqttClientManager::saveCredentials() {
   String blob;
@@ -224,6 +214,8 @@ bool MqttClientManager::saveCredentials() {
   Preferences prefs;
   if (!prefs.begin(NVS_NS, false)) return false;
   const bool ok = prefs.putString("blob", blob) > 0 &&
+                  prefs.putString("cert", clientCertificatePem_) > 0 &&
+                  prefs.putString("key", clientPrivateKeyPem_) > 0 &&
                   prefs.putBool("provisioned", true) &&
                   prefs.putLong64("pass_epoch", static_cast<int64_t>(timeSynchronized() ? time(nullptr) : 0)) > 0;
   prefs.end();
@@ -242,8 +234,10 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
 #if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
   if (port == 1883) return false;
 #endif
-  host_ = host; port_ = port; user_ = user; pass_ = pass;
-  if (!saveCredentials()) return false;
+  // Username/password provisioning is no longer an accepted production path.
+  // Use provisionCertificate() so the device has a unique client certificate.
+  (void)host; (void)port; (void)user; (void)pass;
+  return false;
 
   plain_.stop();
   secure_.stop();
@@ -253,6 +247,9 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
 #endif
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
+    if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
+    secure_.setCertificate(clientCertificatePem_.c_str());
+    secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
     secure_.setHandshakeTimeout(10);
     client_.setClient(secure_);
   } else {
@@ -263,6 +260,55 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
   nextRetryMs_ = 0;
   retryDelayMs_ = gConfig.mqttReconnectMinMs;
   auditEvent("PROVISIONED");
+  return true;
+}
+
+bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
+                                                const String& certificatePem,
+                                                const String& privateKeyPem) {
+  if (host.isEmpty() || host.length() > 253 || port == 0 ||
+      certificatePem.length() < 64 || certificatePem.length() > 8192 ||
+      privateKeyPem.length() < 64 || privateKeyPem.length() > 8192 ||
+      certificatePem.indexOf("-----BEGIN CERTIFICATE-----") < 0 ||
+      certificatePem.indexOf("-----END CERTIFICATE-----") < 0 ||
+      privateKeyPem.indexOf("-----BEGIN") < 0 ||
+      privateKeyPem.indexOf("PRIVATE KEY-----") < 0) {
+    return false;
+  }
+#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
+  if (!gConfig.mqttTlsRequired || port == 1883) return false;
+#endif
+
+  host_ = host;
+  port_ = port;
+  clientCertificatePem_ = certificatePem;
+  clientPrivateKeyPem_ = privateKeyPem;
+  pkiProvisioned_ = true;
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, false)) return false;
+  const bool stored = prefs.putString("cert", clientCertificatePem_) > 0 &&
+                      prefs.putString("key", clientPrivateKeyPem_) > 0 &&
+                      prefs.putBool("provisioned", true) &&
+                      prefs.putLong64("pass_epoch",
+                                      static_cast<int64_t>(timeSynchronized() ? time(nullptr) : 0)) > 0;
+  prefs.end();
+  if (!stored) return false;
+  credentialsProvisioned_ = true;
+  passwordProvisionedEpoch_ = timeSynchronized() ? time(nullptr) : 0;
+
+  plain_.stop();
+  secure_.stop();
+  useTls_ = true;
+  secure_.setCACert(MQTT_BROKER_ROOT_CA);
+  secure_.setCertificate(clientCertificatePem_.c_str());
+  secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
+  secure_.setHandshakeTimeout(10);
+  client_.setClient(secure_);
+  client_.setServer(host_.c_str(), port_);
+  connected_ = false;
+  nextRetryMs_ = 0;
+  retryDelayMs_ = gConfig.mqttReconnectMinMs;
+  auditEvent("PKI_PROVISIONED");
   return true;
 }
 
@@ -319,6 +365,9 @@ bool MqttClientManager::begin() {
   useTls_ = gConfig.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
+    if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
+    secure_.setCertificate(clientCertificatePem_.c_str());
+    secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
     secure_.setHandshakeTimeout(10);
     client_.setClient(secure_);
   } else {
@@ -338,6 +387,9 @@ bool MqttClientManager::connect(const String& host, uint16_t port,
   useTls_ = gConfig.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
+    if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
+    secure_.setCertificate(clientCertificatePem_.c_str());
+    secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
     secure_.setHandshakeTimeout(10);
     client_.setClient(secure_);
   } else {
@@ -371,6 +423,115 @@ bool MqttClientManager::publishSensorData(uint32_t nodeId, const char* nodeName,
   std::strncpy(sample.unit, unit, sizeof(sample.unit) - 1);
   // BLE callback path: zero-timeout enqueue only; MQTT/TCP work stays in task().
   return xQueueSend(sensorQueue_, &sample, 0) == pdTRUE;
+}
+
+Client& MqttClientManager::mqttTransport() {
+  return useTls_ ? static_cast<Client&>(secure_) : static_cast<Client&>(plain_);
+}
+
+size_t MqttClientManager::encodeMqttRemainingLength(uint8_t* out, size_t length) {
+  if (!out || length > 268435455UL) return 0;
+  size_t count = 0;
+  do {
+    uint8_t encoded = static_cast<uint8_t>(length % 128U);
+    length /= 128U;
+    if (length > 0) encoded |= 0x80U;
+    out[count++] = encoded;
+  } while (length > 0 && count < 4);
+  return count;
+}
+
+bool MqttClientManager::waitForPubAck(uint16_t packetId, uint32_t timeoutMs) {
+  Client& transport = mqttTransport();
+  const uint32_t deadline = millis() + timeoutMs;
+  uint8_t packetBytes[2] = {};
+
+  while (static_cast<int32_t>(millis() - deadline) < 0) {
+    if (!transport.connected()) return false;
+    if (!transport.available()) {
+      delay(1);
+      continue;
+    }
+
+    const int first = transport.read();
+    if (first < 0) continue;
+    const uint8_t header = static_cast<uint8_t>(first);
+    size_t multiplier = 1;
+    size_t remainingLength = 0;
+    bool completeLength = false;
+    for (uint8_t i = 0; i < 4; ++i) {
+      const int byte = transport.read();
+      if (byte < 0) return false;
+      remainingLength += static_cast<size_t>(byte & 0x7f) * multiplier;
+      if ((byte & 0x80) == 0) {
+        completeLength = true;
+        break;
+      }
+      multiplier *= 128;
+    }
+    if (!completeLength || remainingLength > 2) return false;
+
+    if ((header & 0xf0U) == 0x40U && remainingLength == 2U) {
+      if (transport.readBytes(packetBytes, sizeof(packetBytes)) != sizeof(packetBytes)) return false;
+      const uint16_t ackId = static_cast<uint16_t>(packetBytes[0] << 8 | packetBytes[1]);
+      return ackId == packetId;
+    }
+
+    // PubSubClient owns inbound MQTT dispatch. A sensor QoS-1 publish must not
+    // consume unrelated broker traffic while waiting for its PUBACK. Any
+    // unexpected packet makes the current transport state ambiguous, so force
+    // reconnect rather than acknowledging the spool record.
+    return false;
+  }
+  return false;
+}
+
+bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const String& payload) {
+  if (mqttTopic.isEmpty() || payload.isEmpty() || mqttTopic.length() > 128 || payload.length() > 2048) {
+    return false;
+  }
+
+  Client& transport = mqttTransport();
+  if (!transport.connected()) return false;
+
+  const size_t remainingLength = 2U + mqttTopic.length() + 2U + payload.length();
+  uint8_t remaining[4] = {};
+  const size_t remainingLengthBytes = encodeMqttRemainingLength(remaining, remainingLength);
+  if (remainingLengthBytes == 0) return false;
+
+  uint16_t packetId = nextPacketId_++;
+  if (packetId == 0) packetId = nextPacketId_++;
+
+  const auto writeFully = [&transport](const uint8_t* data, size_t len) -> bool {
+    return transport.write(data, len) == len;
+  };
+  const uint8_t fixedHeader = 0x32U;
+  if (!writeFully(&fixedHeader, 1) || !writeFully(remaining, remainingLengthBytes)) {
+    client_.disconnect();
+    connected_ = false;
+    return false;
+  }
+  const uint8_t topicLength[2] = {
+      static_cast<uint8_t>((mqttTopic.length() >> 8) & 0xffU),
+      static_cast<uint8_t>(mqttTopic.length() & 0xffU)};
+  const uint8_t packetIdBytes[2] = {
+      static_cast<uint8_t>((packetId >> 8) & 0xffU),
+      static_cast<uint8_t>(packetId & 0xffU)};
+  if (!writeFully(topicLength, sizeof(topicLength)) ||
+      !writeFully(reinterpret_cast<const uint8_t*>(mqttTopic.c_str()), mqttTopic.length()) ||
+      !writeFully(packetIdBytes, sizeof(packetIdBytes)) ||
+      !writeFully(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length())) {
+    client_.disconnect();
+    connected_ = false;
+    return false;
+  }
+  transport.flush();
+  if (!waitForPubAck(packetId, 2000)) {
+    client_.disconnect();
+    connected_ = false;
+    return false;
+  }
+  return true;
 }
 
 bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
@@ -432,7 +593,7 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
   sensorLeaf += String(static_cast<unsigned long>(sample.nodeId));
   sensorLeaf += '/';
   sensorLeaf += String(static_cast<unsigned>(sample.sensorId));
-  return publish(topic(sensorLeaf.c_str()), payload, false);
+  return publishSensorSampleQos1(topic(sensorLeaf.c_str()), payload);
 }
 
 void MqttClientManager::setEnabled(bool enabled) {
@@ -471,6 +632,9 @@ bool MqttClientManager::applyConfig() {
   useTls_ = gConfig.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
+    if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
+    secure_.setCertificate(clientCertificatePem_.c_str());
+    secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
     secure_.setHandshakeTimeout(10);
     client_.setClient(secure_);
   } else {
@@ -500,8 +664,9 @@ void MqttClientManager::task() {
   if (!client_.connected()) {
     if (connected_) auditEvent("DISCONNECT", client_.state());
     connected_ = false;
-    if (millis() - nextRetryMs_ < retryDelayMs_) return;
-    nextRetryMs_ = millis();
+    if (nextRetryMs_ != 0 &&
+        static_cast<int32_t>(millis() - nextRetryMs_) < 0) return;
+    nextRetryMs_ = 0;
 
     const String clientId = Config::DEVICE_ID;
     const String willTopic = topic("availability");
@@ -523,14 +688,13 @@ void MqttClientManager::task() {
         }
       }
     }
-    if (user_.isEmpty()) {
-      ok = client_.connect(clientId.c_str(), nullptr, nullptr, willTopic.c_str(),
-                           0, gConfig.mqttRetainAvailability, willPayload, true);
-    } else {
-      ok = client_.connect(clientId.c_str(), user_.c_str(), pass_.c_str(),
-                           willTopic.c_str(), 0, gConfig.mqttRetainAvailability,
-                           willPayload, true);
-    }
+    // Final MQTT authority is certificate-based. The legacy username/password
+    // blob is retained only for migration/rollback bookkeeping; it is never
+    // selected for the production connection path.
+    ok = pkiProvisioned_ && client_.connect(clientId.c_str(), nullptr, nullptr,
+                                            willTopic.c_str(), 0,
+                                            gConfig.mqttRetainAvailability,
+                                            willPayload, true);
     if (ok) {
       connected_ = true;
       auditEvent("CONNECT_OK", client_.state());

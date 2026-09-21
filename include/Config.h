@@ -512,7 +512,12 @@ constexpr uint32_t WIFI_AP_IDLE_TIMEOUT_MS = 600000UL;
 constexpr uint32_t WIFI_AP_RETRY_MS = 30000UL;
 constexpr float VOX_THRESHOLD = 0.08f;
 constexpr uint32_t VOX_HANG_MS = 700;
-constexpr uint32_t VOICE_FRAME_MS = 20;
+constexpr uint32_t VOICE_FRAME_MS = 40;
+constexpr uint8_t VOICE_CODEC_VERSION = 2;
+constexpr uint8_t VOICE_CODEC2_MODE = 2; // Codec2 1600 bit/s, 40 ms / 320 samples.
+constexpr size_t VOICE_CODEC2_BYTES = 8; // 1600 bit/s * 40 ms.
+constexpr size_t VOICE_PACKET_BYTES = 4 + 2 + VOICE_CODEC2_BYTES + 2; // hdr+seq+codec+CRC.
+
 constexpr uint32_t AUDIO_TONE_MAX_MS = 2000;
 constexpr uint32_t AUDIO_VU_HOLD_MS = 250;
 

@@ -10,7 +10,7 @@ bool WifiStaManager::connect(const String& ssid, const String& pass) {
   WiFi.begin(ssid_.c_str(), pass_.c_str());
   connected_ = false;
   retryDelayMs_ = Config::STA_RETRY_MIN_MS;
-  nextRetryMs_ = millis();
+  nextRetryMs_ = millis() + retryDelayMs_;
   return true;
 }
 
@@ -32,7 +32,7 @@ void WifiStaManager::task() {
     return;
   }
   connected_ = false;
-  if (millis() - nextRetryMs_ < retryDelayMs_) return;
+  if (static_cast<int32_t>(millis() - nextRetryMs_) < 0) return;
   WiFi.begin(ssid_.c_str(), pass_.c_str());
   nextRetryMs_ = millis() + retryDelayMs_;
   retryDelayMs_ = min<uint32_t>(Config::STA_RETRY_MAX_MS, retryDelayMs_ * 2U);

@@ -97,3 +97,12 @@ strategy. They are not silently represented as "implemented" by this patch.
 ### Factory test, HIL, fuzzing and unit tests
 The CI static-analysis hook is added, but hardware tests still need a fixture and a
 native-test harness. No fake pass result is generated.
+
+
+## QnA D-06 closure
+
+MQTT PKI enrollment is now certificate-based. A device-specific client certificate
+and private key are stored in the protected MQTT provisioning namespace and loaded
+for mutual TLS. `/api/mqtt/provision` accepts `host`, `port`, `cert`, and `key` only;
+the legacy username/password provisioning path is rejected. Factory provisioning
+and later authenticated maintenance replacement are the supported lifecycle.

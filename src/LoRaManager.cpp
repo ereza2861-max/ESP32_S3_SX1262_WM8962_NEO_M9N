@@ -3325,8 +3325,8 @@ void LoRaManager::task() {
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_TEXT_ACK) {
       handleTextAckPayload(appPayload, appPayloadLen);
     }
-    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_VOICE && appPayloadLen == 168 &&
-        appPayload[0] == 0x56 && appPayload[1] == 1 &&
+    if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_VOICE && appPayloadLen == Config::VOICE_PACKET_BYTES &&
+        appPayload[0] == 0x56 && appPayload[1] == Config::VOICE_CODEC_VERSION &&
         (static_cast<uint16_t>(appPayload[4]) | (static_cast<uint16_t>(appPayload[5]) << 8)) == seq &&
         appPayload[2] == Config::VOICE_FRAME_MS &&
         rssi >= Config::VOICE_RSSI_THRESHOLD_DBM &&
@@ -4757,8 +4757,8 @@ bool LoRaManager::sendVoiceFrame() {
     if (!candidate.used) { slot = &candidate; break; }
   if (!slot) return false;
 
-  uint8_t captured[164] = {};
-  uint8_t frame[168] = {};
+  uint8_t captured[4 + Config::VOICE_CODEC2_BYTES] = {};
+  uint8_t frame[Config::VOICE_PACKET_BYTES] = {};
   size_t len = 0;
   if (!audio.captureVoiceFrame(captured, sizeof(captured), len) || len != sizeof(captured))
     return false;
@@ -4767,10 +4767,10 @@ bool LoRaManager::sendVoiceFrame() {
   const uint16_t seq = voiceSequence_++;
   frame[4] = static_cast<uint8_t>(seq & 0xFF);
   frame[5] = static_cast<uint8_t>(seq >> 8);
-  memcpy(frame + 6, captured + 4, 160);
-  const uint16_t crc = crc16(frame, 166);
-  frame[166] = static_cast<uint8_t>(crc & 0xFF);
-  frame[167] = static_cast<uint8_t>(crc >> 8);
+  memcpy(frame + 6, captured + 4, Config::VOICE_CODEC2_BYTES);
+  const uint16_t crc = crc16(frame, Config::VOICE_PACKET_BYTES - 2);
+  frame[Config::VOICE_PACKET_BYTES - 2] = static_cast<uint8_t>(crc & 0xFF);
+  frame[Config::VOICE_PACKET_BYTES - 1] = static_cast<uint8_t>(crc >> 8);
 
   uint8_t routed[Config::LORA_MAX_PACKET] = {};
   const size_t routedLen = addRouteExtension(frame, sizeof(frame), 0, 0,

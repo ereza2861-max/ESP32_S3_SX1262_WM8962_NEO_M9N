@@ -262,6 +262,17 @@ bool AudioManager::begin() {
     return false;
   }
 
+  codec2_ = codec2_create(Config::VOICE_CODEC2_MODE);
+  if (!codec2_ ||
+      codec2_samples_per_frame(codec2_) != 320 ||
+      codec2_bytes_per_frame(codec2_) != static_cast<int>(Config::VOICE_CODEC2_BYTES)) {
+    if (codec2_) codec2_destroy(codec2_);
+    codec2_ = nullptr;
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "Codec2 1600 initialization failed";
+    return false;
+  }
+
   if (!initAec()) {
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "ESP-SR AEC init failed; continuing without AEC";
@@ -586,29 +597,27 @@ static int16_t mulawToPcm16(uint8_t u) {
 
 bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& written) {
   written = 0;
-  constexpr size_t voiceSamples = 160; // 20 ms @ 8 kHz
-  constexpr size_t micFrames = (Config::AUDIO_SAMPLE_RATE * 40U) / 1000U;
-  if (!out || capacity < 4 + voiceSamples || !initialized_ || !i2sMutex_ ||
-      !aecMic_ || !aecRef_ || !aecOut_) return false;
+  constexpr size_t voiceSamples = 320; // 40 ms @ 8 kHz for Codec2 1600.
+  constexpr size_t micFrames = (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
+  if (!out || capacity < 4 + Config::VOICE_CODEC2_BYTES || !initialized_ ||
+      !i2sMutex_ || !codec2_ || !aecMic_ || !aecRef_ || !aecOut_) return false;
   if (xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
 
   uint8_t pcm[micFrames * Config::AUDIO_CHANNELS * sizeof(int16_t)];
   size_t got = 0;
   const esp_err_t err = i2s_read(AUDIO_I2S_PORT, pcm, sizeof(pcm), &got,
-                                  pdMS_TO_TICKS(30));
+                                  pdMS_TO_TICKS(50));
   xSemaphoreGive(i2sMutex_);
   if (err != ESP_OK || got != sizeof(pcm)) return false;
 
   const int16_t* samples = reinterpret_cast<const int16_t*>(pcm);
-  size_t aecFrames = min(
+  const size_t aecFrames = min(
       static_cast<size_t>(aecFrameSize_ ? aecFrameSize_ : Config::AEC_FRAME_SAMPLES),
       static_cast<size_t>(Config::AEC_FRAME_SAMPLES));
-  if (aecFrames == 0) {
-    aecFrames = Config::AEC_FRAME_SAMPLES;
-    StateLock lock(gState);
-    if (lock.ok()) gState.lastError = "AEC frame size invalid; using default";
-  }
-  if (aecFrames == 0 || !aecMic_ || !aecRef_ || !aecOut_) return false;
+  if (aecFrames == 0) return false;
+
+  // Dedicated 44.1 kHz -> 16 kHz AEC conversion. The AEC never changes the
+  // WM8962/I2S master path; only the working copy is resampled.
   for (size_t i = 0; i < aecFrames; ++i) {
     const size_t src = min(micFrames - 1,
         static_cast<size_t>((static_cast<uint64_t>(i) * Config::AUDIO_SAMPLE_RATE) /
@@ -628,44 +637,61 @@ bool AudioManager::captureVoiceFrame(uint8_t* out, size_t capacity, size_t& writ
     clean = aecOut_;
   }
 
-  out[0] = 0x56;
-  out[1] = 1; // μ-law 8 kHz mono.
-  out[2] = static_cast<uint8_t>(Config::VOICE_FRAME_MS);
-  out[3] = 0;
+  alignas(4) int16_t speech[voiceSamples] = {};
+  // Dedicated 16 kHz -> 8 kHz speech conversion for Codec2. This keeps the
+  // codec independent from the 44.1 kHz hardware clock and USB sample rate.
   for (size_t i = 0; i < voiceSamples; ++i) {
-    // 16 kHz AEC output -> 8 kHz voice transport.
-    out[4 + i] = pcm16ToMulaw(clean[min(aecFrames - 1, i * 2)]);
+    const size_t src = min(aecFrames - 1, i * 2U);
+    speech[i] = clean[src];
   }
-  written = 4 + voiceSamples;
+
+  out[0] = 0x56;
+  out[1] = Config::VOICE_CODEC_VERSION;
+  out[2] = static_cast<uint8_t>(Config::VOICE_FRAME_MS);
+  out[3] = Config::VOICE_CODEC2_MODE;
+  codec2_encode(codec2_, out + 4, speech);
+  written = 4 + Config::VOICE_CODEC2_BYTES;
   return true;
 }
 
 
 bool AudioManager::playVoiceFrame(const uint8_t* data, size_t len) {
-  if (!data || len != 168 || data[0] != 0x56 || data[1] != 1 ||
-      data[2] != Config::VOICE_FRAME_MS || !initialized_ || !i2sMutex_) return false;
-  const uint16_t expectedCrc = static_cast<uint16_t>(data[166]) |
-                               (static_cast<uint16_t>(data[167]) << 8);
+  if (!data || len != Config::VOICE_PACKET_BYTES || data[0] != 0x56 ||
+      data[1] != Config::VOICE_CODEC_VERSION ||
+      data[2] != Config::VOICE_FRAME_MS ||
+      data[3] != Config::VOICE_CODEC2_MODE ||
+      !initialized_ || !i2sMutex_ || !codec2_) return false;
+
+  const uint16_t expectedCrc = static_cast<uint16_t>(data[len - 2]) |
+                               (static_cast<uint16_t>(data[len - 1]) << 8);
   uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < 166; ++i) {
+  for (size_t i = 0; i < len - 2; ++i) {
     crc ^= data[i];
     for (uint8_t b = 0; b < 8; ++b)
       crc = (crc & 1) ? static_cast<uint16_t>((crc >> 1) ^ 0xA001) :
                         static_cast<uint16_t>(crc >> 1);
   }
   if (crc != expectedCrc) return false;
-  constexpr size_t outFrames = (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
-  int16_t pcm[outFrames * Config::AUDIO_CHANNELS];
+
+  constexpr size_t codecSamples = 320;
+  alignas(4) int16_t speech[codecSamples] = {};
+  codec2_decode(codec2_, speech, data + 6);
+
+  const size_t outFrames =
+      (Config::AUDIO_SAMPLE_RATE * Config::VOICE_FRAME_MS) / 1000U;
+  alignas(4) int16_t pcm[outFrames * Config::AUDIO_CHANNELS];
   for (size_t i = 0; i < outFrames; ++i) {
-    const size_t src = min<size_t>(159, (i * 8000U) / Config::AUDIO_SAMPLE_RATE);
-    const int16_t sample = mulawToPcm16(data[6 + src]);
+    const size_t src = min<size_t>(codecSamples - 1,
+        (i * 8000U) / Config::AUDIO_SAMPLE_RATE);
+    const int16_t sample = speech[src];
     pcm[i * 2] = sample;
     pcm[i * 2 + 1] = sample;
   }
+
   size_t writtenBytes = 0;
   if (xSemaphoreTake(i2sMutex_, pdMS_TO_TICKS(20)) != pdTRUE) return false;
   const esp_err_t err = i2s_write(AUDIO_I2S_PORT, pcm, sizeof(pcm),
-                                  &writtenBytes, pdMS_TO_TICKS(30));
+                                  &writtenBytes, pdMS_TO_TICKS(50));
   xSemaphoreGive(i2sMutex_);
   if (err == ESP_OK && writtenBytes == sizeof(pcm))
     queueUsbAecReference(reinterpret_cast<const uint8_t*>(pcm), sizeof(pcm),

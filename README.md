@@ -235,4 +235,4 @@ ESP32-C3 sensor nodes request a stable public BLE address. The gateway registry 
 Sensor forwarding uses a fixed depth-16 queue. The default `DROP_OLDEST` policy keeps the newest sample when saturated and increments `sensorDropped`. `/api/sensors/live` exposes `sensorDropped` and `queueDepth`; runtime policy can be changed with `/api/sensors/queue-policy`.
 
 ## Version pinning
-`platformio.ini` pins the existing Espressif32 6.13.0 platform. Dependencies whose exact upstream version could not be established from the repository are explicitly marked in `VERSIONS.md`; `tools/audit_versions.py` reports remaining pinning work. Run `python tools/audit_versions.py` in CI and before release.
+`platformio.ini` pins the active pioarduino 55.03.39 platform (Arduino-ESP32 3.3.9 / ESP-IDF 5.5.4). Dependencies whose exact upstream version could not be established from the repository are explicitly marked in `VERSIONS.md`; `tools/audit_versions.py` reports remaining pinning work. Run `python tools/audit_versions.py` in CI and before release.

@@ -23,7 +23,7 @@ The repository contains:
 - MQTT: production security provisioning from FASE 3 is now present; deployment still depends on the
   documented credential/TLS provisioning workflow.
 - X25519/ECDH key rotation: runtime lifecycle is implemented in the current source; target build/interoperability and HIL evidence remain pending.
-- Full selective-repeat/SACK fragmentation semantics: still incomplete.
+- Full selective-repeat/SACK fragmentation semantics: implemented in firmware; RF/HIL validation remains pending.
 - Secure Boot/flash-encryption production provisioning: FASE 5 manufacturing workflow is being added;
   it remains intentionally explicit and does not burn eFuses during a normal development build.
 - HIL/factory/fuzz/native unit testing: incomplete.

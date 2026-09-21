@@ -14,6 +14,8 @@ public:
                const String& user, const String& pass);
   bool provisionCredentials(const String& host, uint16_t port,
                             const String& user, const String& pass);
+  bool provisionCertificate(const String& host, uint16_t port,
+                            const String& certificatePem, const String& privateKeyPem);
   bool credentialsProvisioned() const { return credentialsProvisioned_; }
   bool passwordRotationWarning() const;
   void setEnabled(bool enabled);
@@ -62,8 +64,16 @@ private:
   bool decryptCredentials(const String& envelope);
   void auditEvent(const char* event, int mqttState = 0);
   bool credentialsProvisioned_ = false;
+  bool pkiProvisioned_ = false;
+  String clientCertificatePem_;
+  String clientPrivateKeyPem_;
   time_t passwordProvisionedEpoch_ = 0;
   bool timeSynchronized() const;
   String topic(const char* leaf) const;
   bool publishSensorSample(const SensorSample& sample);
+  bool publishSensorSampleQos1(const String& mqttTopic, const String& payload);
+  Client& mqttTransport();
+  bool waitForPubAck(uint16_t packetId, uint32_t timeoutMs);
+  static size_t encodeMqttRemainingLength(uint8_t* out, size_t length);
+  uint16_t nextPacketId_ = 1;
 };

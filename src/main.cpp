@@ -7,6 +7,8 @@
 #include <esp_sleep.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
+#include <mbedtls/md.h>
 #include <Preferences.h>
 #include <Wire.h>
 #include "FuelGaugeMax17048.h"
@@ -956,7 +958,7 @@ static void manageWifi(uint32_t now) {
 
 static void taskHealth(void*) {
   watchdogSubscribe();
-  uint32_t last[5] = {0, 0, 0, 0, 0};
+  uint32_t last[7] = {0, 0, 0, 0, 0, 0, 0};
   uint32_t lastCheck = millis();
   for (;;) {
     esp_task_wdt_reset();
@@ -1019,6 +1021,107 @@ static void taskHealth(void*) {
 }
 
 
+static String serialAuthHex(const uint8_t* data, size_t len) {
+  static const char digits[] = "0123456789abcdef";
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    out += digits[data[i] >> 4];
+    out += digits[data[i] & 0x0F];
+  }
+  return out;
+}
+
+static bool serialAuthHexDecode(const String& in, uint8_t* out, size_t len) {
+  if (!out || in.length() != len * 2) return false;
+  auto nibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  for (size_t i = 0; i < len; ++i) {
+    const int hi = nibble(in[i * 2]);
+    const int lo = nibble(in[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
+}
+
+static bool serialAuthExpectedResponse(const RuntimeConfig& cfg, uint8_t out[32]) {
+  if (!out || cfg.loraKeyHex.length() != 32) return false;
+  uint8_t keyMaterial[32] = {};
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  const char* label = "FieldRadio-Serial-Console-v1";
+  bool ok = mbedtls_sha256_starts(&sha, 0) == 0 &&
+            mbedtls_sha256_update(&sha,
+                                  reinterpret_cast<const unsigned char*>(cfg.loraKeyHex.c_str()),
+                                  cfg.loraKeyHex.length()) == 0 &&
+            mbedtls_sha256_update(&sha,
+                                  reinterpret_cast<const unsigned char*>(label),
+                                  std::strlen(label)) == 0 &&
+            mbedtls_sha256_finish(&sha, keyMaterial) == 0;
+  mbedtls_sha256_free(&sha);
+  if (!ok) return false;
+
+  const mbedtls_md_info_t* md =
+      mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md) return false;
+  return mbedtls_md_hmac(md, keyMaterial, sizeof(keyMaterial),
+                         serialAuthChallenge, sizeof(serialAuthChallenge),
+                         out, 32) == 0;
+}
+
+static void issueSerialAuthChallenge(uint32_t now) {
+  for (size_t i = 0; i < sizeof(serialAuthChallenge); ++i) {
+    serialAuthChallenge[i] = static_cast<uint8_t>(esp_random() & 0xFFU);
+  }
+  serialAuthIssuedMs = now;
+  serialAuthExpiresMs = now + SERIAL_AUTH_TTL_MS;
+  serialAuthenticated = false;
+  Serial.printf("AUTH CHALLENGE %s\n",
+                serialAuthHex(serialAuthChallenge, sizeof(serialAuthChallenge)).c_str());
+}
+
+static bool serialAuthValid(uint32_t now) {
+  if (!serialAuthenticated || static_cast<int32_t>(now - serialAuthExpiresMs) >= 0) {
+    serialAuthenticated = false;
+    return false;
+  }
+  return true;
+}
+
+static bool serialAuthRequired(const String& line) {
+  return line != "status" && line != "help" && line != "auth challenge" &&
+         !line.startsWith("auth ");
+}
+
+static bool serialAuthVerify(const String& responseHex, uint32_t now) {
+  if (static_cast<int32_t>(now - serialAuthExpiresMs) >= 0 ||
+      now - serialAuthIssuedMs > SERIAL_AUTH_TTL_MS) {
+    serialAuthenticated = false;
+    return false;
+  }
+
+  RuntimeConfig cfg;
+  if (!configSnapshot(cfg)) return false;
+
+  uint8_t expected[32] = {};
+  uint8_t supplied[32] = {};
+  if (!serialAuthExpectedResponse(cfg, expected) ||
+      !serialAuthHexDecode(responseHex, supplied, sizeof(supplied))) return false;
+
+  uint8_t diff = 0;
+  for (size_t i = 0; i < sizeof(expected); ++i) diff |= expected[i] ^ supplied[i];
+  if (diff != 0) return false;
+
+  serialAuthenticated = true;
+  serialAuthExpiresMs = now + SERIAL_AUTH_TTL_MS;
+  return true;
+}
+
 static void serviceSerialConsole() {
   static String line;
   while (Serial.available()) {
@@ -1029,7 +1132,17 @@ static void serviceSerialConsole() {
       continue;
     }
     line.trim();
-    if (line == "status") {
+    const uint32_t now = millis();
+    if (line == "auth challenge") {
+      issueSerialAuthChallenge(now);
+    } else if (line.startsWith("auth ")) {
+      const String response = line.substring(5);
+      Serial.println(serialAuthVerify(response, now) ? "AUTH OK" : "AUTH FAILED");
+    } else if (serialAuthRequired(line) && !serialAuthValid(now)) {
+      if (!serialAuthExpiresMs || static_cast<int32_t>(now - serialAuthExpiresMs) >= 0)
+        issueSerialAuthChallenge(now);
+      Serial.println("AUTH REQUIRED; use auth <64-hex-hmac>");
+    } else if (line == "status") {
       StateLock lock(gState);
       if (lock.ok()) {
         Serial.printf("LoRa=%d TX=%lu RX=%lu BAT=%.2f %d%% SF=%u LQI=%u\n",
@@ -1038,9 +1151,14 @@ static void serviceSerialConsole() {
                       gState.batteryPercent, lora.currentDataRate(), lora.lqi());
       }
     } else if (line == "config") {
-      Serial.printf("freq=%.3f bw=%.1f sf=%u cr=%u pwr=%d callsign=%s\n",
-                    gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
-                    gConfig.loraCr, gConfig.loraPowerDbm, gConfig.callsign.c_str());
+      RuntimeConfig cfg;
+      if (!configSnapshot(cfg)) {
+        Serial.println("config unavailable");
+      } else {
+        Serial.printf("freq=%.3f bw=%.1f sf=%u cr=%u pwr=%d callsign=%s\n",
+                      cfg.loraFreqMHz, cfg.loraBwKHz, cfg.loraSf,
+                      cfg.loraCr, cfg.loraPowerDbm, cfg.callsign.c_str());
+      }
     } else if (line == "lw status") {
       Serial.printf("LORAWAN: state=%u joined=%d joining=%d region=%u uplink=%lu downlink=%lu RSSI=%d SNR=%.1f retries=%lu lastJoin=%lu err=%s\n",
                     static_cast<unsigned>(lorawan.state()), lorawan.isJoined(),
@@ -1074,7 +1192,10 @@ static void serviceSerialConsole() {
           if (hi < 0 || lo < 0) { ok = false; break; }
           payload[i] = static_cast<uint8_t>((hi << 4) | lo);
         }
-        Serial.println(ok && lorawan.sendUplink(gConfig.lorawanFPort, payload, hex.length() / 2)
+        RuntimeConfig cfg;
+        const bool haveConfig = configSnapshot(cfg);
+        Serial.println(haveConfig &&
+                       ok && lorawan.sendUplink(cfg.lorawanFPort, payload, hex.length() / 2)
                            ? "LORAWAN: uplink queued" : "LORAWAN: uplink rejected");
       }
     } else if (line.startsWith("ble passkey ")) {
@@ -1175,7 +1296,7 @@ static void serviceSerialConsole() {
           (unsigned)gState.healthLogCount);
     } else if (line == "help" || line.isEmpty()) {
       Serial.printf("wdt=%lu,%lu,%lu,%lu\n", (unsigned long)gState.wdtResetCounts[0], (unsigned long)gState.wdtResetCounts[1], (unsigned long)gState.wdtResetCounts[2], (unsigned long)gState.wdtResetCounts[3]);
-      Serial.println("commands: status config ble passkey <addr> <passkey> ble irk <addr> <32-hex> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
+      Serial.println("commands: status auth challenge auth <64-hex-hmac> config ble passkey <addr> <passkey> ble irk <addr> <32-hex> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
     } else {
       Serial.println("unknown command; type help");
     }

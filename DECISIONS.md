@@ -13,7 +13,9 @@ The sensor node uses a stable public address. The gateway registry uses identity
 The queue remains depth 16. `DROP_OLDEST` is the default; `DROP_NEWEST` is available at runtime. Dropped samples are counted and exposed through runtime status and WebUI.
 
 ## Pinning
-The Espressif32 platform remains exactly `6.13.0`. Exact versions not provable from the repository are deliberately left as explicit TODO(pin) items rather than guessed.
+The active Espressif32 platform baseline is pioarduino `55.03.39`, resolving
+Arduino-ESP32 `3.3.9` and ESP-IDF `5.5.4`. Historical references to the former
+`6.13.0` baseline must not be treated as active configuration.
 
 
 ## GAP E — BLE sensor forwarding durability — CLOSED
@@ -69,9 +71,10 @@ outside the platform's protected configuration store.
 ## GAP L — MQTT authority and durability — DECISION LOCKED
 MQTT is **authoritative** for upstream sensor delivery. The SD spool remains the durability
 boundary, with MQTT and LoRa delivery bits tracked independently. Reconnect uses
-**exponential backoff**. A future broker-QoS/acknowledgement gate must be validated before
-a record is considered broker-authoritatively delivered; a local `publish()` return value
-alone is not proof of broker persistence.
+**exponential backoff**. Sensor MQTT delivery uses QoS 1 with a broker PUBACK gate before
+the MQTT delivery bit is marked complete. A local transport write/publish result alone is
+not accepted as broker-authoritative delivery; a missing or mismatched PUBACK leaves the
+spool record pending and forces MQTT reconnect.
 
 ## GAP M — HIL automation — DECISION LOCKED
 Use a **full automated hardware rack** for factory/HIL acceptance. Host-only tests are not
@@ -111,3 +114,53 @@ Use a PKI/certificate-based MQTT credential design. Automatic certificate rotati
 deferred until the formal MQTT protocol specification is complete and approved. The
 existing username/password provisioning path is therefore not treated as proof of the
 final PKI design and must not be represented as production-complete PKI support.
+
+
+## Phase A decision closure — QnA.txt
+
+The following decisions are user-selected and must be treated as locked for the
+implementation phase:
+
+- D-01 = C — authenticated challenge/response for privileged serial commands.
+- D-02 = A — mutex-protected `RuntimeConfig` snapshots for all readers.
+- D-03 = A — MQTT QoS 1 with PUBACK as the broker-authoritative delivery gate.
+
+D-01 is implemented in the production serial dispatcher by challenge/response
+using a key derived from the existing LoRa key material. The challenge is
+single-use and the authenticated session expires after 60 seconds.
+
+D-02 remains an architectural follow-up where legacy direct `gConfig` readers
+still exist; this patch does not claim that those readers have been converted.
+
+D-03 is implemented for sensor-spool MQTT delivery by emitting MQTT QoS 1 directly
+on the transport used by PubSubClient and requiring the matching PUBACK before marking
+the spool delivery bit. PubSubClient 2.8 remains responsible for the MQTT connection
+lifecycle because it does not expose a QoS-1 publish API.
+
+
+## D-04 — AEC / noise processing — FINAL
+
+Use a dedicated 16 kHz AEC working path while retaining the WM8962/I2S hardware
+clock at the existing 44.1 kHz configuration. The microphone capture is resampled
+to the ESP-SR AEC rate, the playback reference is independently resampled to the
+same 16 kHz domain, and the AEC output is converted to the 8 kHz Codec2 speech
+domain. The 44.1 kHz hardware path is not globally reconfigured when AEC is enabled.
+
+## D-05 — voice compression — FINAL
+
+Use Codec2 1600 bit/s at 8 kHz speech, one 40 ms codec frame per LoRa voice packet.
+The authenticated LoRa envelope remains unchanged; only the voice application
+payload changes from PCM/μ-law samples to the fixed 8-byte Codec2 frame. Codec2
+1600 produces 64 bits per 40 ms, materially reducing airtime compared with the
+previous 160-byte μ-law voice payload.
+
+## D-06 — MQTT PKI enrollment/rotation — FINAL
+
+Use a factory-provisioned, device-unique MQTT client certificate/private key.
+The authenticated maintenance provisioning endpoint may replace that certificate
+and key during controlled maintenance. The MQTT runtime uses mutual TLS and the
+device certificate as the connection authority; username/password MQTT
+authentication is no longer selected by the production connection path. The
+broker
+CA remains separately provisioned. Automatic self-service certificate rotation is
+not claimed; replacement is an authenticated maintenance operation.

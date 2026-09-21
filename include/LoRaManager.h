@@ -496,7 +496,7 @@ private:
     bool used = false;
     uint16_t seq = 0;
     uint32_t receivedMs = 0;
-    uint8_t data[168] = {};
+    uint8_t data[Config::VOICE_PACKET_BYTES] = {};
   };
   VoiceRxSlot voiceRx_[Config::VOICE_REORDER_BUFFER_SIZE] = {};
 };

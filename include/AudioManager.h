@@ -8,6 +8,7 @@
 #include <usb_device_uac.h>
 #include <esp_aec.h>
 #include <esp_heap_caps.h>
+#include <codec2.h>
 
 class AudioManager {
 public:
@@ -76,6 +77,7 @@ private:
   StreamBufferHandle_t usbTransportBuffer_ = nullptr;
   StreamBufferHandle_t aecRefBuffer_ = nullptr;
   aec_handle_t aec_ = nullptr;
+  struct CODEC2* codec2_ = nullptr;
   bool aecEnabled_ = Config::AEC_ENABLED_BY_DEFAULT;
   uint16_t aecFrameSize_ = 0;
   uint32_t usbSampleRate_ = Config::AUDIO_SAMPLE_RATE;

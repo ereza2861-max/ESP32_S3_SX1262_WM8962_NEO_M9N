@@ -35,7 +35,7 @@ std::atomic<uint32_t> gConfigGeneration{0};
 
 namespace {
 struct ConfigCommand {
-  RuntimeConfig* candidate = nullptr;
+  const RuntimeConfig* candidate = nullptr;
   uint32_t expectedGeneration = 0;
   SemaphoreHandle_t done = nullptr;
   bool* result = nullptr;
@@ -58,7 +58,6 @@ void configManagerTask(void*) {
         ok = normalized.save();
         if (ok) {
           gConfig = normalized;
-          *command.candidate = normalized;
         }
       }
       xSemaphoreGive(gConfigMutex);
