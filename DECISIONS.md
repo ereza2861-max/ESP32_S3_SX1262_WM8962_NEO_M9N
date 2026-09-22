@@ -197,3 +197,51 @@ Automatic lifecycle remains disabled by default. When enabled, the device checks
 certificate validity only after GNSS UTC time is valid, renews inside the configured
 threshold, reconnects MQTT with the new certificate, and records lifecycle events
 in `/LOG/CERT-LIFECYCLE.LOG`.
+
+
+## QNA configuration/security closure — additive implementation
+
+The following decisions are locked for the configuration/security lifecycle work
+derived from `QnA_DECISIONS.txt`. They are intentionally non-destructive and
+preserve existing fields, endpoints, persistence, and protocol behavior.
+
+- **D-A = B:** keep `mqttCredentialRotationDays` as compatibility metadata/policy
+  only. It is not represented as automatic credential rotation and has no new
+  runtime enforcement until the formal MQTT PKI lifecycle is approved. This
+  preserves the existing field, migration, WebUI exposure, and validation.
+- **D-B = B:** use a layered secret-storage classification. Existing subsystem
+  namespaces remain intact; long-term secrets require the existing encrypted-NVS
+  boundary, while ephemeral session material remains RAM-only.
+- **D-B1 = C:** `loraKeyHex` is legacy compatibility/key material only and is not
+  promoted to a root key for unrelated secrets.
+- **D-B2 = D:** secret residency depends on secret type. Existing transient
+  plaintext use remains supported where a subsystem API requires it; persistent
+  secret material remains protected at its storage boundary and must not be
+  logged or exported as plaintext.
+- **D-B3 = B:** production provisioning requires the secure production profile;
+  development/HIL may use a documented non-production profile without claiming
+  production security acceptance.
+- **D-C = C:** authentication uses bounded per-IP throttling plus a global
+  emergency circuit breaker. IPv4 and IPv6 textual client identities are
+  accepted, the table is bounded to 16 entries, and stale entries use TTL/LRU
+  eviction. The legacy global counters remain as the emergency protection path.
+- **D-C1 = B:** IPv4 + IPv6 client address strings are supported for the
+  throttling table.
+- **D-C2 = C:** maximum 16 throttle entries.
+- **D-C3 = C:** TTL + LRU eviction.
+- **D-C4 = B:** retain a global emergency circuit breaker rather than a permanent
+  global hard lockout.
+- **D-D = A:** add a centralized configuration transaction coordinator around
+  multi-subsystem changes. Existing `configCommit()` remains available for
+  single-subsystem/legacy callers.
+- **D-D1 = C:** NVS committed configuration plus generation is the persistent
+  source of truth after reboot.
+- **D-D2 = C:** a durable transaction marker plus the existing A/B generation
+  slots provide a boot-time recovery state machine.
+- **D-D3 = A:** a failed subsystem apply rolls back all runtime participants and
+  restores the previous persisted configuration.
+- **D-D4 = C:** the transaction state survives reboot through a small NVS
+  transaction record and is reconciled against the A/B generation slots.
+
+No wire-format change is introduced. The LoRa V2/V3/V4/V5 framing, fragment/ACK
+behavior, and ECDH beacon protocol remain unchanged.

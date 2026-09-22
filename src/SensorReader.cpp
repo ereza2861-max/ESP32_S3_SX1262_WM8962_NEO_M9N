@@ -653,32 +653,42 @@ bool SensorReader::begin(const String& gatewayName) {
 }
 
 void SensorReader::task() {
-  if (!initialized_ || !gConfig.sensorReaderEnabled || !gScan) return;
+  RuntimeConfig config;
+  if (!initialized_ || !gScan || !configSnapshot(config)) return;
+  if (!config.sensorReaderEnabled) return;
 
   // BLE scan parameters are runtime policy. Re-apply them here so changes
   // made through the WebUI take effect without rebooting the node.
-  gScan->setInterval(gConfig.sensorScanIntervalMs);
-  gScan->setWindow(gConfig.sensorScanWindowMs);
-  gScan->setMaxResults(static_cast<uint8_t>(gConfig.sensorMaxNodes));
+  const size_t maxNodes = config.sensorMaxNodes;
+  gScan->setInterval(config.sensorScanIntervalMs);
+  gScan->setWindow(config.sensorScanWindowMs);
+  gScan->setMaxResults(static_cast<uint8_t>(maxNodes));
+
+  // A runtime reduction of maxNodes must also release slots above the new
+  // limit; otherwise connected clients can remain alive outside the configured
+  // resource bound indefinitely.
+  for (size_t i = maxNodes; i < SensorRegistry::MAX_SUPPORTED_NODES; ++i) {
+    if (gSlots[i].inUse) cleanupSlot(gSlots[i], true);
+  }
 
   // WebUI actions are consumed by the BLE task; the HTTP handler never tears
   // down a NimBLE client or mutates the registry directly.
-  for (size_t nodeIndex = 0; nodeIndex < gConfig.sensorMaxNodes; ++nodeIndex) {
+  for (size_t nodeIndex = 0; nodeIndex < maxNodes; ++nodeIndex) {
     if (forgetRequested_[nodeIndex].exchange(false, std::memory_order_acq_rel)) {
-      for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
+      for (size_t i = 0; i < maxNodes; ++i) {
         if (gSlots[i].inUse && gSlots[i].nodeIndex == nodeIndex) cleanupSlot(gSlots[i], true);
       }
       (void)registry_.forgetNode(nodeIndex);
       refreshRequested_[nodeIndex].store(false, std::memory_order_release);
     } else if (refreshRequested_[nodeIndex].exchange(false, std::memory_order_acq_rel)) {
-      for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
+      for (size_t i = 0; i < maxNodes; ++i) {
         if (gSlots[i].inUse && gSlots[i].nodeIndex == nodeIndex) cleanupSlot(gSlots[i], true);
       }
       refreshRequested_[nodeIndex] = false;
     }
   }
 
-  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
+  for (size_t i = 0; i < maxNodes; ++i) {
     ClientSlot& slot = gSlots[i];
     if (!slot.inUse) continue;
     if (!slot.client || !slot.client->isConnected() || slot.descriptorRefreshRequested)
@@ -686,11 +696,11 @@ void SensorReader::task() {
   }
 
   size_t active = 0;
-  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) active += gSlots[i].inUse ? 1U : 0U;
-  if (active < gConfig.sensorMaxNodes) {
+  for (size_t i = 0; i < maxNodes; ++i) active += gSlots[i].inUse ? 1U : 0U;
+  if (active < maxNodes) {
     esp_task_wdt_reset();
-    const NimBLEScanResults results = gScan->getResults(gConfig.sensorScanDurationMs, false);
-    for (int i = 0; i < results.getCount() && active < gConfig.sensorMaxNodes; ++i) {
+    const NimBLEScanResults results = gScan->getResults(config.sensorScanDurationMs, false);
+    for (int i = 0; i < results.getCount() && active < maxNodes; ++i) {
       esp_task_wdt_reset();
       const NimBLEAdvertisedDevice* device = results.getDevice(static_cast<uint32_t>(i));
       if (!device || !device->isAdvertisingService(NimBLEUUID(SensorProtocol::SERVICE_UUID))) continue;
@@ -711,7 +721,7 @@ void SensorReader::task() {
     gScan->clearResults();
   }
 
-  vTaskDelay(pdMS_TO_TICKS( max<uint32_t>(100, gConfig.sensorScanIntervalMs / 2U) ));
+  vTaskDelay(pdMS_TO_TICKS( max<uint32_t>(100, config.sensorScanIntervalMs / 2U) ));
 }
 
 bool SensorReader::enqueueSensorForLoRa(const SensorSample& sample) {

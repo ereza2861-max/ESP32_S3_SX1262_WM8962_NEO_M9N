@@ -156,6 +156,28 @@ constexpr uint32_t RX_ACTIVITY_HOLD_MS = 250;
 constexpr int16_t LORA_JAM_RSSI_THRESHOLD_DBM = -80;
 constexpr uint8_t LORA_JAM_OCCUPANCY_THRESHOLD_PERCENT = 70;
 constexpr uint32_t WEB_RATE_LIMIT_MS = 500;
+
+// Shared UI/backend configuration range contract. Keep parsing and runtime
+// validation on the same constants so boundary behavior cannot drift.
+constexpr uint32_t WAKE_PERIOD_SEC_MIN = 60UL;
+constexpr uint32_t WAKE_PERIOD_SEC_MAX = 7UL * 24UL * 60UL * 60UL;
+constexpr uint32_t DEEP_SLEEP_IDLE_MS_MIN = 60000UL;
+constexpr uint32_t DEEP_SLEEP_IDLE_MS_MAX = 24UL * 60UL * 60UL * 1000UL;
+constexpr float BATTERY_CRITICAL_THRESHOLD_MIN = 2.5f;
+constexpr float BATTERY_LOW_THRESHOLD_MAX = 4.2f;
+constexpr uint32_t MQTT_RECONNECT_MS_MIN = 1000UL;
+constexpr uint32_t MQTT_RECONNECT_MS_MAX = 3600000UL;
+constexpr uint32_t MQTT_TELEMETRY_PERIOD_MS_MIN = 1000UL;
+constexpr uint32_t MQTT_TELEMETRY_PERIOD_MS_MAX = 86400000UL;
+constexpr uint32_t BLE_SCAN_INTERVAL_MS_MIN = 100UL;
+constexpr uint32_t BLE_SCAN_INTERVAL_MS_MAX = 60000UL;
+constexpr uint32_t WEB_SESSION_TIMEOUT_MS_MIN = 60000UL;
+constexpr uint32_t WEB_SESSION_TIMEOUT_MS_MAX = 86400000UL;
+constexpr uint32_t WEB_AUTH_RATE_LIMIT_MS_MIN = 100UL;
+constexpr uint32_t WEB_AUTH_RATE_LIMIT_MS_MAX = 600000UL;
+constexpr uint8_t LORA_REPLAY_WINDOW_BITS_MIN = 8;
+constexpr uint8_t CERT_RENEWAL_THRESHOLD_DAYS_MIN = 1;
+constexpr uint16_t CERT_RENEWAL_THRESHOLD_DAYS_MAX = 3650;
 constexpr uint32_t WEB_POST_CSRF_TOKEN_BYTES = 16;
 constexpr uint32_t LORA_REKEY_PERIOD_SEC = 86400UL;
 constexpr uint32_t LORA_REPLAY_TIME_WINDOW_SEC = 300UL;

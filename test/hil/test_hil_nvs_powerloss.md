@@ -36,3 +36,20 @@ This HIL case validates the certificate/key slot commit marker used by D-06.
 13. For EST auth mode 2, repeat the first enrollment and verify that the
     bootstrap token is removed from the encrypted NVS configuration after a
     successful enrollment. The token must never appear in serial logs.
+
+
+## Configuration transaction recovery
+
+For the centralized configuration transaction path, repeat the power interruption
+matrix at these durable boundaries:
+
+1. after the pending transaction marker is written and before candidate A/B
+   commit;
+2. after candidate commit and before subsystem apply returns;
+3. during subsystem failure rollback;
+4. after persisted rollback and before the transaction marker is cleared.
+
+After reboot, verify that the previous committed generation is restored when the
+candidate generation is marked incomplete, and that the transaction marker is
+cleared after recovery. No host-only test may be used as evidence for this
+physical power-loss acceptance.

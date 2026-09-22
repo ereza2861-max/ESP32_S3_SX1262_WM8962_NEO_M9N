@@ -60,3 +60,37 @@ committed atomically.
 Legacy per-key NVS fields are still read on boot. A configuration loaded from
 the legacy representation is normalized and written into the current atomic
 schema. A schema mismatch never gets interpreted as the current payload layout.
+
+
+## Configuration/security decisions D-A through D-D
+
+Applied additively from `QnA_DECISIONS.txt`:
+
+- D-A = B keeps `mqttCredentialRotationDays` as compatibility metadata; no
+  automatic certificate rotation is claimed before the formal MQTT PKI protocol.
+- D-B = B documents a layered secret hierarchy without deleting existing
+  subsystem storage paths. D-B1 = C prevents `loraKeyHex` from becoming a new
+  root-of-trust; D-B2 = D keeps secret residency type-dependent; D-B3 = B
+  retains a production secure-profile prerequisite while allowing development/HIL
+  profiles.
+- D-C = C adds bounded per-IP throttling with a retained global emergency
+  circuit breaker. The table is 16 entries with TTL/LRU eviction and uses the
+  client's textual address, so IPv4 and IPv6 are both represented where the
+  networking stack exposes them.
+- D-D = A adds `configApplyTransaction()` as the central multi-subsystem
+  transaction boundary. It records a durable pending marker, persists the
+  candidate through the existing Configuration Manager, invokes runtime apply,
+  and on failure restores both runtime and persistence. Boot reconciliation
+  selects the previous committed A/B generation when a matching incomplete
+  transaction is detected. Existing `configCommit()` callers remain compatible.
+
+The optional enhancements are represented by:
+- `test/native/test_config_range_pairs.cpp`: shared UI/backend boundary contract;
+- `test/native/test_config_concurrency.cpp`: concurrent snapshot/commit/rollback
+  stress harness with simulated readers;
+- `test/test_failure_injection.cpp`: subsystem-apply failure and power-loss
+  recovery scenarios.
+
+These host tests validate the deterministic transaction/range contracts. They do
+not claim physical ESP32 power-loss, RF, TLS, or production provisioning
+acceptance; the applicable HIL procedures remain authoritative.

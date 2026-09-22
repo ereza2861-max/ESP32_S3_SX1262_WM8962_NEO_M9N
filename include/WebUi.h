@@ -18,6 +18,15 @@ private:
   uint8_t authFailures_ = 0;
   uint32_t authFailureWindowCount_ = 0;
   uint32_t authBlockedUntilMs_ = 0;
+  struct AuthThrottleEntry {
+    String ip;
+    uint32_t windowStartMs = 0;
+    uint32_t blockedUntilMs = 0;
+    uint8_t failures = 0;
+    uint32_t lastSeenMs = 0;
+  };
+  static constexpr size_t AUTH_THROTTLE_ENTRIES = 16;
+  AuthThrottleEntry authThrottle_[AUTH_THROTTLE_ENTRIES]{};
   uint32_t csrfFailures_ = 0;
   uint8_t sessionSecret_[32] = {};
   uint8_t csrfToken_[16] = {};

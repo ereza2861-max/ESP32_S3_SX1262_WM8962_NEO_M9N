@@ -54,3 +54,22 @@ requires the password for verification. This is **not** transport encryption.
 For production, pair this with the Secure Boot/flash-encryption provisioning flow and
 use a device-specific CA-issued certificate policy. The current WebUI transport is
 HTTPS-only when provisioned; it deliberately does not fall back to plaintext HTTP.
+
+
+## Secret storage hierarchy
+
+The configuration/security decision uses a layered classification without
+removing existing storage namespaces:
+
+- non-secret configuration and operational state remain under the existing
+  atomic A/B configuration manager;
+- long-term device secrets use the encrypted-NVS/security-provisioning boundary
+  already required by the applicable subsystem;
+- ephemeral session keys/nonces that are intentionally RAM-only are not promoted
+  to persistent configuration;
+- `loraKeyHex` remains legacy application key material and is not a root key for
+  encrypting unrelated secrets.
+
+Production provisioning must use the secure production profile. Development/HIL
+profiles may be used for validation, but they are not production-security
+acceptance evidence.

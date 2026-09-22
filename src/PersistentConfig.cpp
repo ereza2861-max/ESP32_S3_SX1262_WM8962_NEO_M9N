@@ -9,6 +9,7 @@
 #include <freertos/semphr.h>
 #include <cstring>
 #include <cstdint>
+#include <functional>
 
 RuntimeConfig gConfig{
     Config::LORA_FREQ_MHZ,
@@ -31,6 +32,7 @@ RuntimeConfig gConfig{
     2};
 
 SemaphoreHandle_t gConfigMutex = nullptr;
+SemaphoreHandle_t gConfigTransactionMutex = nullptr;
 std::atomic<uint32_t> gConfigGeneration{0};
 
 namespace {
@@ -68,6 +70,15 @@ void configManagerTask(void*) {
 }
 } // namespace
 
+namespace {
+constexpr char NVS_NS[] = "fieldradio";
+constexpr char NVS_TXN_STATE[] = "cfg_txn_state";
+constexpr char NVS_TXN_PREV_GEN[] = "cfg_txn_prev";
+constexpr char NVS_TXN_CANDIDATE_GEN[] = "cfg_txn_candidate";
+constexpr uint8_t CONFIG_TXN_PENDING = 0xC1;
+constexpr uint8_t CONFIG_TXN_COMMITTED = 0xC2;
+}
+
 bool configSnapshot(RuntimeConfig& out) { uint32_t generation = 0; return configSnapshot(out, generation); }
 
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation) {
@@ -78,9 +89,8 @@ bool configSnapshot(RuntimeConfig& out, uint32_t& generation) {
   return true;
 }
 
-bool configCommit(const RuntimeConfig& candidate) { return configCommit(candidate, configGeneration()); }
-
-bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
+namespace {
+bool configCommitInternal(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
   if (!configQueue || !gConfigMutex) return false;
   SemaphoreHandle_t done = xSemaphoreCreateBinary();
   if (!done) return false;
@@ -94,12 +104,102 @@ bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
   vSemaphoreDelete(done);
   return result;
 }
+} // namespace
+
+bool configCommit(const RuntimeConfig& candidate) { return configCommit(candidate, configGeneration()); }
+
+bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
+  if (gConfigTransactionMutex &&
+      xSemaphoreTake(gConfigTransactionMutex, pdMS_TO_TICKS(5000)) != pdTRUE)
+    return false;
+  const bool result = configCommitInternal(candidate, expectedGeneration);
+  if (gConfigTransactionMutex) xSemaphoreGive(gConfigTransactionMutex);
+  return result;
+}
 
 uint32_t configGeneration() { return gConfigGeneration.load(std::memory_order_acquire); }
+
+bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGeneration,
+                            const std::function<bool()>& apply,
+                            const std::function<bool()>& rollbackRuntime) {
+  if (!gConfigTransactionMutex ||
+      xSemaphoreTake(gConfigTransactionMutex, pdMS_TO_TICKS(5000)) != pdTRUE)
+    return false;
+  auto unlock = [&]() { xSemaphoreGive(gConfigTransactionMutex); };
+
+  RuntimeConfig previous;
+  uint32_t previousGeneration = 0;
+  if (!configSnapshot(previous, previousGeneration) || previousGeneration != expectedGeneration) { unlock(); return false; }
+
+  const uint32_t candidateGeneration =
+      expectedGeneration == UINT32_MAX ? 1U : expectedGeneration + 1U;
+
+  Preferences journal;
+  if (!journal.begin(NVS_NS, false)) { unlock(); return false; }
+  bool journalOk =
+      journal.putUInt(NVS_TXN_PREV_GEN, previousGeneration) == sizeof(uint32_t) &&
+      journal.putUInt(NVS_TXN_CANDIDATE_GEN, candidateGeneration) == sizeof(uint32_t) &&
+      journal.putUChar(NVS_TXN_STATE, CONFIG_TXN_PENDING) == sizeof(uint8_t);
+  journal.end();
+  if (!journalOk) { unlock(); return false; }
+
+  if (!configCommitInternal(candidate, expectedGeneration)) {
+    Preferences clear;
+    if (clear.begin(NVS_NS, false)) {
+      (void)clear.remove(NVS_TXN_STATE);
+      (void)clear.remove(NVS_TXN_PREV_GEN);
+      (void)clear.remove(NVS_TXN_CANDIDATE_GEN);
+      clear.end();
+    }
+    unlock();
+    return false;
+  }
+
+  if (apply && apply()) {
+    Preferences committed;
+    const bool committedOpen = committed.begin(NVS_NS, false);
+    if (!committedOpen ||
+        committed.putUChar(NVS_TXN_STATE, CONFIG_TXN_COMMITTED) != sizeof(uint8_t)) {
+      if (committedOpen) committed.end();
+      const bool runtimeRollback = rollbackRuntime ? rollbackRuntime() : true;
+      const bool persistedRollback = configCommitInternal(previous, configGeneration());
+      unlock();
+      return runtimeRollback && persistedRollback;
+    }
+    committed.end();
+
+    Preferences clear;
+    if (clear.begin(NVS_NS, false)) {
+      (void)clear.remove(NVS_TXN_STATE);
+      (void)clear.remove(NVS_TXN_PREV_GEN);
+      (void)clear.remove(NVS_TXN_CANDIDATE_GEN);
+      clear.end();
+    }
+    unlock();
+    return true;
+  }
+
+  const bool runtimeRollback = rollbackRuntime ? rollbackRuntime() : true;
+  const bool persistedRollback = configCommitInternal(previous, configGeneration());
+  Preferences clear;
+  if (clear.begin(NVS_NS, false)) {
+    (void)clear.remove(NVS_TXN_STATE);
+    (void)clear.remove(NVS_TXN_PREV_GEN);
+    (void)clear.remove(NVS_TXN_CANDIDATE_GEN);
+    clear.end();
+  }
+  const bool result = runtimeRollback && persistedRollback;
+  unlock();
+  return result;
+}
 
 bool configManagerBegin() {
   if (configQueue) return true;
   if (!gConfigMutex) return false;
+  if (!gConfigTransactionMutex) {
+    gConfigTransactionMutex = xSemaphoreCreateMutex();
+    if (!gConfigTransactionMutex) return false;
+  }
   configQueue = xQueueCreateStatic(CONFIG_COMMAND_QUEUE_DEPTH, sizeof(ConfigCommand), configQueueStorage, &configQueueStruct);
   if (!configQueue) return false;
   if (xTaskCreate(configManagerTask, "ConfigMgr", 6144, nullptr, 2, &configTaskHandle) != pdPASS) {
@@ -109,7 +209,6 @@ bool configManagerBegin() {
 }
 
 namespace {
-constexpr char NVS_NS[] = "fieldradio";
 constexpr uint32_t CONFIG_VERSION = Config::CONFIG_VERSION;
 constexpr size_t PASSWORD_SALT_BYTES = 16;
 constexpr uint32_t PASSWORD_HASH_ROUNDS = 10000;
@@ -264,18 +363,40 @@ bool generationNewer(uint32_t a,uint32_t b){return a!=b&&static_cast<int32_t>(a-
 bool readAtomicSlot(Preferences& p,const char* slot,const char* commit,AtomicConfigRecord& r){memset(&r,0,sizeof(r));if(p.getUChar(commit,0)!=ATOMIC_CONFIG_COMMIT)return false;if(p.getBytes(slot,&r,sizeof(r))!=sizeof(r))return false;return r.magic==ATOMIC_CONFIG_MAGIC&&r.schema==ATOMIC_CONFIG_SCHEMA&&r.payloadSize==sizeof(r.payload)&&r.generation!=0&&r.crc==atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));}
 
 bool validRuntimeConfig(const RuntimeConfig& c) {
-  return c.validRadio()&&c.volume<=100&&c.audioRecordSource<=Config::AUDIO_SOURCE_USB&&c.audioRecordQuality<=2&&c.classDBoostLevel<=7&&c.wakePeriodSec>=60UL&&c.wakePeriodSec<=7UL*24UL*60UL*60UL&&(!c.classDEnabled||Config::CLASS_D_ENABLED)&&c.deepSleepIdleMs>=60000UL&&c.deepSleepIdleMs<=24UL*60UL*60UL*1000UL&&c.deepSleepWakeGraceMs>=100UL&&c.deepSleepWakeGraceMs<=60000UL&&c.criticalShutdownDelayMs>=100UL&&c.criticalShutdownDelayMs<=600000UL&&isfinite(c.batteryLowThreshold)&&isfinite(c.batteryCriticalThreshold)&&c.batteryCriticalThreshold>=2.5f&&c.batteryLowThreshold>c.batteryCriticalThreshold&&c.batteryLowThreshold<=4.2f&&(!c.mqttEnabled||(!c.mqttHost.isEmpty()&&c.mqttHost.length()<=253&&c.mqttHost.indexOf('|')<0&&c.mqttPort!=0))&&c.mqttReconnectMinMs>=1000UL&&c.mqttReconnectMaxMs>=c.mqttReconnectMinMs&&c.mqttReconnectMaxMs<=3600000UL&&c.mqttTelemetryPeriodMs>=1000UL&&c.mqttTelemetryPeriodMs<=86400000UL&&c.mqttHealthPeriodMs>=1000UL&&c.mqttHealthPeriodMs<=86400000UL&&c.mqttCredentialRotationDays>=1&&c.mqttCredentialRotationDays<=3650&&c.voxThreshold>=0.005f&&c.voxThreshold<=1.0f&&c.voxHangMs>=50U&&c.voxHangMs<=10000U&&c.loraHopChannelProfile>=1&&c.loraHopChannelProfile<=Config::HOP_CHANNEL_MAX&&c.sensorScanIntervalMs>=100&&c.sensorScanIntervalMs<=60000&&c.sensorScanWindowMs>0&&c.sensorScanWindowMs<=c.sensorScanIntervalMs&&c.sensorScanDurationMs>=100&&c.sensorScanDurationMs<=60000&&c.sensorConnectTimeoutMs>=500&&c.sensorConnectTimeoutMs<=30000&&c.sensorNodeEvictionMs>=10000&&c.sensorNodeEvictionMs<=7UL*86400000UL&&c.sensorMaxNodes>=1&&c.sensorMaxNodes<=Config::SENSOR_MAX_NODES_VALUE&&c.blePairingFailureThreshold>=1&&c.blePairingFailureThreshold<=20&&c.blePairingBlockMs>=1000&&c.blePairingBlockMs<=86400000UL&&c.webSessionTimeoutMs>=60000UL&&c.webSessionTimeoutMs<=86400000UL&&c.webAuthRateLimitMs>=100&&c.webAuthRateLimitMs<=600000UL&&c.csrfPolicy<=1&&c.blePairingPolicy<=1&&c.ecdhRekeyPolicy<=1&&c.replayWindowBits>=8&&c.replayWindowBits<=Config::LORA_REPLAY_WINDOW_BITS&&
+  return c.validRadio()&&c.volume<=100&&c.audioRecordSource<=Config::AUDIO_SOURCE_USB&&c.audioRecordQuality<=2&&c.classDBoostLevel<=7&&c.wakePeriodSec>=Config::WAKE_PERIOD_SEC_MIN&&c.wakePeriodSec<=Config::WAKE_PERIOD_SEC_MAX&&(!c.classDEnabled||Config::CLASS_D_ENABLED)&&c.deepSleepIdleMs>=Config::DEEP_SLEEP_IDLE_MS_MIN&&c.deepSleepIdleMs<=Config::DEEP_SLEEP_IDLE_MS_MAX&&c.deepSleepWakeGraceMs>=100UL&&c.deepSleepWakeGraceMs<=60000UL&&c.criticalShutdownDelayMs>=100UL&&c.criticalShutdownDelayMs<=600000UL&&isfinite(c.batteryLowThreshold)&&isfinite(c.batteryCriticalThreshold)&&c.batteryCriticalThreshold>=Config::BATTERY_CRITICAL_THRESHOLD_MIN&&c.batteryLowThreshold>c.batteryCriticalThreshold&&c.batteryLowThreshold<=Config::BATTERY_LOW_THRESHOLD_MAX&&(!c.mqttEnabled||(!c.mqttHost.isEmpty()&&c.mqttHost.length()<=253&&c.mqttHost.indexOf('|')<0&&c.mqttPort!=0))&&c.mqttReconnectMinMs>=Config::MQTT_RECONNECT_MS_MIN&&c.mqttReconnectMaxMs>=c.mqttReconnectMinMs&&c.mqttReconnectMaxMs<=Config::MQTT_RECONNECT_MS_MAX&&c.mqttTelemetryPeriodMs>=Config::MQTT_TELEMETRY_PERIOD_MS_MIN&&c.mqttTelemetryPeriodMs<=Config::MQTT_TELEMETRY_PERIOD_MS_MAX&&c.mqttHealthPeriodMs>=1000UL&&c.mqttHealthPeriodMs<=86400000UL&&c.mqttCredentialRotationDays>=1&&c.mqttCredentialRotationDays<=3650&&c.voxThreshold>=0.005f&&c.voxThreshold<=1.0f&&c.voxHangMs>=50U&&c.voxHangMs<=10000U&&c.loraHopChannelProfile>=1&&c.loraHopChannelProfile<=Config::HOP_CHANNEL_MAX&&c.sensorScanIntervalMs>=100&&c.sensorScanIntervalMs<=60000&&c.sensorScanWindowMs>0&&c.sensorScanWindowMs<=c.sensorScanIntervalMs&&c.sensorScanDurationMs>=100&&c.sensorScanDurationMs<=60000&&c.sensorConnectTimeoutMs>=500&&c.sensorConnectTimeoutMs<=30000&&c.sensorNodeEvictionMs>=10000&&c.sensorNodeEvictionMs<=7UL*86400000UL&&c.sensorMaxNodes>=1&&c.sensorMaxNodes<=Config::SENSOR_MAX_NODES_VALUE&&c.blePairingFailureThreshold>=1&&c.blePairingFailureThreshold<=20&&c.blePairingBlockMs>=1000&&c.blePairingBlockMs<=86400000UL&&c.webSessionTimeoutMs>=Config::WEB_SESSION_TIMEOUT_MS_MIN&&c.webSessionTimeoutMs<=Config::WEB_SESSION_TIMEOUT_MS_MAX&&c.webAuthRateLimitMs>=Config::WEB_AUTH_RATE_LIMIT_MS_MIN&&c.webAuthRateLimitMs<=Config::WEB_AUTH_RATE_LIMIT_MS_MAX&&c.csrfPolicy<=1&&c.blePairingPolicy<=1&&c.ecdhRekeyPolicy<=1&&c.replayWindowBits>=Config::LORA_REPLAY_WINDOW_BITS_MIN&&c.replayWindowBits<=Config::LORA_REPLAY_WINDOW_BITS&&
     c.estServerUrl.length()<=253&&c.estLabel.length()<=95&&!c.estLabel.isEmpty()&&
     c.estAuthMode<=2&&c.estUsername.length()<=64&&c.estPassword.length()<=64&&c.estBootstrapToken.length()<=128&&
     (c.estAuthMode!=1 || (validEstCredential(c.estUsername,64) && validEstCredential(c.estPassword,64)))&&
     (c.estAuthMode!=2 || validEstCredential(c.estBootstrapToken,128) || c.estBootstrapTokenConsumed)&&
-    c.certRenewalThresholdDays>=1&&c.certRenewalThresholdDays<=3650&&
+    c.certRenewalThresholdDays>=Config::CERT_RENEWAL_THRESHOLD_DAYS_MIN&&c.certRenewalThresholdDays<=Config::CERT_RENEWAL_THRESHOLD_DAYS_MAX&&
     c.certCheckPeriodMs>=3600000UL&&c.certCheckPeriodMs<=7UL*86400000UL&&
     (!c.certLifecycleEnabled || (c.estServerUrl.startsWith("https://") && c.estLabel.startsWith("/")))&&
     isfinite(c.batteryCalibration)&&c.batteryCalibration>=0.5f&&c.batteryCalibration<=1.5f&&c.validLoRaWAN()&&validCallsign(c.callsign)&&validHexKey(c.loraKeyHex)&&!c.apSsid.isEmpty()&&c.apSsid.length()<=32&&c.apPassword.length()>=8&&c.apPassword.length()<=63&&!c.webUser.isEmpty()&&c.webUser.length()<=32&&c.webPasswordConfigured();
 }
 
-bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation){Preferences p;if(!p.begin(NVS_NS,true))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);if(!va&&!vb){p.end();return false;}const auto& chosen=va&&(!vb||generationNewer(a.generation,b.generation))?a:b;RuntimeConfig candidate=out;if(!decodePayload(chosen.payload,candidate)||!validRuntimeConfig(candidate)){p.end();return false;}out=candidate;generation=chosen.generation;p.end();return true;}
+bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation){
+  Preferences p;
+  if(!p.begin(NVS_NS,true)) return false;
+  AtomicConfigRecord a{},b{};
+  bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);
+  if(!va&&!vb){p.end();return false;}
+  const AtomicConfigRecord* newest = va&&(!vb||generationNewer(a.generation,b.generation)) ? &a : &b;
+  const AtomicConfigRecord* chosen = newest;
+  const bool pending = p.getUChar(NVS_TXN_STATE, 0) == CONFIG_TXN_PENDING;
+  const uint32_t candidateGeneration = p.getUInt(NVS_TXN_CANDIDATE_GEN, 0);
+  const uint32_t previousGeneration = p.getUInt(NVS_TXN_PREV_GEN, 0);
+  if (pending && newest->generation == candidateGeneration && previousGeneration != 0) {
+    if (va && vb) {
+      const AtomicConfigRecord* previous =
+          (a.generation == previousGeneration) ? &a :
+          (b.generation == previousGeneration) ? &b : nullptr;
+      if (previous) chosen = previous;
+    }
+  }
+  RuntimeConfig candidate=out;
+  if(!decodePayload(chosen->payload,candidate)||!validRuntimeConfig(candidate)){p.end();return false;}
+  out=candidate;generation=chosen->generation;p.end();return true;
+}
 
 bool saveAtomicConfig(const RuntimeConfig& source){Preferences p;if(!p.begin(NVS_NS,false))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);uint32_t current=0;bool writeA=true;if(va&&(!vb||generationNewer(a.generation,b.generation))){current=a.generation;writeA=false;}else if(vb){current=b.generation;writeA=true;}uint32_t next=current==UINT32_MAX?1U:current+1U;AtomicConfigRecord r{};r.magic=ATOMIC_CONFIG_MAGIC;r.schema=ATOMIC_CONFIG_SCHEMA;r.payloadSize=sizeof(r.payload);r.generation=next;encodePayload(source,r.payload);r.crc=atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));const char* sk=writeA?NVS_SLOT_A:NVS_SLOT_B;const char* ck=writeA?NVS_COMMIT_A:NVS_COMMIT_B;(void)p.remove(ck);if(p.putBytes(sk,&r,sizeof(r))!=sizeof(r)){p.end();return false;}AtomicConfigRecord verify{};if(p.getBytes(sk,&verify,sizeof(verify))!=sizeof(verify)||memcmp(&verify,&r,sizeof(r))!=0){p.end();return false;}if(p.putUChar(ck,ATOMIC_CONFIG_COMMIT)!=sizeof(uint8_t)){p.end();return false;}AtomicConfigRecord committed{};bool ok=readAtomicSlot(p,sk,ck,committed)&&committed.generation==next&&memcmp(&committed,&r,sizeof(r))==0;p.end();if(!ok)return false;gConfigGeneration.store(next,std::memory_order_release);Preferences legacy;if(legacy.begin(NVS_NS,false)){(void)legacy.remove("webpass");legacy.end();}return true;}
 
@@ -346,6 +467,13 @@ void RuntimeConfig::load() {
   if (loadAtomicConfig(atomicCandidate, atomicGeneration)) {
     *this = atomicCandidate;
     gConfigGeneration.store(atomicGeneration, std::memory_order_release);
+    Preferences recovery;
+    if (recovery.begin(NVS_NS, false)) {
+      (void)recovery.remove(NVS_TXN_STATE);
+      (void)recovery.remove(NVS_TXN_PREV_GEN);
+      (void)recovery.remove(NVS_TXN_CANDIDATE_GEN);
+      recovery.end();
+    }
     return;
   }
   Preferences prefs;
@@ -577,7 +705,7 @@ void RuntimeConfig::load() {
   }
   blePairingEnabled = candidate.blePairingEnabled;
   mqttEnabled = candidate.mqttEnabled;
-  if (candidate.wakePeriodSec >= 60UL && candidate.wakePeriodSec <= 7UL * 24UL * 60UL * 60UL)
+  if (candidate.wakePeriodSec >= Config::WAKE_PERIOD_SEC_MIN && candidate.wakePeriodSec <= Config::WAKE_PERIOD_SEC_MAX)
     wakePeriodSec = candidate.wakePeriodSec;
   if (candidate.classDBoostLevel <= 7)
     classDBoostLevel = candidate.classDBoostLevel;
@@ -610,7 +738,7 @@ void RuntimeConfig::load() {
     mqttReconnectMinMs = candidate.mqttReconnectMinMs;
     mqttReconnectMaxMs = candidate.mqttReconnectMaxMs;
   }
-  if (candidate.mqttTelemetryPeriodMs >= 1000UL && candidate.mqttTelemetryPeriodMs <= 86400000UL)
+  if (candidate.mqttTelemetryPeriodMs >= Config::MQTT_TELEMETRY_PERIOD_MS_MIN && candidate.mqttTelemetryPeriodMs <= Config::MQTT_TELEMETRY_PERIOD_MS_MAX)
     mqttTelemetryPeriodMs = candidate.mqttTelemetryPeriodMs;
   if (candidate.mqttHealthPeriodMs >= 1000UL && candidate.mqttHealthPeriodMs <= 86400000UL)
     mqttHealthPeriodMs = candidate.mqttHealthPeriodMs;
@@ -651,9 +779,9 @@ void RuntimeConfig::load() {
   if (candidate.blePairingBlockMs >= 1000 && candidate.blePairingBlockMs <= 86400000UL)
     blePairingBlockMs = candidate.blePairingBlockMs;
   sensorKeepAwake = candidate.sensorKeepAwake;
-  if (candidate.webSessionTimeoutMs >= 60000UL && candidate.webSessionTimeoutMs <= 86400000UL)
+  if (candidate.webSessionTimeoutMs >= Config::WEB_SESSION_TIMEOUT_MS_MIN && candidate.webSessionTimeoutMs <= Config::WEB_SESSION_TIMEOUT_MS_MAX)
     webSessionTimeoutMs = candidate.webSessionTimeoutMs;
-  if (candidate.webAuthRateLimitMs >= 100 && candidate.webAuthRateLimitMs <= 600000UL)
+  if (candidate.webAuthRateLimitMs >= Config::WEB_AUTH_RATE_LIMIT_MS_MIN && candidate.webAuthRateLimitMs <= Config::WEB_AUTH_RATE_LIMIT_MS_MAX)
     webAuthRateLimitMs = candidate.webAuthRateLimitMs;
   // CSRF-disabled mode is not a production-safe runtime policy. Treat
   // legacy/invalid value 2 as the strict default during load.
@@ -670,7 +798,7 @@ void RuntimeConfig::load() {
     estServerUrl = candidate.estServerUrl;
   if (candidate.estLabel.length() <= 95 && candidate.estLabel.startsWith("/"))
     estLabel = candidate.estLabel;
-  if (candidate.certRenewalThresholdDays >= 1 && candidate.certRenewalThresholdDays <= 3650)
+  if (candidate.certRenewalThresholdDays >= Config::CERT_RENEWAL_THRESHOLD_DAYS_MIN && candidate.certRenewalThresholdDays <= Config::CERT_RENEWAL_THRESHOLD_DAYS_MAX)
     certRenewalThresholdDays = candidate.certRenewalThresholdDays;
   if (candidate.certCheckPeriodMs >= 3600000UL && candidate.certCheckPeriodMs <= 7UL * 86400000UL)
     certCheckPeriodMs = candidate.certCheckPeriodMs;

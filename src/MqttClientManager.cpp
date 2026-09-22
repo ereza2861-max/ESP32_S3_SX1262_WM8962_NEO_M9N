@@ -769,15 +769,17 @@ void MqttClientManager::setEnabled(bool enabled) {
 }
 
 bool MqttClientManager::applyConfig() {
-  if (!gConfig.mqttEnabled) {
+  RuntimeConfig config;
+  if (!configSnapshot(config)) return false;
+  if (!config.mqttEnabled) {
     if (enabled_) setEnabled(false);
     return true;
   }
   enabled_ = true;
   const bool endpointChanged =
-      host_ != gConfig.mqttHost ||
-      port_ != gConfig.mqttPort ||
-      useTls_ != gConfig.mqttTlsRequired;
+      host_ != config.mqttHost ||
+      port_ != config.mqttPort ||
+      useTls_ != config.mqttTlsRequired;
   if (!loadCredentials()) return false;
   if (endpointChanged || !client_.connected()) {
     connected_ = false;
@@ -785,7 +787,7 @@ bool MqttClientManager::applyConfig() {
     secure_.stop();
     plain_.stop();
   }
-  useTls_ = gConfig.mqttTlsRequired;
+  useTls_ = config.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
@@ -798,12 +800,13 @@ bool MqttClientManager::applyConfig() {
   }
   client_.setServer(host_.c_str(), port_);
   nextRetryMs_ = 0;
-  retryDelayMs_ = gConfig.mqttReconnectMinMs;
+  retryDelayMs_ = config.mqttReconnectMinMs;
   return !host_.isEmpty() && port_ != 0;
 }
 
 void MqttClientManager::task() {
-  if (!enabled_) return;
+  RuntimeConfig config;
+  if (!enabled_ || !configSnapshot(config)) return;
   if (host_.isEmpty() || WiFi.status() != WL_CONNECTED) {
     if (connected_) auditEvent("DISCONNECT", client_.state());
     connected_ = false;
@@ -845,7 +848,7 @@ void MqttClientManager::task() {
       if (!secure_.connected()) {
         if (!secure_.connect(host_.c_str(), port_)) {
           nextRetryMs_ = millis() + retryDelayMs_;
-          retryDelayMs_ = min<uint32_t>(gConfig.mqttReconnectMaxMs, retryDelayMs_ * 2U);
+          retryDelayMs_ = min<uint32_t>(config.mqttReconnectMaxMs, retryDelayMs_ * 2U);
           return;
         }
       }
@@ -855,17 +858,17 @@ void MqttClientManager::task() {
     // selected for the production connection path.
     ok = pkiProvisioned_ && client_.connect(clientId.c_str(), nullptr, nullptr,
                                             willTopic.c_str(), 0,
-                                            gConfig.mqttRetainAvailability,
+                                            config.mqttRetainAvailability,
                                             willPayload, true);
     if (ok) {
       connected_ = true;
       auditEvent("CONNECT_OK", client_.state());
-      retryDelayMs_ = gConfig.mqttReconnectMinMs;
-      publish(willTopic, "online", gConfig.mqttRetainAvailability);
+      retryDelayMs_ = config.mqttReconnectMinMs;
+      publish(willTopic, "online", config.mqttRetainAvailability);
     } else {
       if (client_.state() == MQTT_CONNECT_BAD_CREDENTIALS) auditEvent("AUTH_FAIL", client_.state());
       else auditEvent("CONNECT_FAIL", client_.state());
-      retryDelayMs_ = min<uint32_t>(gConfig.mqttReconnectMaxMs, retryDelayMs_ * 2U);
+      retryDelayMs_ = min<uint32_t>(config.mqttReconnectMaxMs, retryDelayMs_ * 2U);
       nextRetryMs_ = millis() + retryDelayMs_;
     }
     return;
@@ -880,20 +883,20 @@ void MqttClientManager::task() {
     }
   }
   static uint32_t lastPublishMs = 0;
-  if (connected_ && millis() - lastPublishMs >= gConfig.mqttTelemetryPeriodMs) {
+  if (connected_ && millis() - lastPublishMs >= config.mqttTelemetryPeriodMs) {
     const String payload = makeLoRaWANUplinkJson();
     if (!payload.isEmpty() &&
-        publish(topic("telemetry"), payload, gConfig.mqttRetainTelemetry)) {
+        publish(topic("telemetry"), payload, config.mqttRetainTelemetry)) {
       lastPublishMs = millis();
     }
   }
 
   static uint32_t lastHealthMs = 0;
-  if (connected_ && millis() - lastHealthMs >= gConfig.mqttHealthPeriodMs) {
+  if (connected_ && millis() - lastHealthMs >= config.mqttHealthPeriodMs) {
     const String health = String("{\"uptime_ms\":") + String(millis()) +
                           ",\"free_heap\":" + String(ESP.getFreeHeap()) +
                           ",\"mqtt_connected\":true}";
-    if (publish(topic("health"), health, gConfig.mqttRetainAvailability))
+    if (publish(topic("health"), health, config.mqttRetainAvailability))
       lastHealthMs = millis();
   }
 }

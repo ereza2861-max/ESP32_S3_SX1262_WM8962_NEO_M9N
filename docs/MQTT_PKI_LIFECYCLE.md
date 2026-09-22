@@ -151,3 +151,12 @@ certificates are accepted by the mbedTLS X.509 parser.
 - `TOKEN_CLEAR_FAILED`: the certificate was installed but the mode-2 bootstrap
   token could not be committed as cleared; inspect NVS/config state before
   repeating enrollment.
+
+
+## Configuration compatibility note
+
+`RuntimeConfig::mqttCredentialRotationDays` remains a persisted compatibility
+field for existing configuration/API consumers. It is metadata only and is not
+an automatic certificate-rotation trigger. This is consistent with MQTT-001:
+automatic self-service rotation remains deferred until the formal MQTT PKI
+protocol lifecycle is approved.

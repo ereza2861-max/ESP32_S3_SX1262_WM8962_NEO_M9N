@@ -59,7 +59,8 @@ static String jsonEscape(const String& input) {
 }
 
 static String configBackupPlaintext() {
-  const RuntimeConfig& c = gConfig;
+  RuntimeConfig c;
+  if (!configSnapshot(c)) return String();
   String p;
   p.reserve(512);
   p += "freq=" + String(c.loraFreqMHz, 6) + "\n";
@@ -93,10 +94,11 @@ static String configBackupPlaintext() {
 }
 
 static bool backupKey(uint8_t key[32]) {
-  if (!key || gConfig.webPasswordHashHex.length() != 64) return false;
+  RuntimeConfig config;
+  if (!key || !configSnapshot(config) || config.webPasswordHashHex.length() != 64) return false;
   for (size_t i = 0; i < 32; ++i) {
-    const char a = gConfig.webPasswordHashHex[i * 2];
-    const char b = gConfig.webPasswordHashHex[i * 2 + 1];
+    const char a = config.webPasswordHashHex[i * 2];
+    const char b = config.webPasswordHashHex[i * 2 + 1];
     auto n = [](char c) -> int {
       if (c >= '0' && c <= '9') return c - '0';
       if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -310,7 +312,7 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <button onclick="play()">PLAY</button><button onclick="pausePlay(1)">PAUSE</button><button onclick="pausePlay(0)">RESUME</button><button onclick="stopPlay()">STOP</button><input id=seekms type=number value="0" min="0"><button onclick="seekPlay()">SEEK ms</button><button onclick="queue()">QUEUE</button><button onclick="clearQueue()">CLEAR QUEUE</button>
 <button onclick="tone(880,120)">BEEP</button>
 <label>USB monitor <input id=usbmon type=checkbox onchange="setUsbMonitor()"></label><label>SD→USB <input id=usbtransport type=checkbox onchange="setUsbTransport()"></label>
-<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX threshold <input id=voxThreshold type=number step="0.01" min="0.01" max="1" value="0.08"></label><label>hang ms <input id=voxHang type=number min="50" max="5000" value="700"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label><label>Record quality <select id=recordQuality onchange="setRecordQuality()"><option value="low">8k mono</option><option value="medium">16k mono</option><option value="high" selected>44.1k stereo</option></select></label>
+<label>Loopback <input id=loop type=checkbox onchange="setLoopback()"></label><label>VOX threshold <input id=voxThreshold type=number step="0.005" min="0.005" max="1" value="0.08"></label><label>hang ms <input id=voxHang type=number min="50" max="10000" value="700"></label><label>AEC <input id=aec type=checkbox onchange="setAec()"></label><label>VOX <input id=vox type=checkbox onchange="setVox()"></label><label>Record quality <select id=recordQuality onchange="setRecordQuality()"><option value="low">8k mono</option><option value="medium">16k mono</option><option value="high" selected>44.1k stereo</option></select></label>
 </div>
 <div class=card><input id=msg placeholder="LoRa message">
 <button onclick="send()">Send</button></div><div class=card><h3>Messages <span id=unreadBadge>0 unread</span></h3>
@@ -377,7 +379,7 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <label>BLE reader enabled <input id=bleEnabled type=checkbox checked></label><label>BLE pairing <input id=blePairing type=checkbox checked></label>
 <label>BLE scan interval/window ms <input id=bleScanInterval type=number min=100><input id=bleScanWindow type=number min=1></label>
 <label>BLE scan duration/connect timeout ms <input id=bleScanDuration type=number min=100><input id=bleConnectTimeout type=number min=500></label>
-<label>BLE eviction ms <input id=bleEviction type=number min=10000></label><label>BLE max nodes <input id=bleMaxNodes type=number min=1 max=3></label>
+<label>BLE eviction ms <input id=bleEviction type=number min=10000></label><label>BLE max nodes <input id=bleMaxNodes type=number min=1 max=8></label>
 <label>BLE encryption required <input id=bleEncryption type=checkbox checked></label><label>BLE pairing failure threshold <input id=bleFailureThreshold type=number min=1 max=20></label>
 <label>BLE pairing block ms <input id=bleBlockMs type=number min=1000></label><label>BLE keep-awake <input id=bleKeepAwake type=checkbox checked></label>
 <label>ADR enabled <input id=adr type=checkbox></label><label>HOP enabled <input id=hop type=checkbox></label><label>HOP channel profile <input id=hopProfile type=number min=1 max=8></label>
@@ -1005,6 +1007,34 @@ bool WebUi::auth() {
     server_.send(503, "text/plain", "configuration unavailable");
     return false;
   }
+
+  constexpr uint32_t AUTH_ENTRY_TTL_MS = 5UL * 60UL * 1000UL;
+  const String clientIp = server_.client().remoteIP().toString();
+  AuthThrottleEntry* entry = nullptr;
+  AuthThrottleEntry* eviction = &authThrottle_[0];
+  for (auto& candidate : authThrottle_) {
+    const bool expired = !candidate.ip.isEmpty() &&
+                         now - candidate.lastSeenMs >= AUTH_ENTRY_TTL_MS;
+    if (candidate.ip == clientIp && !candidate.ip.isEmpty() && !expired) {
+      entry = &candidate;
+      break;
+    }
+    if (expired || candidate.lastSeenMs < eviction->lastSeenMs) eviction = &candidate;
+  }
+  if (!entry) {
+    entry = eviction;
+    *entry = AuthThrottleEntry{};
+    entry->ip = clientIp;
+  }
+  entry->lastSeenMs = now;
+
+  if (static_cast<int32_t>(now - entry->blockedUntilMs) < 0) {
+    server_.send(429, "text/plain", "too many authentication failures");
+    return false;
+  }
+
+  // Keep the legacy global counters as an emergency circuit breaker. The
+  // primary limiter is per client/IP, with bounded state and expiry.
   if (static_cast<int32_t>(now - authBlockedUntilMs_) < 0) {
     server_.send(429, "text/plain", "too many authentication failures");
     return false;
@@ -1012,20 +1042,33 @@ bool WebUi::auth() {
 
   if (!sessionValid()) {
     if (!basicAuthMatches(server_, config.webUser, config)) {
-      if (now - authFailureWindowStartMs_ >= 60000) {
-        authFailureWindowStartMs_ = now;
-        authFailures_ = 0;
+      if (now - entry->windowStartMs >= 60000U) {
+        entry->windowStartMs = now;
+        entry->failures = 0;
       }
+      ++entry->failures;
       ++authFailures_;
       ++authFailureWindowCount_;
       auditAuth(false);
-      if (authFailures_ >= 5) {
-        authBlockedUntilMs_ = now + 30000;
+
+      if (entry->failures >= 5) {
+        entry->blockedUntilMs = now + 30000U;
+        entry->failures = 0;
+      }
+      if (now - authFailureWindowStartMs_ >= 60000U) {
+        authFailureWindowStartMs_ = now;
+        authFailures_ = 0;
+      }
+      if (authFailures_ >= 20) {
+        authBlockedUntilMs_ = now + 30000U;
         authFailures_ = 0;
       }
       server_.requestAuthentication();
       return false;
     }
+
+    entry->failures = 0;
+    entry->windowStartMs = now;
     authFailures_ = 0;
     authFailureWindowCount_ = 0;
     authFailureWindowStartMs_ = now;
@@ -1279,6 +1322,11 @@ void WebUi::handleApiVersion() {
 }
 
 void WebUi::handleStatus() {
+  RuntimeConfig config;
+  if (!configSnapshot(config)) {
+    server_.send(503, "text/plain", "configuration unavailable");
+    return;
+  }
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
 
@@ -1329,56 +1377,56 @@ void WebUi::handleStatus() {
   j += "\"rxActive\":" + String(gState.rxActive ? "true":"false") + ",";
   j += "\"recordingPaused\":" + String(gState.recordingPaused ? "true":"false") + ",\"playing\":" + String(gState.playing ? "true":"false") + ",\"playbackPaused\":" + String(gState.playbackPaused ? "true":"false") + ",\"playbackPositionMs\":" + String(gState.playbackPositionMs) + ",\"queueDepth\":" + String(gState.queueDepth) + ",\"vox\":" + String(gState.vox ? "true":"false") + ",\"voiceTxPackets\":" + String(gState.voiceTxPackets) + ",\"voiceRxPackets\":" + String(gState.voiceRxPackets) + ",\"voiceDrops\":" + String(gState.voiceDrops) + ",";
   j += "\"volume\":" + String(gState.volume) + ",";
-  j += "\"runtimeAdvanced\":{\"mqttEnabled\":" + String(gConfig.mqttEnabled ? "true" : "false") +
-       ",\"wakePeriodSec\":" + String(gConfig.wakePeriodSec) +
-       ",\"deepSleepEnabled\":" + String(gConfig.deepSleepEnabled ? "true" : "false") +
-       ",\"deepSleepIdleMs\":" + String(gConfig.deepSleepIdleMs) +
-       ",\"deepSleepWakeGraceMs\":" + String(gConfig.deepSleepWakeGraceMs) +
-       ",\"criticalShutdownDelayMs\":" + String(gConfig.criticalShutdownDelayMs) +
-       ",\"batteryLowThreshold\":" + String(gConfig.batteryLowThreshold, 3) +
-       ",\"batteryCriticalThreshold\":" + String(gConfig.batteryCriticalThreshold, 3) +
-       ",\"classDEnabled\":" + String(gConfig.classDEnabled ? "true" : "false") +
-       ",\"classDBoostLevel\":" + String(gConfig.classDBoostLevel) +
+  j += "\"runtimeAdvanced\":{\"mqttEnabled\":" + String(config.mqttEnabled ? "true" : "false") +
+       ",\"wakePeriodSec\":" + String(config.wakePeriodSec) +
+       ",\"deepSleepEnabled\":" + String(config.deepSleepEnabled ? "true" : "false") +
+       ",\"deepSleepIdleMs\":" + String(config.deepSleepIdleMs) +
+       ",\"deepSleepWakeGraceMs\":" + String(config.deepSleepWakeGraceMs) +
+       ",\"criticalShutdownDelayMs\":" + String(config.criticalShutdownDelayMs) +
+       ",\"batteryLowThreshold\":" + String(config.batteryLowThreshold, 3) +
+       ",\"batteryCriticalThreshold\":" + String(config.batteryCriticalThreshold, 3) +
+       ",\"classDEnabled\":" + String(config.classDEnabled ? "true" : "false") +
+       ",\"classDBoostLevel\":" + String(config.classDBoostLevel) +
        ",\"classDHardwareEnabled\":" + String(Config::CLASS_D_ENABLED ? "true" : "false") +
-       ",\"mqttHost\":\"" + jsonEscape(gConfig.mqttHost) + "\"" +
-       ",\"mqttPort\":" + String(gConfig.mqttPort) +
-       ",\"mqttTlsRequired\":" + String(gConfig.mqttTlsRequired ? "true" : "false") +
-       ",\"mqttReconnectMinMs\":" + String(gConfig.mqttReconnectMinMs) +
-       ",\"mqttReconnectMaxMs\":" + String(gConfig.mqttReconnectMaxMs) +
-       ",\"mqttTelemetryPeriodMs\":" + String(gConfig.mqttTelemetryPeriodMs) +
-       ",\"mqttHealthPeriodMs\":" + String(gConfig.mqttHealthPeriodMs) +
-       ",\"mqttRetainTelemetry\":" + String(gConfig.mqttRetainTelemetry ? "true" : "false") +
-       ",\"mqttRetainAvailability\":" + String(gConfig.mqttRetainAvailability ? "true" : "false") +
-       ",\"mqttCredentialRotationDays\":" + String(gConfig.mqttCredentialRotationDays) +
-       ",\"voxEnabled\":" + String(gConfig.voxEnabled ? "true" : "false") +
-       ",\"voxThreshold\":" + String(gConfig.voxThreshold, 4) +
-       ",\"voxHangMs\":" + String(gConfig.voxHangMs) +
-       ",\"aecEnabled\":" + String(gConfig.aecEnabled ? "true" : "false") +
-       ",\"usbMonitor\":" + String(gConfig.usbMonitor ? "true" : "false") +
-       ",\"usbPlaybackTransport\":" + String(gConfig.usbPlaybackTransport ? "true" : "false") +
-       ",\"audioLoopback\":" + String(gConfig.audioLoopback ? "true" : "false") +
-       ",\"loraAdrEnabled\":" + String(gConfig.loraAdrEnabled ? "true" : "false") +
-       ",\"loraHopEnabled\":" + String(gConfig.loraHopEnabled ? "true" : "false") +
-       ",\"loraHopChannelProfile\":" + String(gConfig.loraHopChannelProfile) +
-       ",\"loraRangeTestMode\":" + String(gConfig.loraRangeTestMode ? "true" : "false") +
-       ",\"sensorReaderEnabled\":" + String(gConfig.sensorReaderEnabled ? "true" : "false") +
-       ",\"sensorScanIntervalMs\":" + String(gConfig.sensorScanIntervalMs) +
-       ",\"sensorScanWindowMs\":" + String(gConfig.sensorScanWindowMs) +
-       ",\"sensorScanDurationMs\":" + String(gConfig.sensorScanDurationMs) +
-       ",\"sensorConnectTimeoutMs\":" + String(gConfig.sensorConnectTimeoutMs) +
-       ",\"sensorNodeEvictionMs\":" + String(gConfig.sensorNodeEvictionMs) +
-       ",\"sensorMaxNodes\":" + String(gConfig.sensorMaxNodes) +
-       ",\"sensorRequireEncryption\":" + String(gConfig.sensorRequireEncryption ? "true" : "false") +
-       ",\"blePairingEnabled\":" + String(gConfig.blePairingEnabled ? "true" : "false") +
-       ",\"blePairingFailureThreshold\":" + String(gConfig.blePairingFailureThreshold) +
-       ",\"blePairingBlockMs\":" + String(gConfig.blePairingBlockMs) +
-       ",\"sensorKeepAwake\":" + String(gConfig.sensorKeepAwake ? "true" : "false") +
-       ",\"webSessionTimeoutMs\":" + String(gConfig.webSessionTimeoutMs) +
-       ",\"webAuthRateLimitMs\":" + String(gConfig.webAuthRateLimitMs) +
-       ",\"csrfPolicy\":" + String(gConfig.csrfPolicy) +
-       ",\"blePairingPolicy\":" + String(gConfig.blePairingPolicy) +
-       ",\"ecdhRekeyPolicy\":" + String(gConfig.ecdhRekeyPolicy) +
-       ",\"replayWindowBits\":" + String(gConfig.replayWindowBits) + "},";
+       ",\"mqttHost\":\"" + jsonEscape(config.mqttHost) + "\"" +
+       ",\"mqttPort\":" + String(config.mqttPort) +
+       ",\"mqttTlsRequired\":" + String(config.mqttTlsRequired ? "true" : "false") +
+       ",\"mqttReconnectMinMs\":" + String(config.mqttReconnectMinMs) +
+       ",\"mqttReconnectMaxMs\":" + String(config.mqttReconnectMaxMs) +
+       ",\"mqttTelemetryPeriodMs\":" + String(config.mqttTelemetryPeriodMs) +
+       ",\"mqttHealthPeriodMs\":" + String(config.mqttHealthPeriodMs) +
+       ",\"mqttRetainTelemetry\":" + String(config.mqttRetainTelemetry ? "true" : "false") +
+       ",\"mqttRetainAvailability\":" + String(config.mqttRetainAvailability ? "true" : "false") +
+       ",\"mqttCredentialRotationDays\":" + String(config.mqttCredentialRotationDays) +
+       ",\"voxEnabled\":" + String(config.voxEnabled ? "true" : "false") +
+       ",\"voxThreshold\":" + String(config.voxThreshold, 4) +
+       ",\"voxHangMs\":" + String(config.voxHangMs) +
+       ",\"aecEnabled\":" + String(config.aecEnabled ? "true" : "false") +
+       ",\"usbMonitor\":" + String(config.usbMonitor ? "true" : "false") +
+       ",\"usbPlaybackTransport\":" + String(config.usbPlaybackTransport ? "true" : "false") +
+       ",\"audioLoopback\":" + String(config.audioLoopback ? "true" : "false") +
+       ",\"loraAdrEnabled\":" + String(config.loraAdrEnabled ? "true" : "false") +
+       ",\"loraHopEnabled\":" + String(config.loraHopEnabled ? "true" : "false") +
+       ",\"loraHopChannelProfile\":" + String(config.loraHopChannelProfile) +
+       ",\"loraRangeTestMode\":" + String(config.loraRangeTestMode ? "true" : "false") +
+       ",\"sensorReaderEnabled\":" + String(config.sensorReaderEnabled ? "true" : "false") +
+       ",\"sensorScanIntervalMs\":" + String(config.sensorScanIntervalMs) +
+       ",\"sensorScanWindowMs\":" + String(config.sensorScanWindowMs) +
+       ",\"sensorScanDurationMs\":" + String(config.sensorScanDurationMs) +
+       ",\"sensorConnectTimeoutMs\":" + String(config.sensorConnectTimeoutMs) +
+       ",\"sensorNodeEvictionMs\":" + String(config.sensorNodeEvictionMs) +
+       ",\"sensorMaxNodes\":" + String(config.sensorMaxNodes) +
+       ",\"sensorRequireEncryption\":" + String(config.sensorRequireEncryption ? "true" : "false") +
+       ",\"blePairingEnabled\":" + String(config.blePairingEnabled ? "true" : "false") +
+       ",\"blePairingFailureThreshold\":" + String(config.blePairingFailureThreshold) +
+       ",\"blePairingBlockMs\":" + String(config.blePairingBlockMs) +
+       ",\"sensorKeepAwake\":" + String(config.sensorKeepAwake ? "true" : "false") +
+       ",\"webSessionTimeoutMs\":" + String(config.webSessionTimeoutMs) +
+       ",\"webAuthRateLimitMs\":" + String(config.webAuthRateLimitMs) +
+       ",\"csrfPolicy\":" + String(config.csrfPolicy) +
+       ",\"blePairingPolicy\":" + String(config.blePairingPolicy) +
+       ",\"ecdhRekeyPolicy\":" + String(config.ecdhRekeyPolicy) +
+       ",\"replayWindowBits\":" + String(config.replayWindowBits) + "},";
   j += "\"voiceRxLost\":" + String(gState.voiceRxLost) + ",";
   j += "\"messageHistory\":" + String(gState.messageHistoryCount) + ",\"messageUnread\":" + String(gState.messageUnreadCount) + ",\"sosEscalated\":" + String(gState.sosEscalated ? "true" : "false") + ",";
   j += "\"loraLog\":" + String(gState.loraPacketLogCount) + ",";
@@ -1471,7 +1519,7 @@ void WebUi::handleLoRaWANConfig() {
     for (size_t i = 0; i < raw.length(); ++i) {
       if (raw[i] < '0' || raw[i] > '9') return false;
       const uint32_t digit = static_cast<uint32_t>(raw[i] - '0');
-      if (value > (maxValue - digit) / 10U) return false;
+      if (digit > maxValue || value > (maxValue - digit) / 10U) return false;
       value = value * 10U + digit;
     }
     out = value;
@@ -3165,6 +3213,19 @@ void WebUi::handleConfig() {
     }
     return true;
   };
+  auto parseBoolArg = [&](const char* name, bool& out) {
+    if (!server_.hasArg(name)) return true;
+    const String raw = server_.arg(name);
+    if (raw == "0") {
+      out = false;
+      return true;
+    }
+    if (raw == "1") {
+      out = true;
+      return true;
+    }
+    return false;
+  };
 
   if (server_.hasArg("freq")) {
     const String raw = server_.arg("freq");
@@ -3277,23 +3338,25 @@ void WebUi::handleConfig() {
     candidate.mqttTlsRequired = raw == "1";
   }
   if (server_.hasArg("mqtt_reconnect_min_ms"))
-    if (!parseUnsigned(server_.arg("mqtt_reconnect_min_ms"), 3600000, value) || value < 1000) {
+    if (!parseUnsigned(server_.arg("mqtt_reconnect_min_ms"), Config::MQTT_RECONNECT_MS_MAX, value) || value < Config::MQTT_RECONNECT_MS_MIN) {
       server_.send(400, "text/plain", "invalid MQTT reconnect minimum"); return;
     } else candidate.mqttReconnectMinMs = value;
   if (server_.hasArg("mqtt_reconnect_max_ms"))
-    if (!parseUnsigned(server_.arg("mqtt_reconnect_max_ms"), 3600000, value) || value < 1000) {
+    if (!parseUnsigned(server_.arg("mqtt_reconnect_max_ms"), Config::MQTT_RECONNECT_MS_MAX, value) || value < Config::MQTT_RECONNECT_MS_MIN) {
       server_.send(400, "text/plain", "invalid MQTT reconnect maximum"); return;
     } else candidate.mqttReconnectMaxMs = value;
   if (server_.hasArg("mqtt_telemetry_period_ms"))
-    if (!parseUnsigned(server_.arg("mqtt_telemetry_period_ms"), 86400000, value) || value < 1000) {
+    if (!parseUnsigned(server_.arg("mqtt_telemetry_period_ms"), Config::MQTT_TELEMETRY_PERIOD_MS_MAX, value) || value < Config::MQTT_TELEMETRY_PERIOD_MS_MIN) {
       server_.send(400, "text/plain", "invalid MQTT telemetry period"); return;
     } else candidate.mqttTelemetryPeriodMs = value;
   if (server_.hasArg("mqtt_health_period_ms"))
     if (!parseUnsigned(server_.arg("mqtt_health_period_ms"), 86400000, value) || value < 1000) {
       server_.send(400, "text/plain", "invalid MQTT health period"); return;
     } else candidate.mqttHealthPeriodMs = value;
-  if (server_.hasArg("mqtt_retain_telemetry")) candidate.mqttRetainTelemetry = server_.arg("mqtt_retain_telemetry") == "1";
-  if (server_.hasArg("mqtt_retain_availability")) candidate.mqttRetainAvailability = server_.arg("mqtt_retain_availability") == "1";
+  if (!parseBoolArg("mqtt_retain_telemetry", candidate.mqttRetainTelemetry) ||
+      !parseBoolArg("mqtt_retain_availability", candidate.mqttRetainAvailability)) {
+    server_.send(400, "text/plain", "invalid MQTT retain setting"); return;
+  }
   if (server_.hasArg("mqtt_rotation_days"))
     if (!parseUnsigned(server_.arg("mqtt_rotation_days"), 3650, value) || value < 1) {
       server_.send(400, "text/plain", "invalid MQTT rotation policy"); return;
@@ -3313,7 +3376,7 @@ void WebUi::handleConfig() {
     }
   }
   if (server_.hasArg("cert_renewal_threshold_days")) {
-    if (!parseUnsigned(server_.arg("cert_renewal_threshold_days"), 3650, value) || value < 1) {
+    if (!parseUnsigned(server_.arg("cert_renewal_threshold_days"), Config::CERT_RENEWAL_THRESHOLD_DAYS_MAX, value) || value < Config::CERT_RENEWAL_THRESHOLD_DAYS_MIN) {
       server_.send(400, "text/plain", "invalid certificate renewal threshold"); return;
     }
     candidate.certRenewalThresholdDays = static_cast<uint16_t>(value);
@@ -3371,7 +3434,7 @@ void WebUi::handleConfig() {
     candidate.certLifecycleEnabled = raw == "1";
   }
   if (server_.hasArg("wake_period_sec")) {
-    if (!parseUnsigned(server_.arg("wake_period_sec"), 604800, value) || value < 60) {
+    if (!parseUnsigned(server_.arg("wake_period_sec"), Config::WAKE_PERIOD_SEC_MAX, value) || value < Config::WAKE_PERIOD_SEC_MIN) {
       server_.send(400, "text/plain", "invalid wake period"); return;
     }
     candidate.wakePeriodSec = value;
@@ -3384,7 +3447,7 @@ void WebUi::handleConfig() {
     candidate.deepSleepEnabled = raw == "1";
   }
   if (server_.hasArg("deep_sleep_idle_sec")) {
-    if (!parseUnsigned(server_.arg("deep_sleep_idle_sec"), 86400, value) || value < 60) {
+    if (!parseUnsigned(server_.arg("deep_sleep_idle_sec"), Config::DEEP_SLEEP_IDLE_MS_MAX / 1000UL, value) || value < Config::DEEP_SLEEP_IDLE_MS_MIN / 1000UL) {
       server_.send(400, "text/plain", "invalid deep-sleep idle timeout"); return;
     }
     candidate.deepSleepIdleMs = value * 1000UL;
@@ -3431,9 +3494,17 @@ void WebUi::handleConfig() {
     }
     candidate.classDBoostLevel = static_cast<uint8_t>(value);
   }
-  if (server_.hasArg("vox_enabled")) candidate.voxEnabled = server_.arg("vox_enabled") == "1";
+  if (!parseBoolArg("vox_enabled", candidate.voxEnabled)) {
+    server_.send(400, "text/plain", "invalid VOX setting"); return;
+  }
   if (server_.hasArg("vox_threshold")) {
-    candidate.voxThreshold = server_.arg("vox_threshold").toFloat();
+    const String raw = server_.arg("vox_threshold");
+    char* end = nullptr;
+    const float threshold = strtof(raw.c_str(), &end);
+    if (!end || *end != '\\0' || !isfinite(threshold)) {
+      server_.send(400, "text/plain", "invalid VOX threshold"); return;
+    }
+    candidate.voxThreshold = threshold;
   }
   if (server_.hasArg("vox_hang_ms")) {
     if (!parseUnsigned(server_.arg("vox_hang_ms"), 10000, value) || value < 50) {
@@ -3441,12 +3512,14 @@ void WebUi::handleConfig() {
     }
     candidate.voxHangMs = value;
   }
-  if (server_.hasArg("aec_enabled")) candidate.aecEnabled = server_.arg("aec_enabled") == "1";
-  if (server_.hasArg("usb_monitor")) candidate.usbMonitor = server_.arg("usb_monitor") == "1";
-  if (server_.hasArg("usb_transport")) candidate.usbPlaybackTransport = server_.arg("usb_transport") == "1";
-  if (server_.hasArg("loopback")) candidate.audioLoopback = server_.arg("loopback") == "1";
-  if (server_.hasArg("adr_enabled")) candidate.loraAdrEnabled = server_.arg("adr_enabled") == "1";
-  if (server_.hasArg("hop_enabled")) candidate.loraHopEnabled = server_.arg("hop_enabled") == "1";
+  if (!parseBoolArg("aec_enabled", candidate.aecEnabled) ||
+      !parseBoolArg("usb_monitor", candidate.usbMonitor) ||
+      !parseBoolArg("usb_transport", candidate.usbPlaybackTransport) ||
+      !parseBoolArg("loopback", candidate.audioLoopback) ||
+      !parseBoolArg("adr_enabled", candidate.loraAdrEnabled) ||
+      !parseBoolArg("hop_enabled", candidate.loraHopEnabled)) {
+    server_.send(400, "text/plain", "invalid boolean configuration"); return;
+  }
   if (server_.hasArg("hop_profile")) {
     if (!parseUnsigned(server_.arg("hop_profile"), Config::HOP_CHANNEL_MAX, value) || value == 0) {
       server_.send(400, "text/plain", "invalid hop profile"); return;
@@ -3460,9 +3533,11 @@ void WebUi::handleConfig() {
     }
     candidate.loraRangeTestMode = raw == "1";
   }
-  if (server_.hasArg("ble_enabled")) candidate.sensorReaderEnabled = server_.arg("ble_enabled") == "1";
+  if (!parseBoolArg("ble_enabled", candidate.sensorReaderEnabled)) {
+    server_.send(400, "text/plain", "invalid BLE reader setting"); return;
+  }
   if (server_.hasArg("ble_scan_interval_ms"))
-    if (!parseUnsigned(server_.arg("ble_scan_interval_ms"), 60000, value) || value < 100) {
+    if (!parseUnsigned(server_.arg("ble_scan_interval_ms"), Config::BLE_SCAN_INTERVAL_MS_MAX, value) || value < Config::BLE_SCAN_INTERVAL_MS_MIN) {
       server_.send(400, "text/plain", "invalid BLE scan interval"); return;
     } else candidate.sensorScanIntervalMs = value;
   if (server_.hasArg("ble_scan_window_ms"))
@@ -3485,7 +3560,9 @@ void WebUi::handleConfig() {
     if (!parseUnsigned(server_.arg("ble_max_nodes"), Config::SENSOR_MAX_NODES_VALUE, value) || value == 0) {
       server_.send(400, "text/plain", "invalid BLE maximum nodes"); return;
     } else candidate.sensorMaxNodes = static_cast<uint8_t>(value);
-  if (server_.hasArg("ble_encryption")) candidate.sensorRequireEncryption = server_.arg("ble_encryption") == "1";
+  if (!parseBoolArg("ble_encryption", candidate.sensorRequireEncryption)) {
+    server_.send(400, "text/plain", "invalid BLE encryption setting"); return;
+  }
   if (server_.hasArg("ble_failure_threshold"))
     if (!parseUnsigned(server_.arg("ble_failure_threshold"), 20, value) || value == 0) {
       server_.send(400, "text/plain", "invalid BLE pairing failure threshold"); return;
@@ -3494,13 +3571,15 @@ void WebUi::handleConfig() {
     if (!parseUnsigned(server_.arg("ble_block_ms"), 86400000UL, value) || value < 1000) {
       server_.send(400, "text/plain", "invalid BLE pairing block time"); return;
     } else candidate.blePairingBlockMs = value;
-  if (server_.hasArg("ble_keep_awake")) candidate.sensorKeepAwake = server_.arg("ble_keep_awake") == "1";
+  if (!parseBoolArg("ble_keep_awake", candidate.sensorKeepAwake)) {
+    server_.send(400, "text/plain", "invalid BLE keep-awake setting"); return;
+  }
   if (server_.hasArg("web_session_timeout_ms"))
-    if (!parseUnsigned(server_.arg("web_session_timeout_ms"), 86400000UL, value) || value < 60000) {
+    if (!parseUnsigned(server_.arg("web_session_timeout_ms"), Config::WEB_SESSION_TIMEOUT_MS_MAX, value) || value < Config::WEB_SESSION_TIMEOUT_MS_MIN) {
       server_.send(400, "text/plain", "invalid web session timeout"); return;
     } else candidate.webSessionTimeoutMs = value;
   if (server_.hasArg("web_auth_rate_limit_ms"))
-    if (!parseUnsigned(server_.arg("web_auth_rate_limit_ms"), 600000, value) || value < 100) {
+    if (!parseUnsigned(server_.arg("web_auth_rate_limit_ms"), Config::WEB_AUTH_RATE_LIMIT_MS_MAX, value) || value < Config::WEB_AUTH_RATE_LIMIT_MS_MIN) {
       server_.send(400, "text/plain", "invalid auth rate limit"); return;
     } else candidate.webAuthRateLimitMs = value;
   if (server_.hasArg("csrf_policy"))
@@ -3517,13 +3596,13 @@ void WebUi::handleConfig() {
     } else candidate.ecdhRekeyPolicy = static_cast<uint8_t>(value);
   if (server_.hasArg("replay_window_bits"))
     if (!parseUnsigned(server_.arg("replay_window_bits"), Config::LORA_REPLAY_WINDOW_BITS, value) ||
-        value < 8) {
+        value < Config::LORA_REPLAY_WINDOW_BITS_MIN) {
       server_.send(400, "text/plain", "replay window must be 8..32 bits"); return;
     } else candidate.replayWindowBits = static_cast<uint8_t>(value);
 
   if (!candidate.validRadio() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
-      candidate.wakePeriodSec < 60UL || candidate.wakePeriodSec > 604800UL ||
+      candidate.wakePeriodSec < Config::WAKE_PERIOD_SEC_MIN || candidate.wakePeriodSec > Config::WAKE_PERIOD_SEC_MAX ||
       candidate.deepSleepIdleMs < 60000UL ||
       candidate.deepSleepIdleMs > 86400000UL ||
       candidate.deepSleepWakeGraceMs < 100UL ||
@@ -3532,9 +3611,9 @@ void WebUi::handleConfig() {
       candidate.criticalShutdownDelayMs > 600000UL ||
       !isfinite(candidate.batteryLowThreshold) ||
       !isfinite(candidate.batteryCriticalThreshold) ||
-      candidate.batteryCriticalThreshold < 2.5f ||
+      candidate.batteryCriticalThreshold < Config::BATTERY_CRITICAL_THRESHOLD_MIN ||
       candidate.batteryLowThreshold <= candidate.batteryCriticalThreshold ||
-      candidate.batteryLowThreshold > 4.2f ||
+      candidate.batteryLowThreshold > Config::BATTERY_LOW_THRESHOLD_MAX ||
       candidate.classDBoostLevel > 7 ||
       (candidate.classDEnabled && !Config::CLASS_D_ENABLED) ||
       !validHex32(candidate.loraKeyHex) ||
@@ -3550,38 +3629,43 @@ void WebUi::handleConfig() {
   RuntimeConfig previous{};
   if (!configSnapshot(previous)) { server_.send(503, "text/plain", "configuration snapshot unavailable"); return; }
   const uint8_t previousSource = audio.recordSource();
-  auto rollback = [&]() {
-    (void)configCommit(previous);
-    (void)audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel);
-    (void)audio.setVox(previous.voxEnabled, previous.voxThreshold, previous.voxHangMs);
-    (void)audio.setAec(previous.aecEnabled);
-    (void)audio.setUsbMonitor(previous.usbMonitor);
-    (void)audio.setUsbPlaybackTransport(previous.usbPlaybackTransport);
-    (void)audio.setLoopback(previous.audioLoopback);
-    (void)audio.setRecordSource(previousSource);
-    (void)lora.setAdrEnabled(previous.loraAdrEnabled);
-    (void)mqtt.applyConfig();
-    if (radioChanged) (void)lora.applyConfig();
-    audio.setVolume(previous.volume);
-  };
-  if (candidate.audioRecordSource != previousSource && !audio.setRecordSource(candidate.audioRecordSource)) {
-    server_.send(503, "text/plain", "Audio source is busy"); return;
-  }
-  if (!configCommit(candidate, configGenerationSnapshot)) {
-    (void)audio.setRecordSource(previousSource);
-    server_.send(409, "text/plain", "configuration changed; retry"); return;
-  }
-  if (!audio.setClassDConfig(candidate.classDEnabled,candidate.classDBoostLevel) ||
-      !audio.setVox(candidate.voxEnabled,candidate.voxThreshold,candidate.voxHangMs) ||
-      !audio.setAec(candidate.aecEnabled) || !audio.setUsbMonitor(candidate.usbMonitor) ||
-      !audio.setUsbPlaybackTransport(candidate.usbPlaybackTransport) || !audio.setLoopback(candidate.audioLoopback)) {
-    rollback(); server_.send(503,"text/plain","audio configuration rejected"); return;
-  }
-  if (!mqtt.applyConfig()) { rollback(); server_.send(503,"text/plain","MQTT configuration rejected"); return; }
-  if (!lora.setAdrEnabled(candidate.loraAdrEnabled)) { rollback(); server_.send(503,"text/plain","ADR configuration rejected"); return; }
-  if (radioChanged && !lora.applyConfig()) { rollback(); server_.send(503,"text/plain","LoRa configuration rejected by radio"); return; }
-  audio.setVolume(candidate.volume);
 
+  const bool committed = configApplyTransaction(
+      candidate, configGenerationSnapshot,
+      [&]() {
+        if (candidate.audioRecordSource != previousSource &&
+            !audio.setRecordSource(candidate.audioRecordSource)) return false;
+        if (!audio.setClassDConfig(candidate.classDEnabled,candidate.classDBoostLevel) ||
+            !audio.setVox(candidate.voxEnabled,candidate.voxThreshold,candidate.voxHangMs) ||
+            !audio.setAec(candidate.aecEnabled) || !audio.setUsbMonitor(candidate.usbMonitor) ||
+            !audio.setUsbPlaybackTransport(candidate.usbPlaybackTransport) ||
+            !audio.setLoopback(candidate.audioLoopback)) return false;
+        if (!mqtt.applyConfig()) return false;
+        if (!lora.setAdrEnabled(candidate.loraAdrEnabled)) return false;
+        if (radioChanged && !lora.applyConfig()) return false;
+        audio.setVolume(candidate.volume);
+        return true;
+      },
+      [&]() {
+        bool ok = true;
+        ok = audio.setClassDConfig(previous.classDEnabled, previous.classDBoostLevel) && ok;
+        ok = audio.setVox(previous.voxEnabled, previous.voxThreshold, previous.voxHangMs) && ok;
+        ok = audio.setAec(previous.aecEnabled) && ok;
+        ok = audio.setUsbMonitor(previous.usbMonitor) && ok;
+        ok = audio.setUsbPlaybackTransport(previous.usbPlaybackTransport) && ok;
+        ok = audio.setLoopback(previous.audioLoopback) && ok;
+        ok = audio.setRecordSource(previousSource) && ok;
+        ok = lora.setAdrEnabled(previous.loraAdrEnabled) && ok;
+        ok = mqtt.applyConfig() && ok;
+        if (radioChanged) ok = lora.applyConfig() && ok;
+        audio.setVolume(previous.volume);
+        return ok;
+      });
+
+  if (!committed) {
+    server_.send(503, "text/plain", "configuration transaction failed; runtime and persistence rolled back");
+    return;
+  }
   {
     StateLock lock(gState);
     if (lock.ok()) {
@@ -3601,7 +3685,11 @@ void WebUi::handleConfig() {
 }
 
 void WebUi::handleConfigExport() {
-  const RuntimeConfig& c = gConfig;
+  RuntimeConfig c;
+  if (!configSnapshot(c)) {
+    server_.send(503, "text/plain", "configuration unavailable");
+    return;
+  }
   String j = "{";
   j += "\"freq\":" + String(c.loraFreqMHz, 3);
   j += ",\"bw\":" + String(c.loraBwKHz, 3);
@@ -3744,7 +3832,7 @@ void WebUi::handleConfigRestore() {
   if (!seenFreq || !seenBw || !seenSf || !seenCr || !candidate.validRadio() ||
       candidate.volume > 100 || candidate.audioRecordQuality > 2 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
-      candidate.wakePeriodSec < 60UL || candidate.wakePeriodSec > 604800UL ||
+      candidate.wakePeriodSec < Config::WAKE_PERIOD_SEC_MIN || candidate.wakePeriodSec > Config::WAKE_PERIOD_SEC_MAX ||
       candidate.deepSleepIdleMs < 60000UL ||
       candidate.deepSleepIdleMs > 86400000UL ||
       candidate.deepSleepWakeGraceMs < 100UL ||
@@ -3753,9 +3841,9 @@ void WebUi::handleConfigRestore() {
       candidate.criticalShutdownDelayMs > 600000UL ||
       !isfinite(candidate.batteryLowThreshold) ||
       !isfinite(candidate.batteryCriticalThreshold) ||
-      candidate.batteryCriticalThreshold < 2.5f ||
+      candidate.batteryCriticalThreshold < Config::BATTERY_CRITICAL_THRESHOLD_MIN ||
       candidate.batteryLowThreshold <= candidate.batteryCriticalThreshold ||
-      candidate.batteryLowThreshold > 4.2f ||
+      candidate.batteryLowThreshold > Config::BATTERY_LOW_THRESHOLD_MAX ||
       candidate.classDBoostLevel > 7 ||
       (candidate.classDEnabled && !Config::CLASS_D_ENABLED) ||
       !candidate.webPasswordConfigured()) {

@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "Config.h"
 #include <atomic>
+#include <functional>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -120,5 +121,10 @@ bool configSnapshot(RuntimeConfig& out);
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation);
 bool configCommit(const RuntimeConfig& candidate);
 bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration);
+// Atomically coordinates persisted configuration with runtime subsystem apply/rollback.
+// The journal is durable so an interrupted transaction can be recovered on boot.
+bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGeneration,
+                           const std::function<bool()>& apply,
+                           const std::function<bool()>& rollbackRuntime);
 uint32_t configGeneration();
 bool configManagerBegin();

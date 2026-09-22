@@ -432,6 +432,8 @@ static void watchdogSubscribe() {
 
 static void updateBattery(uint32_t now) {
 #if defined(ARDUINO_ARCH_ESP32)
+  RuntimeConfig config;
+  if (!configSnapshot(config)) return;
   if (Board::BATTERY_ADC < 0 ||
       (lastBatterySample != 0 &&
        now - lastBatterySample < Config::BATTERY_SAMPLE_PERIOD_MS)) {
@@ -442,7 +444,7 @@ static void updateBattery(uint32_t now) {
   const uint32_t mv = analogReadMilliVolts(Board::BATTERY_ADC);
   const float rawVoltage =
       (static_cast<float>(mv) / 1000.0f) * Config::BATTERY_DIVIDER_RATIO;
-  const float voltage = rawVoltage * gConfig.batteryCalibration;
+  const float voltage = rawVoltage * config.batteryCalibration;
 
   StateLock lock(gState);
   if (!lock.ok()) return;
@@ -452,12 +454,12 @@ static void updateBattery(uint32_t now) {
       voltage >= Config::BATTERY_RECHARGE_START_V &&
       isfinite(rawVoltage) &&
       fabsf(Config::BATTERY_FULL_V / max(rawVoltage, 0.01f) -
-            gConfig.batteryCalibration) > 0.05f;
+            config.batteryCalibration) > 0.05f;
   gState.batteryV = gState.batteryAvailable ? voltage : NAN;
   gState.batteryLow = gState.batteryAvailable &&
-                      voltage <= gConfig.batteryLowThreshold;
+                      voltage <= config.batteryLowThreshold;
   gState.batteryCritical = gState.batteryAvailable &&
-                           voltage <= gConfig.batteryCriticalThreshold;
+                           voltage <= config.batteryCriticalThreshold;
   if (gState.batteryAvailable) {
     const float pct = (voltage - Config::BATTERY_PERCENT_EMPTY_V) *
                       100.0f /
@@ -483,7 +485,7 @@ static void updateBattery(uint32_t now) {
       const float dv = gState.batteryHistoryV[last] - gState.batteryHistoryV[first];
       if (dt >= 60000U && dv < -0.001f) {
         const float rateVPerMin = (-dv) / (static_cast<float>(dt) / 60000.0f);
-        const float remainingV = max(0.0f, voltage - gConfig.batteryCriticalThreshold);
+        const float remainingV = max(0.0f, voltage - config.batteryCriticalThreshold);
         gState.batteryEstimatedMinutes = static_cast<int32_t>(
             constrain(remainingV / rateVPerMin, 0.0f, 100000.0f));
       } else {
@@ -515,6 +517,8 @@ static void updateBattery(uint32_t now) {
 }
 
 static bool shouldDeepSleep(uint32_t now) {
+  RuntimeConfig config;
+  if (!configSnapshot(config)) return false;
   bool critical = false;
   bool busy = false;
   {
@@ -526,13 +530,13 @@ static bool shouldDeepSleep(uint32_t now) {
   }
   // A continuously enabled BLE sensor gateway must not enter automatic deep
   // sleep or it would silently stop collecting external sensor nodes.
-  const bool sensorKeepAwake = gConfig.sensorReaderEnabled &&
-                               gConfig.sensorKeepAwake;
+  const bool sensorKeepAwake = config.sensorReaderEnabled &&
+                               config.sensorKeepAwake;
   busy = busy || sensorKeepAwake;
 
   if (critical) {
     if (!criticalBatterySince) criticalBatterySince = now;
-    if (now - criticalBatterySince >= gConfig.criticalShutdownDelayMs)
+    if (now - criticalBatterySince >= config.criticalShutdownDelayMs)
       return true;
   } else {
     criticalBatterySince = 0;
@@ -540,19 +544,24 @@ static bool shouldDeepSleep(uint32_t now) {
 
   static uint32_t idleSince = 0;
   setPowerProfile(busy || critical);
-  if (!gConfig.deepSleepEnabled || busy) {
+  if (!config.deepSleepEnabled || busy) {
     idleSince = now;
     return false;
   }
 
   if (!idleSince) idleSince = now;
-  if (now - idleSince >= gConfig.deepSleepIdleMs) {
+  if (now - idleSince >= config.deepSleepIdleMs) {
     return true;
   }
   return false;
 }
 
 static void enterDeepSleep() {
+  RuntimeConfig config;
+  if (!configSnapshot(config)) {
+    Serial.println("POWER: configuration unavailable; aborting deep sleep");
+    return;
+  }
   Serial.println("POWER: entering deep sleep");
   Serial.flush();
 
@@ -568,11 +577,11 @@ static void enterDeepSleep() {
   if (Board::BTN_SOS >= 0) wakeMask |= 1ULL << Board::BTN_SOS;
 
   const uint64_t wakePeriodUs =
-      static_cast<uint64_t>(gConfig.wakePeriodSec) * 1000000ULL;
+      static_cast<uint64_t>(config.wakePeriodSec) * 1000000ULL;
   const esp_err_t timerWakeErr = esp_sleep_enable_timer_wakeup(wakePeriodUs);
   if (timerWakeErr != ESP_OK)
     Serial.printf("POWER: failed to configure GNSS time-sync wake (%lus): %s\\n",
-                  static_cast<unsigned long>(gConfig.wakePeriodSec),
+                  static_cast<unsigned long>(config.wakePeriodSec),
                   esp_err_to_name(timerWakeErr));
 
   if (wakeMask != 0) {
@@ -599,7 +608,7 @@ static void enterDeepSleep() {
 
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
-  delay(gConfig.deepSleepWakeGraceMs);
+  delay(config.deepSleepWakeGraceMs);
   esp_deep_sleep_start();
 }
 
@@ -610,18 +619,20 @@ void fieldRadioRequestDeepSleep() {
 }
 
 
-static bool credentialsConfigured() {
+static bool credentialsConfigured(const RuntimeConfig& config) {
   // Keep AP and web credentials independent. The AP password is plaintext
   // configuration for the access point; the web password is represented by
   // its salted hash after provisioning and must never be cross-verified.
-  const bool apCredentialsConfigured_ = gConfig.apPassword.length() >= 8;
+  const bool apCredentialsConfigured_ = config.apPassword.length() >= 8;
   const bool webCredentialsConfigured_ =
-      gConfig.webUser.length() > 0 && gConfig.webPasswordConfigured();
+      config.webUser.length() > 0 && config.webPasswordConfigured();
   return apCredentialsConfigured_ && webCredentialsConfigured_;
 }
 
 static void setupWifi() {
-  if (!credentialsConfigured()) {
+  RuntimeConfig config;
+  if (!configSnapshot(config)) return;
+  if (!credentialsConfigured(config)) {
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "Set unique WiFi/web credentials";
     Serial.println("WARN: WiFi AP disabled until unique credentials are configured");
@@ -643,7 +654,7 @@ static void setupWifi() {
   // No STA credential exists, so there is nothing useful to retry. Expose
   // the configured AP immediately as the initial provisioning/recovery path.
   WiFi.mode(WIFI_AP);
-  if (WiFi.softAP(gConfig.apSsid.c_str(), gConfig.apPassword.c_str())) {
+  if (WiFi.softAP(config.apSsid.c_str(), config.apPassword.c_str())) {
     StateLock lock(gState);
     if (lock.ok()) gState.wifiReady = true;
   }
@@ -949,6 +960,8 @@ static void handlePhysicalControls(uint32_t now) {
 }
 
 static void manageWifi(uint32_t now) {
+  RuntimeConfig config;
+  if (!configSnapshot(config)) return;
   const wifi_mode_t mode = WiFi.getMode();
 
   if (Config::STA_SSID[0] != 0 && mode != WIFI_AP && mode != WIFI_AP_STA) {
@@ -970,7 +983,7 @@ static void manageWifi(uint32_t now) {
 
     // D-GAP-2: hybrid fallback. Keep STA reconnect enabled, but expose the
     // recovery AP only after the bounded failure window has elapsed.
-    if (WiFi.softAP(gConfig.apSsid.c_str(), gConfig.apPassword.c_str())) {
+    if (WiFi.softAP(config.apSsid.c_str(), config.apPassword.c_str())) {
       StateLock lock(gState);
       if (lock.ok()) gState.wifiReady = true;
       wifiIdleSince = now;
@@ -1044,6 +1057,11 @@ static void taskHealth(void*) {
       lastCheck = now;
     }
     fuelGauge.task();
+    RuntimeConfig config;
+    if (!configSnapshot(config)) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
     if (fuelGauge.available()) {
       const float voltage = fuelGauge.voltage();
       const int8_t percent = fuelGauge.percent();
@@ -1053,9 +1071,9 @@ static void taskHealth(void*) {
         gState.batteryV = voltage;
         gState.batteryPercent = percent;
         gState.batteryLow = gState.batteryAvailable &&
-                            voltage <= gConfig.batteryLowThreshold;
+                            voltage <= config.batteryLowThreshold;
         gState.batteryCritical = gState.batteryAvailable &&
-                                 voltage <= gConfig.batteryCriticalThreshold;
+                                 voltage <= config.batteryCriticalThreshold;
       }
     }
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1499,12 +1517,14 @@ void loop() {
   persistRuntimeLogs(now);
   handlePhysicalControls(now);
   bool activePower = false;
+  RuntimeConfig powerConfig;
+  const bool havePowerConfig = configSnapshot(powerConfig);
   {
     StateLock lock(gState);
     if (lock.ok()) activePower = gState.ptt || gState.sos || gState.recording ||
         gState.playing || gState.usbAudioActive || gState.rxActive ||
         gState.wifiReady || gState.lorawanJoining || gState.lorawanJoined ||
-        (gConfig.sensorReaderEnabled && gConfig.sensorKeepAwake);
+        (havePowerConfig && powerConfig.sensorReaderEnabled && powerConfig.sensorKeepAwake);
   }
   setPowerProfile(activePower);
   manageWifi(now);
