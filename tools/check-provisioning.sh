@@ -6,6 +6,7 @@ SECRETS="$ROOT/secrets"
 LOCAL_CONFIG="$ROOT/include/LocalConfig.h"
 CERT="$SECRETS/web_tls_cert.der"
 KEY="$SECRETS/web_tls_key.der"
+EST_CA="$SECRETS/est_ca.pem"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -29,6 +30,11 @@ openssl pkey -inform DER -in "$KEY" -pubout >"$key_pub" ||
   fail "Cannot extract the TLS private-key public key."
 cmp -s "$cert_pub" "$key_pub" ||
   fail "TLS certificate and private key do not match."
+
+if [ -e "$EST_CA" ]; then
+  openssl x509 -in "$EST_CA" -noout >/dev/null 2>&1 ||
+    fail "secrets/est_ca.pem is not a valid PEM X.509 certificate."
+fi
 
 # Validate the local credential contract without printing any secret values.
 python3 - "$LOCAL_CONFIG" <<'PY'
@@ -110,4 +116,4 @@ if mqtt_port != 1883 and not (Path(path).parent.parent / "secrets" / "mqtt_ca.pe
     print("WARNING: MQTT TLS is selected but secrets/mqtt_ca.pem is absent; the built-in EMQX default CA will be used.")
 PY
 
-echo "PASS: local credentials, LoRa radio configuration, and matching DER TLS certificate/key are provisioned."
+echo "PASS: local credentials, LoRa radio configuration, matching DER TLS certificate/key, and optional EST CA are provisioned."

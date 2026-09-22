@@ -68,6 +68,12 @@ else
   mqtt_port="${FIELDRADIO_MQTT_PORT:-8883}"
   mqtt_user="${FIELDRADIO_MQTT_USERNAME:-}"
   mqtt_password="${FIELDRADIO_MQTT_PASSWORD:-}"
+  est_server_url="${FIELDRADIO_EST_SERVER_URL:-}"
+  est_label="${FIELDRADIO_EST_LABEL:-/.well-known/est}"
+  est_auth_mode="${FIELDRADIO_EST_AUTH_MODE:-0}"
+  est_username="${FIELDRADIO_EST_USERNAME:-}"
+  est_password="${FIELDRADIO_EST_PASSWORD:-}"
+  est_bootstrap_token="${FIELDRADIO_EST_BOOTSTRAP_TOKEN:-}"
 
   # ASSUMPTION: radio overrides are applied only when at least one LoRa radio
   # environment variable is supplied; missing fields retain the Config.h defaults.
@@ -110,11 +116,11 @@ else
     lora_key="$(openssl rand -hex 16)"
   fi
 
-  python3 - "$ap_ssid" "$ap_password" "$web_user" "$web_password" "$lora_key" "$sta_ssid" "$sta_password" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_password" "$lora_override_enabled" "${LORA_FREQ_MHZ:-}" "${LORA_BW_KHZ:-}" "${LORA_SF:-}" "${LORA_CR:-}" "${LORA_POWER_DBM:-}" "${LORA_SYNC_WORD:-}" <<'PY'
+  python3 - "$ap_ssid" "$ap_password" "$web_user" "$web_password" "$lora_key" "$sta_ssid" "$sta_password" "$mqtt_host" "$mqtt_port" "$mqtt_user" "$mqtt_password" "$est_server_url" "$est_label" "$est_auth_mode" "$est_username" "$est_password" "$est_bootstrap_token" "$lora_override_enabled" "${LORA_FREQ_MHZ:-}" "${LORA_BW_KHZ:-}" "${LORA_SF:-}" "${LORA_CR:-}" "${LORA_POWER_DBM:-}" "${LORA_SYNC_WORD:-}" <<'PY'
 import math
 import re
 import sys
-ssid, appass, webuser, webpass, key, sta_ssid, sta_pass, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, lora_enabled, lora_freq, lora_bw, lora_sf, lora_cr, lora_power, lora_sync = sys.argv[1:]
+ssid, appass, webuser, webpass, key, sta_ssid, sta_pass, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, est_url, est_label, est_mode, est_user, est_pass, est_token, lora_enabled, lora_freq, lora_bw, lora_sf, lora_cr, lora_power, lora_sync = sys.argv[1:]
 
 def byte_len(value):
     return len(value.encode("utf-8"))
@@ -144,6 +150,25 @@ if not mqtt_port.isdigit() or not 1 <= int(mqtt_port) <= 65535:
     raise SystemExit("ERROR: MQTT port must be 1..65535.")
 if len(mqtt_user) > 128 or len(mqtt_pass) > 128:
     raise SystemExit("ERROR: MQTT credentials must be <=128 characters.")
+if len(est_url) > 253 or (est_url and not est_url.startswith("https://")):
+    raise SystemExit("ERROR: EST server URL must be empty or https:// with <=253 characters.")
+if not est_label.startswith("/") or len(est_label) > 95:
+    raise SystemExit("ERROR: EST label must start with '/' and be <=95 characters.")
+if est_mode not in ("0", "1", "2"):
+    raise SystemExit("ERROR: EST auth mode must be 0, 1, or 2.")
+for name, value in (("EST server URL", est_url), ("EST label", est_label),
+                    ("EST username", est_user), ("EST password", est_pass),
+                    ("EST bootstrap token", est_token)):
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in value):
+        raise SystemExit(f"ERROR: {name} contains a control character.")
+    if any(c in value for c in '\\"'):
+        raise SystemExit(f"ERROR: {name} may not contain backslash or double-quote characters when stored in LocalConfig.h.")
+if len(est_user) > 64 or len(est_pass) > 64 or len(est_token) > 128:
+    raise SystemExit("ERROR: EST username/password/token exceeds the configured maximum.")
+if est_mode == "1" and (not est_user or not est_pass):
+    raise SystemExit("ERROR: EST mode 1 requires FIELDRADIO_EST_USERNAME and FIELDRADIO_EST_PASSWORD.")
+if est_mode == "2" and not est_token:
+    raise SystemExit("ERROR: EST mode 2 requires FIELDRADIO_EST_BOOTSTRAP_TOKEN.")
 if not re.fullmatch(r"[0-9A-Fa-f]{32}", key):
     raise SystemExit("ERROR: LoRa key must be exactly 32 hexadecimal characters.")
 
@@ -193,6 +218,12 @@ PY
 #define FIELDRADIO_MQTT_PASSWORD "$mqtt_password"
 #define FIELDRADIO_MQTT_TOPIC_ROOT "${FIELDRADIO_MQTT_TOPIC_ROOT:-fieldradio}"
 #define FIELDRADIO_MQTT_SERVER_NAME "${FIELDRADIO_MQTT_SERVER_NAME:-broker.emqx.io}"
+#define FIELDRADIO_EST_SERVER_URL "$est_server_url"
+#define FIELDRADIO_EST_LABEL "$est_label"
+#define FIELDRADIO_EST_AUTH_MODE $est_auth_mode
+#define FIELDRADIO_EST_USERNAME "$est_username"
+#define FIELDRADIO_EST_PASSWORD "$est_password"
+#define FIELDRADIO_EST_BOOTSTRAP_TOKEN "$est_bootstrap_token"
 EOF
   if [ "$lora_override_enabled" = "1" ]; then
     cat >>"$tmp" <<LORA

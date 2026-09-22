@@ -63,6 +63,10 @@ struct RuntimeConfig {
   uint16_t certRenewalThresholdDays = Config::CERT_RENEWAL_THRESHOLD_DAYS;
   uint32_t certCheckPeriodMs = Config::CERT_CHECK_PERIOD_MS;
   uint8_t estAuthMode = Config::EST_AUTH_MODE;
+  String estUsername = Config::EST_USERNAME;
+  String estPassword = Config::EST_PASSWORD;
+  String estBootstrapToken = Config::EST_BOOTSTRAP_TOKEN;
+  bool estBootstrapTokenConsumed = false;
   bool certLifecycleEnabled = Config::CERT_LIFECYCLE_ENABLED;
 
   bool voxEnabled = false;

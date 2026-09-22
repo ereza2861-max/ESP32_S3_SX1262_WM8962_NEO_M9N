@@ -184,6 +184,15 @@ bool validCredential(const String& value, size_t maxLen) {
   return !value.isEmpty() && value.length() <= maxLen;
 }
 
+bool validEstCredential(const String& value, size_t maxLen) {
+  if (!validCredential(value, maxLen)) return false;
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(value[i]);
+    if (c < 0x20 || c == 0x7F) return false;
+  }
+  return true;
+}
+
 bool validHexKey(const String& value);
 bool validCallsign(const String& value);
 
@@ -212,7 +221,8 @@ struct __attribute__((packed)) PersistedConfigPayload {
   uint8_t sensorReaderEnabled; uint32_t sensorScanIntervalMs; uint16_t sensorScanWindowMs; uint32_t sensorScanDurationMs; uint32_t sensorConnectTimeoutMs;
   uint32_t sensorNodeEvictionMs; uint8_t sensorMaxNodes; uint8_t sensorRequireEncryption; uint8_t blePairingFailureThreshold; uint32_t blePairingBlockMs; uint8_t sensorKeepAwake;
   uint32_t webSessionTimeoutMs; uint32_t webAuthRateLimitMs; uint8_t csrfPolicy; uint8_t blePairingPolicy; uint8_t ecdhRekeyPolicy; uint8_t replayWindowBits;
-  char estServerUrl[254]; char estLabel[96]; uint16_t certRenewalThresholdDays; uint32_t certCheckPeriodMs; uint8_t estAuthMode; uint8_t certLifecycleEnabled;
+  char estServerUrl[254]; char estLabel[96]; uint16_t certRenewalThresholdDays; uint32_t certCheckPeriodMs;
+  uint8_t estAuthMode; char estUsername[65]; char estPassword[65]; char estBootstrapToken[129]; uint8_t estBootstrapTokenConsumed; uint8_t certLifecycleEnabled;
 };
 struct __attribute__((packed)) AtomicConfigRecord { uint32_t magic; uint16_t schema; uint16_t payloadSize; uint32_t generation; PersistedConfigPayload payload; uint32_t crc; };
 static_assert(sizeof(AtomicConfigRecord) < 4096, "atomic config must fit in one NVS blob");
@@ -232,14 +242,22 @@ void encodePayload(const RuntimeConfig& c, PersistedConfigPayload& p) {
   p.sensorReaderEnabled=c.sensorReaderEnabled;p.sensorScanIntervalMs=c.sensorScanIntervalMs;p.sensorScanWindowMs=c.sensorScanWindowMs;p.sensorScanDurationMs=c.sensorScanDurationMs;p.sensorConnectTimeoutMs=c.sensorConnectTimeoutMs;p.sensorNodeEvictionMs=c.sensorNodeEvictionMs;p.sensorMaxNodes=c.sensorMaxNodes;p.sensorRequireEncryption=c.sensorRequireEncryption;p.blePairingFailureThreshold=c.blePairingFailureThreshold;p.blePairingBlockMs=c.blePairingBlockMs;p.sensorKeepAwake=c.sensorKeepAwake;p.webSessionTimeoutMs=c.webSessionTimeoutMs;p.webAuthRateLimitMs=c.webAuthRateLimitMs;p.csrfPolicy=c.csrfPolicy;p.blePairingPolicy=c.blePairingPolicy;p.ecdhRekeyPolicy=c.ecdhRekeyPolicy;p.replayWindowBits=c.replayWindowBits;
   putStr(p.estServerUrl,sizeof(p.estServerUrl),c.estServerUrl); putStr(p.estLabel,sizeof(p.estLabel),c.estLabel);
   p.certRenewalThresholdDays=c.certRenewalThresholdDays; p.certCheckPeriodMs=c.certCheckPeriodMs;
-  p.estAuthMode=c.estAuthMode; p.certLifecycleEnabled=c.certLifecycleEnabled;
+  p.estAuthMode=c.estAuthMode; putStr(p.estUsername,sizeof(p.estUsername),c.estUsername);
+  putStr(p.estPassword,sizeof(p.estPassword),c.estPassword);
+  putStr(p.estBootstrapToken,sizeof(p.estBootstrapToken),c.estBootstrapToken);
+  p.estBootstrapTokenConsumed=c.estBootstrapTokenConsumed;
+  p.certLifecycleEnabled=c.certLifecycleEnabled;
 }
 
 bool decodePayload(const PersistedConfigPayload& p, RuntimeConfig& c) {
   c.loraFreqMHz=p.loraFreqMHz;c.loraBwKHz=p.loraBwKHz;c.loraSf=p.loraSf;c.loraCr=p.loraCr;c.loraSyncWord=p.loraSyncWord;c.loraPowerDbm=p.loraPowerDbm;c.volume=p.volume;c.audioRecordSource=p.audioRecordSource;c.batteryCalibration=p.batteryCalibration;c.callsign=getStr(p.callsign,sizeof(p.callsign));c.loraKeyHex=getStr(p.loraKeyHex,sizeof(p.loraKeyHex));c.apSsid=getStr(p.apSsid,sizeof(p.apSsid));c.apPassword=getStr(p.apPassword,sizeof(p.apPassword));c.webUser=getStr(p.webUser,sizeof(p.webUser));c.webPassword.clear();c.webPasswordSaltHex=getStr(p.webPasswordSaltHex,sizeof(p.webPasswordSaltHex));c.webPasswordHashHex=getStr(p.webPasswordHashHex,sizeof(p.webPasswordHashHex));c.audioRecordQuality=p.audioRecordQuality;c.lorawanEnabled=p.lorawanEnabled!=0;c.lorawanMode=p.lorawanMode;c.lorawanRegion=p.lorawanRegion;c.lorawanDevEui=getStr(p.lorawanDevEui,sizeof(p.lorawanDevEui));c.lorawanJoinEui=getStr(p.lorawanJoinEui,sizeof(p.lorawanJoinEui));c.lorawanAppKey=getStr(p.lorawanAppKey,sizeof(p.lorawanAppKey));c.lorawanNwkSKey=getStr(p.lorawanNwkSKey,sizeof(p.lorawanNwkSKey));c.lorawanAppSKey=getStr(p.lorawanAppSKey,sizeof(p.lorawanAppSKey));memcpy(c.lorawanDevAddr,p.lorawanDevAddr,4);c.lorawanFPort=p.lorawanFPort;c.lorawanUplinkPeriodSec=p.lorawanUplinkPeriodSec;c.blePairingEnabled=p.blePairingEnabled!=0;c.mqttEnabled=p.mqttEnabled!=0;c.wakePeriodSec=p.wakePeriodSec;c.classDEnabled=p.classDEnabled!=0;c.classDBoostLevel=p.classDBoostLevel;c.deepSleepEnabled=p.deepSleepEnabled!=0;c.deepSleepIdleMs=p.deepSleepIdleMs;c.deepSleepWakeGraceMs=p.deepSleepWakeGraceMs;c.criticalShutdownDelayMs=p.criticalShutdownDelayMs;c.batteryLowThreshold=p.batteryLowThreshold;c.batteryCriticalThreshold=p.batteryCriticalThreshold;c.mqttHost=getStr(p.mqttHost,sizeof(p.mqttHost));c.mqttPort=p.mqttPort;c.mqttTlsRequired=p.mqttTlsRequired!=0;c.mqttReconnectMinMs=p.mqttReconnectMinMs;c.mqttReconnectMaxMs=p.mqttReconnectMaxMs;c.mqttTelemetryPeriodMs=p.mqttTelemetryPeriodMs;c.mqttHealthPeriodMs=p.mqttHealthPeriodMs;c.mqttRetainTelemetry=p.mqttRetainTelemetry!=0;c.mqttRetainAvailability=p.mqttRetainAvailability!=0;c.mqttCredentialRotationDays=p.mqttCredentialRotationDays;c.voxEnabled=p.voxEnabled!=0;c.voxThreshold=p.voxThreshold;c.voxHangMs=p.voxHangMs;c.aecEnabled=p.aecEnabled!=0;c.usbMonitor=p.usbMonitor!=0;c.usbPlaybackTransport=p.usbPlaybackTransport!=0;c.audioLoopback=p.audioLoopback!=0;c.loraAdrEnabled=p.loraAdrEnabled!=0;c.loraHopEnabled=p.loraHopEnabled!=0;c.loraHopChannelProfile=p.loraHopChannelProfile;c.loraRangeTestMode=p.loraRangeTestMode!=0;c.sensorReaderEnabled=p.sensorReaderEnabled!=0;c.sensorScanIntervalMs=p.sensorScanIntervalMs;c.sensorScanWindowMs=p.sensorScanWindowMs;c.sensorScanDurationMs=p.sensorScanDurationMs;c.sensorConnectTimeoutMs=p.sensorConnectTimeoutMs;c.sensorNodeEvictionMs=p.sensorNodeEvictionMs;c.sensorMaxNodes=p.sensorMaxNodes;c.sensorRequireEncryption=p.sensorRequireEncryption!=0;c.blePairingFailureThreshold=p.blePairingFailureThreshold;c.blePairingBlockMs=p.blePairingBlockMs;c.sensorKeepAwake=p.sensorKeepAwake!=0;c.webSessionTimeoutMs=p.webSessionTimeoutMs;c.webAuthRateLimitMs=p.webAuthRateLimitMs;c.csrfPolicy=p.csrfPolicy;c.blePairingPolicy=p.blePairingPolicy;c.ecdhRekeyPolicy=p.ecdhRekeyPolicy;c.replayWindowBits=p.replayWindowBits;
   c.estServerUrl=getStr(p.estServerUrl,sizeof(p.estServerUrl)); c.estLabel=getStr(p.estLabel,sizeof(p.estLabel));
   c.certRenewalThresholdDays=p.certRenewalThresholdDays; c.certCheckPeriodMs=p.certCheckPeriodMs;
-  c.estAuthMode=p.estAuthMode; c.certLifecycleEnabled=p.certLifecycleEnabled!=0; return true;
+  c.estAuthMode=p.estAuthMode; c.estUsername=getStr(p.estUsername,sizeof(p.estUsername));
+  c.estPassword=getStr(p.estPassword,sizeof(p.estPassword));
+  c.estBootstrapToken=getStr(p.estBootstrapToken,sizeof(p.estBootstrapToken));
+  c.estBootstrapTokenConsumed=p.estBootstrapTokenConsumed!=0;
+  c.certLifecycleEnabled=p.certLifecycleEnabled!=0; return true;
 }
 
 bool generationNewer(uint32_t a,uint32_t b){return a!=b&&static_cast<int32_t>(a-b)>0;}
@@ -248,7 +266,10 @@ bool readAtomicSlot(Preferences& p,const char* slot,const char* commit,AtomicCon
 bool validRuntimeConfig(const RuntimeConfig& c) {
   return c.validRadio()&&c.volume<=100&&c.audioRecordSource<=Config::AUDIO_SOURCE_USB&&c.audioRecordQuality<=2&&c.classDBoostLevel<=7&&c.wakePeriodSec>=60UL&&c.wakePeriodSec<=7UL*24UL*60UL*60UL&&(!c.classDEnabled||Config::CLASS_D_ENABLED)&&c.deepSleepIdleMs>=60000UL&&c.deepSleepIdleMs<=24UL*60UL*60UL*1000UL&&c.deepSleepWakeGraceMs>=100UL&&c.deepSleepWakeGraceMs<=60000UL&&c.criticalShutdownDelayMs>=100UL&&c.criticalShutdownDelayMs<=600000UL&&isfinite(c.batteryLowThreshold)&&isfinite(c.batteryCriticalThreshold)&&c.batteryCriticalThreshold>=2.5f&&c.batteryLowThreshold>c.batteryCriticalThreshold&&c.batteryLowThreshold<=4.2f&&(!c.mqttEnabled||(!c.mqttHost.isEmpty()&&c.mqttHost.length()<=253&&c.mqttHost.indexOf('|')<0&&c.mqttPort!=0))&&c.mqttReconnectMinMs>=1000UL&&c.mqttReconnectMaxMs>=c.mqttReconnectMinMs&&c.mqttReconnectMaxMs<=3600000UL&&c.mqttTelemetryPeriodMs>=1000UL&&c.mqttTelemetryPeriodMs<=86400000UL&&c.mqttHealthPeriodMs>=1000UL&&c.mqttHealthPeriodMs<=86400000UL&&c.mqttCredentialRotationDays>=1&&c.mqttCredentialRotationDays<=3650&&c.voxThreshold>=0.005f&&c.voxThreshold<=1.0f&&c.voxHangMs>=50U&&c.voxHangMs<=10000U&&c.loraHopChannelProfile>=1&&c.loraHopChannelProfile<=Config::HOP_CHANNEL_MAX&&c.sensorScanIntervalMs>=100&&c.sensorScanIntervalMs<=60000&&c.sensorScanWindowMs>0&&c.sensorScanWindowMs<=c.sensorScanIntervalMs&&c.sensorScanDurationMs>=100&&c.sensorScanDurationMs<=60000&&c.sensorConnectTimeoutMs>=500&&c.sensorConnectTimeoutMs<=30000&&c.sensorNodeEvictionMs>=10000&&c.sensorNodeEvictionMs<=7UL*86400000UL&&c.sensorMaxNodes>=1&&c.sensorMaxNodes<=Config::SENSOR_MAX_NODES_VALUE&&c.blePairingFailureThreshold>=1&&c.blePairingFailureThreshold<=20&&c.blePairingBlockMs>=1000&&c.blePairingBlockMs<=86400000UL&&c.webSessionTimeoutMs>=60000UL&&c.webSessionTimeoutMs<=86400000UL&&c.webAuthRateLimitMs>=100&&c.webAuthRateLimitMs<=600000UL&&c.csrfPolicy<=1&&c.blePairingPolicy<=1&&c.ecdhRekeyPolicy<=1&&c.replayWindowBits>=8&&c.replayWindowBits<=Config::LORA_REPLAY_WINDOW_BITS&&
     c.estServerUrl.length()<=253&&c.estLabel.length()<=95&&!c.estLabel.isEmpty()&&
-    c.estAuthMode==0&&c.certRenewalThresholdDays>=1&&c.certRenewalThresholdDays<=3650&&
+    c.estAuthMode<=2&&c.estUsername.length()<=64&&c.estPassword.length()<=64&&c.estBootstrapToken.length()<=128&&
+    (c.estAuthMode!=1 || (validEstCredential(c.estUsername,64) && validEstCredential(c.estPassword,64)))&&
+    (c.estAuthMode!=2 || validEstCredential(c.estBootstrapToken,128) || c.estBootstrapTokenConsumed)&&
+    c.certRenewalThresholdDays>=1&&c.certRenewalThresholdDays<=3650&&
     c.certCheckPeriodMs>=3600000UL&&c.certCheckPeriodMs<=7UL*86400000UL&&
     (!c.certLifecycleEnabled || (c.estServerUrl.startsWith("https://") && c.estLabel.startsWith("/")))&&
     isfinite(c.batteryCalibration)&&c.batteryCalibration>=0.5f&&c.batteryCalibration<=1.5f&&c.validLoRaWAN()&&validCallsign(c.callsign)&&validHexKey(c.loraKeyHex)&&!c.apSsid.isEmpty()&&c.apSsid.length()<=32&&c.apPassword.length()>=8&&c.apPassword.length()<=63&&!c.webUser.isEmpty()&&c.webUser.length()<=32&&c.webPasswordConfigured();
@@ -417,6 +438,10 @@ void RuntimeConfig::load() {
   const uint16_t savedCertThreshold = prefs.getUShort("cert_thr", certRenewalThresholdDays);
   const uint32_t savedCertPeriod = prefs.getUInt("cert_period", certCheckPeriodMs);
   const uint8_t savedEstAuth = prefs.getUChar("est_auth", estAuthMode);
+  const String savedEstUsername = prefs.getString("est_user", estUsername);
+  const String savedEstPassword = prefs.getString("est_pass", estPassword);
+  const String savedEstToken = prefs.getString("est_token", estBootstrapToken);
+  const bool savedEstTokenConsumed = prefs.getBool("est_token_used", estBootstrapTokenConsumed);
   const bool savedCertLifecycle = prefs.getBool("cert_life", certLifecycleEnabled);
   prefs.end();
 
@@ -504,6 +529,10 @@ void RuntimeConfig::load() {
   candidate.certRenewalThresholdDays = savedCertThreshold;
   candidate.certCheckPeriodMs = savedCertPeriod;
   candidate.estAuthMode = savedEstAuth;
+  candidate.estUsername = savedEstUsername;
+  candidate.estPassword = savedEstPassword;
+  candidate.estBootstrapToken = savedEstToken;
+  candidate.estBootstrapTokenConsumed = savedEstTokenConsumed;
   candidate.certLifecycleEnabled = savedCertLifecycle;
   if (version == 4) {
     // v4 had no BLE pairing field. Keep legacy values and initialize the
@@ -645,10 +674,21 @@ void RuntimeConfig::load() {
     certRenewalThresholdDays = candidate.certRenewalThresholdDays;
   if (candidate.certCheckPeriodMs >= 3600000UL && candidate.certCheckPeriodMs <= 7UL * 86400000UL)
     certCheckPeriodMs = candidate.certCheckPeriodMs;
-  if (candidate.estAuthMode == 0) estAuthMode = candidate.estAuthMode;
+  if (candidate.estAuthMode <= 2) {
+    estAuthMode = candidate.estAuthMode;
+    if (candidate.estUsername.length() <= 64) estUsername = candidate.estUsername;
+    if (candidate.estPassword.length() <= 64) estPassword = candidate.estPassword;
+    if (candidate.estBootstrapToken.length() <= 128) {
+      if (candidate.estBootstrapToken != estBootstrapToken) estBootstrapTokenConsumed = false;
+      estBootstrapToken = candidate.estBootstrapToken;
+    }
+    if (candidate.estBootstrapTokenConsumed) estBootstrapTokenConsumed = true;
+  }
   certLifecycleEnabled = candidate.certLifecycleEnabled &&
-                         candidate.estAuthMode == 0 &&
-                         candidate.estServerUrl.startsWith("https://");
+                         candidate.estServerUrl.startsWith("https://") &&
+                         (candidate.estAuthMode == 0 ||
+                          (candidate.estAuthMode == 1 && !candidate.estUsername.isEmpty() && !candidate.estPassword.isEmpty()) ||
+                          (candidate.estAuthMode == 2 && (!candidate.estBootstrapToken.isEmpty() || candidate.estBootstrapTokenConsumed)));
   if (candidate.webPassword.length() <= 63) webPassword = candidate.webPassword;
   uint8_t passwordSaltCheck[PASSWORD_SALT_BYTES] = {};
   if (hexDecode(candidate.webPasswordSaltHex, passwordSaltCheck, sizeof(passwordSaltCheck)) &&

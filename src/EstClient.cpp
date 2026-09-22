@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
-#include "MqttCaCert.h"
+#include "EstCaCert.h"
 
 namespace {
 constexpr size_t MAX_EST_RESPONSE = 64U * 1024U;
@@ -101,28 +101,53 @@ String EstClient::endpoint(const String& serverUrl, const String& label, const c
 }
 
 bool EstClient::request(const String& method, const String& url,
-                        const String& clientCertPem, const String& clientKeyPem,
-                        const String& body, const char* contentType,
-                        std::vector<uint8_t>& response, int& statusCode) {
+                        uint8_t authMode, const String& username, const String& password,
+                        const String& bootstrapToken, const String& clientCertPem,
+                        const String& clientKeyPem, const String& body,
+                        const char* contentType, std::vector<uint8_t>& response,
+                        int& statusCode) {
   response.clear();
   String host, basePath;
   uint16_t port = 0;
-  if (!parseHttpsUrl(url, host, port, basePath)) return false;
+  if (!parseHttpsUrl(url, host, port, basePath) || authMode > 2) return false;
 
   WiFiClientSecure tls;
-  tls.setCACert(MQTT_BROKER_ROOT_CA);
-  if (clientCertPem.isEmpty() || clientKeyPem.isEmpty()) return false;
-  tls.setCertificate(clientCertPem.c_str());
-  tls.setPrivateKey(clientKeyPem.c_str());
+  tls.setCACert(estTrustAnchor());
+  if (authMode == 0) {
+    if (clientCertPem.isEmpty() || clientKeyPem.isEmpty()) return false;
+    tls.setCertificate(clientCertPem.c_str());
+    tls.setPrivateKey(clientKeyPem.c_str());
+  } else if (authMode == 1) {
+    if (username.isEmpty() || password.isEmpty()) return false;
+  } else {
+    if (bootstrapToken.isEmpty()) return false;
+  }
   tls.setHandshakeTimeout(10);
 
   HTTPClient http;
   http.setConnectTimeout(EST_TIMEOUT_MS);
   http.setTimeout(EST_TIMEOUT_MS);
   if (!http.begin(tls, url)) return false;
-  http.addHeader("Accept", "application/pkcs7-mime, application/pkcs10, application/pkcs7-mime");
+  http.addHeader("Accept", "application/pkcs7-mime, application/pkcs10, application/csrattrs");
   if (contentType) http.addHeader("Content-Type", contentType);
   http.addHeader("Cache-Control", "no-store");
+
+  if (authMode == 1) {
+    const String credentials = username + ":" + password;
+    const size_t encodedCap = 4U * ((credentials.length() + 2U) / 3U) + 1U;
+    std::vector<unsigned char> encoded(encodedCap);
+    size_t encodedLen = 0;
+    if (mbedtls_base64_encode(encoded.data(), encoded.size(), &encodedLen,
+                              reinterpret_cast<const unsigned char*>(credentials.c_str()),
+                              credentials.length()) != 0) {
+      http.end();
+      return false;
+    }
+    encoded[encodedLen] = '\0';
+    http.addHeader("Authorization", "Basic " + String(reinterpret_cast<const char*>(encoded.data())));
+  } else if (authMode == 2) {
+    http.addHeader("Authorization", "Bearer " + bootstrapToken);
+  }
 
   int code = -1;
   if (method == "POST") code = http.POST(reinterpret_cast<const uint8_t*>(body.c_str()), body.length());
@@ -194,7 +219,7 @@ bool EstClient::pemEncode(const uint8_t* der, size_t len, String& pem) const {
   pem = "-----BEGIN CERTIFICATE-----\n";
   for (size_t i = 0; i < outLen; i += 64) {
     const size_t chunk = std::min<size_t>(64, outLen - i);
-    pem += String(reinterpret_cast<const char*>(b64.data() + i)).substring(0, chunk);
+    pem.concat(reinterpret_cast<const char*>(b64.data() + i), chunk);
     pem += '\n';
   }
   pem += "-----END CERTIFICATE-----\n";
@@ -216,15 +241,17 @@ bool EstClient::extractCertificates(const std::vector<uint8_t>& der, String& pem
 }
 
 bool EstClient::enroll(const String& serverUrl, const String& label,
-                       const String& clientCertPem, const String& clientKeyPem,
-                       const String& subject, bool renewal,
+                       uint8_t authMode, const String& username, const String& password,
+                       const String& bootstrapToken, const String& clientCertPem,
+                       const String& clientKeyPem, const String& subject, bool renewal,
                        String& newCertificatePem, String& newPrivateKeyPem) {
   String keyPem, csrPem;
   if (!generateKeyAndCsr(subject, keyPem, csrPem)) return false;
   const String url = endpoint(serverUrl, label, renewal ? "simplereenroll" : "simpleenroll");
   std::vector<uint8_t> response;
   int status = 0;
-  if (!request("POST", url, clientCertPem, clientKeyPem, csrPem, "application/pkcs10", response, status) ||
+  if (!request("POST", url, authMode, username, password, bootstrapToken,
+               clientCertPem, clientKeyPem, csrPem, "application/pkcs10", response, status) ||
       status < 200 || status >= 300) return false;
   String chain;
   if (!extractCertificates(response, chain)) return false;
@@ -234,21 +261,24 @@ bool EstClient::enroll(const String& serverUrl, const String& label,
 }
 
 bool EstClient::fetchCaCerts(const String& serverUrl, const String& label,
-                             const String& clientCertPem, const String& clientKeyPem,
-                             String& caChainPem) {
+                             uint8_t authMode, const String& username, const String& password,
+                             const String& bootstrapToken, const String& clientCertPem,
+                             const String& clientKeyPem, String& caChainPem) {
   std::vector<uint8_t> response;
   int status = 0;
   if (!request("GET", endpoint(serverUrl, label, "cacerts"),
-               clientCertPem, clientKeyPem, String(), nullptr, response, status) ||
+               authMode, username, password, bootstrapToken, clientCertPem, clientKeyPem,
+               String(), nullptr, response, status) ||
       status < 200 || status >= 300) return false;
   return extractCertificates(response, caChainPem);
 }
 
 bool EstClient::fetchCsrAttrs(const String& serverUrl, const String& label,
-                              const String& clientCertPem, const String& clientKeyPem,
-                              std::vector<uint8_t>& attrs) {
+                              uint8_t authMode, const String& username, const String& password,
+                              const String& bootstrapToken, const String& clientCertPem,
+                              const String& clientKeyPem, std::vector<uint8_t>& attrs) {
   int status = 0;
   return request("GET", endpoint(serverUrl, label, "csrattrs"),
-                 clientCertPem, clientKeyPem, String(), "application/csrattrs",
-                 attrs, status) && status >= 200 && status < 300;
+                 authMode, username, password, bootstrapToken, clientCertPem, clientKeyPem,
+                 String(), "application/csrattrs", attrs, status) && status >= 200 && status < 300;
 }

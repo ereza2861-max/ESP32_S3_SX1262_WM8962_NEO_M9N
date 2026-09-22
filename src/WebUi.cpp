@@ -368,7 +368,10 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <label>EST label <input id=estLabel maxlength=95 value="/.well-known/est"></label>
 <label>Renewal threshold (days) <input id=certRenewalThresholdDays type=number min=1 max=3650 value=30></label>
 <label>Check period (ms) <input id=certCheckPeriodMs type=number min=3600000 value=86400000></label>
-<label>EST auth mode <select id=estAuthMode><option value=0>Factory bootstrap certificate</option></select></label>
+<label>EST auth mode <select id=estAuthMode><option value=0>Factory bootstrap certificate</option><option value=1>Basic Auth</option><option value=2>Bootstrap Token</option></select></label>
+  <label>EST username (mode 1) <input id=estUsername maxlength=64 autocomplete="off"></label>
+  <label>EST password (mode 1) <input id=estPassword type=password maxlength=64 autocomplete="new-password"></label>
+  <label>EST bootstrap token (mode 2) <input id=estBootstrapToken type=password maxlength=128 autocomplete="off"></label>
 <button onclick="renewCert()">Renew Now</button><button onclick="fetchCertCa()">Fetch CA Chain</button>
 <pre id=certStatus></pre><pre id=certHistory></pre></div>
 <label>BLE reader enabled <input id=bleEnabled type=checkbox checked></label><label>BLE pairing <input id=blePairing type=checkbox checked></label>
@@ -655,6 +658,9 @@ async function saveCfg(){
   if(key.value)q.set('lora_key',key.value);
   if(aps.value)q.set('ap_password',aps.value);
   if(wp.value)q.set('web_password',wp.value);
+  if(estUsername.value) q.set('est_username',estUsername.value);
+  if(estPassword.value) q.set('est_password',estPassword.value);
+  if(estBootstrapToken.value) q.set('est_bootstrap_token',estBootstrapToken.value);
   alert(await j('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q}));refresh()
 }
 async function refreshCertStatus(){
@@ -3319,10 +3325,43 @@ void WebUi::handleConfig() {
     candidate.certCheckPeriodMs = value;
   }
   if (server_.hasArg("est_auth_mode")) {
-    if (!parseUnsigned(server_.arg("est_auth_mode"), 0, value)) {
+    if (!parseUnsigned(server_.arg("est_auth_mode"), 2, value)) {
       server_.send(400, "text/plain", "invalid EST auth mode"); return;
     }
     candidate.estAuthMode = static_cast<uint8_t>(value);
+  }
+  if (server_.hasArg("est_username")) {
+    candidate.estUsername = server_.arg("est_username");
+    if (candidate.estUsername.length() > 64) {
+      server_.send(400, "text/plain", "invalid EST username"); return;
+    }
+    for (size_t i = 0; i < candidate.estUsername.length(); ++i)
+      if (static_cast<uint8_t>(candidate.estUsername[i]) < 0x20 ||
+          static_cast<uint8_t>(candidate.estUsername[i]) == 0x7F) {
+        server_.send(400, "text/plain", "invalid EST username"); return;
+      }
+  }
+  if (server_.hasArg("est_password")) {
+    candidate.estPassword = server_.arg("est_password");
+    if (candidate.estPassword.length() > 64) {
+      server_.send(400, "text/plain", "invalid EST password"); return;
+    }
+    for (size_t i = 0; i < candidate.estPassword.length(); ++i)
+      if (static_cast<uint8_t>(candidate.estPassword[i]) < 0x20 ||
+          static_cast<uint8_t>(candidate.estPassword[i]) == 0x7F) {
+        server_.send(400, "text/plain", "invalid EST password"); return;
+      }
+  }
+  if (server_.hasArg("est_bootstrap_token")) {
+    candidate.estBootstrapToken = server_.arg("est_bootstrap_token");
+    if (candidate.estBootstrapToken.length() > 128) {
+      server_.send(400, "text/plain", "invalid EST bootstrap token"); return;
+    }
+    for (size_t i = 0; i < candidate.estBootstrapToken.length(); ++i)
+      if (static_cast<uint8_t>(candidate.estBootstrapToken[i]) < 0x20 ||
+          static_cast<uint8_t>(candidate.estBootstrapToken[i]) == 0x7F) {
+        server_.send(400, "text/plain", "invalid EST bootstrap token"); return;
+      }
   }
   if (server_.hasArg("cert_lifecycle_enabled")) {
     const String raw = server_.arg("cert_lifecycle_enabled");
@@ -3611,6 +3650,12 @@ void WebUi::handleConfigExport() {
   j += ",\"ble_pairing_policy\":" + String(c.blePairingPolicy);
   j += ",\"ecdh_rekey_policy\":" + String(c.ecdhRekeyPolicy);
   j += ",\"replay_window_bits\":" + String(c.replayWindowBits);
+  j += ",\"est_server_url\":\"" + jsonEscape(c.estServerUrl) + "\"";
+  j += ",\"est_label\":\"" + jsonEscape(c.estLabel) + "\"";
+  j += ",\"est_auth_mode\":" + String(c.estAuthMode);
+  j += ",\"cert_renewal_threshold_days\":" + String(c.certRenewalThresholdDays);
+  j += ",\"cert_check_period_ms\":" + String(c.certCheckPeriodMs);
+  j += ",\"cert_lifecycle_enabled\":" + String(c.certLifecycleEnabled ? "true" : "false");
   j += ",\"wake_period_sec\":" + String(c.wakePeriodSec);
   j += ",\"deep_sleep_enabled\":" + String(c.deepSleepEnabled ? "true" : "false");
   j += ",\"deep_sleep_idle_sec\":" + String(c.deepSleepIdleMs / 1000UL);

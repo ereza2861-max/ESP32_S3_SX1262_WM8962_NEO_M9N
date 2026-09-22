@@ -87,6 +87,21 @@ int main() {
   EVP_PKEY_CTX_free(keygen);
   X509_free(x);
 
+  auto validEstAuth = [](unsigned mode, const std::string& user,
+                         const std::string& pass, const std::string& token) {
+    if (mode == 0) return true;
+    if (mode == 1) return !user.empty() && !pass.empty() &&
+                           user.size() <= 64 && pass.size() <= 64;
+    if (mode == 2) return !token.empty() && token.size() <= 128;
+    return false;
+  };
+  assert(validEstAuth(0, "", "", ""));
+  assert(validEstAuth(1, "est-user", "est-password", ""));
+  assert(!validEstAuth(1, "", "est-password", ""));
+  assert(validEstAuth(2, "", "", "bootstrap-token"));
+  assert(!validEstAuth(2, "", "", ""));
+  assert(!validEstAuth(3, "user", "pass", "token"));
+
   std::string rm = "rm -rf " + base;
   std::system(rm.c_str());
   return 0;

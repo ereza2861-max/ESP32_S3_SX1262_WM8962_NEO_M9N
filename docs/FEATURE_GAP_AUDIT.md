@@ -102,7 +102,9 @@ native-test harness. No fake pass result is generated.
 ## QnA D-06 closure
 
 D-06 is CLOSED with option C: full PKI certificate lifecycle using RFC 7030 EST.
-The factory-provisioned certificate is used as the EST mTLS bootstrap credential.
+EST authentication is selected by D-06: mode 0 uses the factory client certificate;
+mode 1 uses Basic Auth; mode 2 uses a bootstrap Bearer token for first enrollment.
+Mode 2 removes the bootstrap token from encrypted NVS after successful enrollment.
 Renewal generates a new P-256 key pair and CSR, validates the issued certificate,
 and commits the replacement through NVS certificate/key slots with a commit marker.
 `/api/mqtt/cert-status`, `/api/mqtt/cert-renew`, `/api/mqtt/cert-history`, and
@@ -111,3 +113,11 @@ and commits the replacement through NVS certificate/key slots with a commit mark
 The firmware expects an actual RFC 7030 EST endpoint or backend adapter. It does
 not assume that an MQTT broker URL is itself an EST endpoint. Automatic lifecycle
 is disabled by default and is guarded by valid GNSS UTC time.
+
+## D-06 implementation gap closure notes
+
+The previously identified gaps are closed by the PKI lifecycle completion patch:
+custom EST CA provisioning and trust-anchor use, EST auth modes 1/2, encrypted-NVS
+credential persistence, bootstrap-token cleanup, rotated certificate history,
+bounded PEM encoding, mock-server isolation/authentication, configuration
+concurrency coverage, and the merged HIL power-loss procedure.

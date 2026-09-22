@@ -112,3 +112,42 @@ a standards-compliant PKCS#7 certificate response.
 - Test power loss after writing the inactive slot but before the commit marker.
 - Test power loss after the commit marker and before MQTT reconnect.
 - Revoke lost/stolen device certificates at the CA/broker side.
+
+## EST authentication modes
+
+D-06 uses RFC 7030 EST with a fixed authentication mode until an operator
+changes configuration:
+
+| Mode | EST authentication | Client certificate sent to EST |
+|---:|---|---|
+| 0 | Existing device/factory certificate | Yes |
+| 1 | `Authorization: Basic ...` | No |
+| 2 | `Authorization: Bearer ...` | No |
+
+All modes verify the EST server against `estTrustAnchor()`. A custom CA is loaded
+from ignored `secrets/est_ca.pem`; otherwise the project fallback trust anchor
+is used. TLS verification is never disabled.
+
+Mode 1 stores its username/password in the ESP-IDF encrypted NVS boundary.
+Mode 2 stores the bootstrap token in the same boundary and removes it after the
+first successful enrollment. No credential is emitted to serial logs.
+
+## CA bundle provisioning
+
+Place the EST root/intermediate trust anchor in `secrets/est_ca.pem` and run the
+normal provisioning/build flow. `tools/provision-est-ca.py` validates the PEM
+with OpenSSL and emits the ignored generated header. Multiple concatenated PEM
+certificates are accepted by the mbedTLS X.509 parser.
+
+## Troubleshooting
+
+- `CLOCK_INVALID`: GNSS UTC is not yet valid; automatic renewal is deliberately
+  deferred.
+- `NO_BOOTSTRAP_CERT`: mode 0 has no usable client certificate/private key.
+- `NO_EST_CREDENTIALS`: mode 1 is missing username/password.
+- `NO_EST_BOOTSTRAP_TOKEN`: mode 2 has no bootstrap token. After first
+  enrollment, a new token must be provisioned if the EST service requires it
+  for later renewal.
+- `TOKEN_CLEAR_FAILED`: the certificate was installed but the mode-2 bootstrap
+  token could not be committed as cleared; inspect NVS/config state before
+  repeating enrollment.

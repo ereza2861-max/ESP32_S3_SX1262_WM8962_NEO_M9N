@@ -23,3 +23,16 @@ This HIL case validates the certificate/key slot commit marker used by D-06.
 - A committed slot must contain a certificate/private-key pair that parses and
   matches before MQTT reconnect.
 - The device must never print private-key material.
+
+## PKI-specific power-loss cases
+
+9. During EST enrollment/renewal, cut power after the inactive certificate/key
+   slot has been written and verified but before its commit marker is written.
+10. Reboot and verify that the previously committed slot remains selected.
+11. Repeat with power loss immediately after the new commit marker and before
+    MQTT reconnect.
+12. Verify that the new certificate/private-key pair is selected only when the
+    commit marker and pair validation both succeed.
+13. For EST auth mode 2, repeat the first enrollment and verify that the
+    bootstrap token is removed from the encrypted NVS configuration after a
+    successful enrollment. The token must never appear in serial logs.

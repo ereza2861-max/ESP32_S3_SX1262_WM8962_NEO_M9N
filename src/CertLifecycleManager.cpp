@@ -4,7 +4,7 @@
 #include "Config.h"
 #include "AppState.h"
 #include "StorageManager.h"
-#include "MqttCaCert.h"
+#include "EstCaCert.h"
 #include <Preferences.h>
 #include <SD.h>
 #include <mbedtls/x509_crt.h>
@@ -53,6 +53,9 @@ bool CertLifecycleManager::begin() {
   mutex_ = xSemaphoreCreateMutex();
   if (!mutex_) return false;
   loadPersistentState();
+  RuntimeConfig cfg;
+  if (configSnapshot(cfg) && cfg.estAuthMode == 2 && cfg.estBootstrapTokenConsumed)
+    enrolled_ = true;
   if (parseCertificate(mqtt_.clientCertificatePem(), false)) audit("VALIDATED");
   nextCheckMs_ = millis() + 1000UL;
   started_ = true;
@@ -104,8 +107,8 @@ bool CertLifecycleManager::parseCertificate(const String& pem, bool verifyChain)
     if (!nb || !na || na <= nb) break;
     if (verifyChain) {
       if (mbedtls_x509_crt_parse(&trust,
-                                 reinterpret_cast<const unsigned char*>(MQTT_BROKER_ROOT_CA),
-                                 strlen(MQTT_BROKER_ROOT_CA) + 1U) != 0) break;
+                                 reinterpret_cast<const unsigned char*>(estTrustAnchor()),
+                                 strlen(estTrustAnchor()) + 1U) != 0) break;
       uint32_t flags = 0;
       if (mbedtls_x509_crt_verify(&chain, &trust, nullptr, nullptr, &flags, nullptr, nullptr) != 0 || flags != 0) break;
     }
@@ -168,7 +171,8 @@ bool CertLifecycleManager::atomicStore(const String& certPem, const String& keyP
   const char* keyKey = writeA ? "key_a" : "key_b";
   const char* commitKey = writeA ? "cert_commit_a" : "cert_commit_b";
   const char* genKey = writeA ? "cert_gen_a" : "cert_gen_b";
-  const uint32_t currentGen = std::max(ga, gb);\n  const uint32_t nextGen = currentGen == UINT32_MAX ? 1U : currentGen + 1U;
+  const uint32_t currentGen = std::max(ga, gb);
+  const uint32_t nextGen = currentGen == UINT32_MAX ? 1U : currentGen + 1U;
   (void)p.remove(commitKey);
   bool ok = p.putString(certKey, certPem) > 0 &&
             p.putString(keyKey, keyPem) > 0 &&
@@ -255,8 +259,8 @@ bool CertLifecycleManager::verifyAndInstall(const String& certChainPem, const St
     mbedtls_x509_crt_init(&trust);
     if (!parsePemCert(verificationPem, verificationChain) ||
         mbedtls_x509_crt_parse(&trust,
-          reinterpret_cast<const unsigned char*>(MQTT_BROKER_ROOT_CA),
-          strlen(MQTT_BROKER_ROOT_CA) + 1U) != 0) {
+          reinterpret_cast<const unsigned char*>(estTrustAnchor()),
+          strlen(estTrustAnchor()) + 1U) != 0) {
       mbedtls_x509_crt_free(&trust); mbedtls_x509_crt_free(&verificationChain);
       mbedtls_x509_crt_free(&selected); break;
     }
@@ -307,8 +311,16 @@ bool CertLifecycleManager::renewCertificate(bool manual) {
 
     String oldCert = mqtt_.clientCertificatePem();
     String oldKey = mqtt_.clientPrivateKeyPem();
-    if (oldCert.isEmpty() || oldKey.isEmpty()) {
+    if (cfg.estAuthMode == 0 && (oldCert.isEmpty() || oldKey.isEmpty())) {
       lastRenewalStatus_ = "NO_BOOTSTRAP_CERT";
+      break;
+    }
+    if (cfg.estAuthMode == 1 && (cfg.estUsername.isEmpty() || cfg.estPassword.isEmpty())) {
+      lastRenewalStatus_ = "NO_EST_CREDENTIALS";
+      break;
+    }
+    if (cfg.estAuthMode == 2 && cfg.estBootstrapToken.isEmpty()) {
+      lastRenewalStatus_ = "NO_EST_BOOTSTRAP_TOKEN";
       break;
     }
 
@@ -316,7 +328,9 @@ bool CertLifecycleManager::renewCertificate(bool manual) {
     String chainPem, newKey;
     String subject = "CN=";
     subject += Config::DEVICE_ID;
-    if (!est.enroll(cfg.estServerUrl, cfg.estLabel, oldCert, oldKey, subject, enrolled_, chainPem, newKey)) {
+    if (!est.enroll(cfg.estServerUrl, cfg.estLabel, cfg.estAuthMode,
+                    cfg.estUsername, cfg.estPassword, cfg.estBootstrapToken,
+                    oldCert, oldKey, subject, enrolled_, chainPem, newKey)) {
       ++renewalFailures_;
       lastRenewalStatus_ = "RENEW_FAILED";
       (void)savePersistentState();
@@ -330,6 +344,21 @@ bool CertLifecycleManager::renewCertificate(bool manual) {
       (void)savePersistentState();
       audit("RENEW_FAILED");
       break;
+    }
+    if (cfg.estAuthMode == 2 && !enrolled_) {
+      RuntimeConfig cleared;
+      uint32_t generation = 0;
+      if (!configSnapshot(cleared, generation)) {
+        lastRenewalStatus_ = "TOKEN_CLEAR_FAILED";
+        break;
+      }
+      cleared.estBootstrapToken.clear();
+      cleared.estBootstrapTokenConsumed = true;
+      if (!configCommit(cleared, generation)) {
+        lastRenewalStatus_ = "TOKEN_CLEAR_FAILED";
+        audit("TOKEN_CLEAR_FAILED");
+        break;
+      }
     }
     lastRenewalMs_ = millis();
     renewalFailures_ = 0;
@@ -463,26 +492,29 @@ String CertLifecycleManager::statusJson() const {
 
 String CertLifecycleManager::historyJson() const {
   if (!storage.ready()) return "[]";
-  String out = "[";
+  std::vector<String> lines;
+  lines.reserve(20);
   SpiLock lock(pdMS_TO_TICKS(100));
   if (!lock.ok()) return "[]";
-  File f = SD.open("/LOG/CERT-LIFECYCLE.LOG", FILE_READ);
-  if (!f) return "[]";
-  String lines[10];
-  size_t count = 0;
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    if (line.length() && count < 10) lines[count++] = line;
-    else if (line.length()) {
-      for (size_t i = 0; i < 9; ++i) lines[i] = lines[i + 1];
-      lines[9] = line;
+  const char* paths[] = {"/LOG/CERT-LIFECYCLE.1.LOG", "/LOG/CERT-LIFECYCLE.LOG"};
+  for (const char* path : paths) {
+    File f = SD.open(path, FILE_READ);
+    if (!f) continue;
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      if (!line.isEmpty()) {
+        lines.push_back(line);
+        if (lines.size() > 20) lines.erase(lines.begin());
+      }
     }
+    f.close();
   }
-  f.close();
-  for (size_t i = 0; i < count; ++i) {
-    if (i) out += ',';
+  String out = "[";
+  size_t emitted = 0;
+  for (auto it = lines.rbegin(); it != lines.rend() && emitted < 10; ++it, ++emitted) {
+    if (emitted) out += ',';
     out += '"';
-    out += jsonEscape(lines[i]);
+    out += jsonEscape(*it);
     out += '"';
   }
   out += ']';

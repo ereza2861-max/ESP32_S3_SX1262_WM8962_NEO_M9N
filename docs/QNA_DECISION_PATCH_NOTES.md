@@ -30,17 +30,24 @@ Not included as speculative changes:
 Applied from `QnA.txt`:
 - D-04 = B: dedicated 16 kHz AEC working path with synchronized playback-reference resampling.
 - D-05 = C: Codec2 1600 bit/s, 8 kHz, 40 ms voice frames.
-- D-06 = A: full automated PKI lifecycle using RFC 7030 EST.
-- EST architecture = D: firmware talks to a vendor-neutral EST endpoint or backend adapter.
-- Initial enrollment authentication = 3: factory bootstrap certificate.
+- D-06 = C: PKI-based certificate lifecycle using RFC 7030 EST.
+- Q1 = 1A: mode 0 uses the client certificate; modes 1/2 use TLS server
+  verification plus Authorization headers without a client certificate.
+- Q2 = 2A: EST credentials are stored through ESP-IDF encrypted NVS; mode 2
+  bootstrap token is removed after the first successful enrollment.
+- Q3 = 3C: merge the old HIL power-loss procedure into
+  `test/hil/test_hil_nvs_powerloss.md` and remove the old filename.
+- EST architecture = vendor-neutral EST endpoint or backend adapter.
+
 
 D-05 changes the voice application payload format and therefore requires all voice
 nodes to use the same locked Codec2 mode/version. It does not change the outer
 authenticated LoRa packet envelope.
 
 D-06 removes password rotation as the primary MQTT credential mechanism. The
-factory certificate bootstraps EST mTLS; renewal uses a newly generated P-256 key
-and CSR, and the issued certificate/key are committed atomically.
+selected EST authentication mode remains stable until manually changed. Renewal
+uses a newly generated P-256 key and CSR, and the issued certificate/key are
+committed atomically.
 
 ## CONFIG_VERSION / ATOMIC_CONFIG_SCHEMA migration matrix
 
