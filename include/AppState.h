@@ -121,6 +121,10 @@ struct RuntimeState {
   bool aecEnabled = false;
   uint32_t usbSampleRate = 44100;
   bool audioLoopback = false;
+  bool certLifecycleEnabled = false;
+  uint64_t certExpiryEpoch = 0;
+  uint16_t certRenewalFailures = 0;
+  String certLifecycleStatus;
   float audioPeak = 0.0f;
   float audioRms = 0.0f;
   bool audioClipped = false;

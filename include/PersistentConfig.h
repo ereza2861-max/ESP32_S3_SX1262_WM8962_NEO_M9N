@@ -57,7 +57,13 @@ struct RuntimeConfig {
   uint32_t mqttHealthPeriodMs = Config::MQTT_HEALTH_PERIOD_MS;
   bool mqttRetainTelemetry = Config::MQTT_RETAIN_TELEMETRY;
   bool mqttRetainAvailability = Config::MQTT_RETAIN_AVAILABILITY;
-  uint16_t mqttCredentialRotationDays = 90;
+  uint16_t mqttCredentialRotationDays = 90; // deprecated compatibility field; not an auth policy
+  String estServerUrl = Config::EST_SERVER_URL;
+  String estLabel = Config::EST_LABEL;
+  uint16_t certRenewalThresholdDays = Config::CERT_RENEWAL_THRESHOLD_DAYS;
+  uint32_t certCheckPeriodMs = Config::CERT_CHECK_PERIOD_MS;
+  uint8_t estAuthMode = Config::EST_AUTH_MODE;
+  bool certLifecycleEnabled = Config::CERT_LIFECYCLE_ENABLED;
 
   bool voxEnabled = false;
   float voxThreshold = Config::VOX_THRESHOLD;

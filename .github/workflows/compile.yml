@@ -87,6 +87,12 @@ jobs:
             --std=c++17 --language=c++ --suppress=missingIncludeSystem \
             -I include src
 
+      - name: Run native certificate lifecycle tests
+        shell: bash
+        run: |
+          set -o pipefail
+          pio test -e native 2>&1 | tee native-test.log
+
       - name: Build ESP32-S3 gateway firmware
         shell: bash
         run: |
@@ -131,6 +137,7 @@ jobs:
           name: esp32-s3-build-log-${{ github.sha }}
           path: |
             build.log
+            native-test.log
             sensor-node-build.log
             ci-context.txt
           if-no-files-found: error

@@ -18,6 +18,13 @@ public:
                             const String& certificatePem, const String& privateKeyPem);
   bool credentialsProvisioned() const { return credentialsProvisioned_; }
   bool passwordRotationWarning() const;
+  uint64_t getCertExpiryEpoch() const { return certExpiryEpoch_; }
+  String getCertSubject() const { return certSubject_; }
+  String getCertIssuer() const { return certIssuer_; }
+  String getCertSerial() const { return certSerial_; }
+  String clientCertificatePem() const { return clientCertificatePem_; }
+  String clientPrivateKeyPem() const { return clientPrivateKeyPem_; }
+  bool reloadCertificateMaterial();
   void setEnabled(bool enabled);
   bool applyConfig();
   bool enabled() const { return enabled_; }
@@ -68,6 +75,10 @@ private:
   String clientCertificatePem_;
   String clientPrivateKeyPem_;
   time_t passwordProvisionedEpoch_ = 0;
+  uint64_t certExpiryEpoch_ = 0;
+  String certSubject_;
+  String certIssuer_;
+  String certSerial_;
   bool timeSynchronized() const;
   String topic(const char* leaf) const;
   bool publishSensorSample(const SensorSample& sample);

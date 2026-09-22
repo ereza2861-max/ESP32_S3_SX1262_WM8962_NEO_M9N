@@ -16,6 +16,7 @@
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
+#include <mbedtls/x509_crt.h>
 #include <SD.h>
 #include "AppState.h"
 #include "StorageManager.h"
@@ -30,6 +31,80 @@ extern StorageManager storage;
 
 namespace {
 constexpr char NVS_NS[] = "mqtt_creds";
+uint64_t mqttCertTimeToEpoch(const mbedtls_x509_time& t) {
+  if (t.year < 1970 || t.mon < 1 || t.mon > 12 || t.day < 1 || t.day > 31 ||
+      t.hour > 23 || t.min > 59 || t.sec > 59) return 0;
+  const int y = t.year;
+  const unsigned m = t.mon;
+  const unsigned d = t.day;
+  const int yAdj = y - (m <= 2);
+  const int era = (yAdj >= 0 ? yAdj : yAdj - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(yAdj - era * 400);
+  const unsigned mp = static_cast<unsigned>(static_cast<int>(m) + (m > 2 ? -3 : 9));
+  const unsigned doy = (153U * mp + 2U) / 5U + d - 1U;
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  const int64_t days = static_cast<int64_t>(era) * 146097LL +
+                       static_cast<int64_t>(doe) - 719468LL;
+  if (days < 0) return 0;
+  return static_cast<uint64_t>(days) * 86400ULL +
+         static_cast<uint64_t>(t.hour) * 3600ULL +
+         static_cast<uint64_t>(t.min) * 60ULL +
+         static_cast<uint64_t>(t.sec);
+}
+
+String mqttCertName(const mbedtls_x509_name* name) {
+  char buf[512] = {};
+  if (!name || mbedtls_x509_dn_gets(buf, sizeof(buf), name) < 0) return String();
+  return String(buf);
+}
+
+String mqttCertSerial(const mbedtls_x509_crt& crt) {
+  static const char hex[] = "0123456789ABCDEF";
+  String out = "0x";
+  for (size_t i = 0; i < crt.serial.len; ++i) {
+    out += hex[crt.serial.p[i] >> 4];
+    out += hex[crt.serial.p[i] & 0x0F];
+  }
+  return out;
+}
+
+
+constexpr uint8_t CERT_SLOT_COMMIT = 0xA7;
+bool loadCommittedCertificateSlot(Preferences& prefs, String& cert, String& key) {
+  String ca = prefs.getString("cert_a", "");
+  String ka = prefs.getString("key_a", "");
+  String cb = prefs.getString("cert_b", "");
+  String kb = prefs.getString("key_b", "");
+  const bool va = prefs.getUChar("cert_commit_a", 0) == CERT_SLOT_COMMIT &&
+                  !ca.isEmpty() && !ka.isEmpty();
+  const bool vb = prefs.getUChar("cert_commit_b", 0) == CERT_SLOT_COMMIT &&
+                  !cb.isEmpty() && !kb.isEmpty();
+  if (!va && !vb) return false;
+  const uint32_t ga = va ? prefs.getUInt("cert_gen_a", 0) : 0;
+  const uint32_t gb = vb ? prefs.getUInt("cert_gen_b", 0) : 0;
+  if (gb > ga) { cert = cb; key = kb; }
+  else { cert = ca; key = ka; }
+  return true;
+}
+
+bool parseMqttCertificateMetadata(const String& pem, uint64_t& expiry,
+                                  String& subject, String& issuer, String& serial) {
+  mbedtls_x509_crt crt;
+  mbedtls_x509_crt_init(&crt);
+  const int rc = mbedtls_x509_crt_parse(
+      &crt, reinterpret_cast<const unsigned char*>(pem.c_str()), pem.length() + 1U);
+  if (rc != 0) {
+    mbedtls_x509_crt_free(&crt);
+    return false;
+  }
+  expiry = mqttCertTimeToEpoch(crt.valid_to);
+  subject = mqttCertName(&crt.subject);
+  issuer = mqttCertName(&crt.issuer);
+  serial = mqttCertSerial(crt);
+  mbedtls_x509_crt_free(&crt);
+  return expiry != 0;
+}
+
 constexpr time_t MIN_VALID_EPOCH = 1700000000;
 constexpr size_t MQTT_MAX_BLOB = 1024;
 constexpr char CRED_MAGIC[] = "FRMQ1";
@@ -191,11 +266,38 @@ bool MqttClientManager::loadCredentials() {
   Preferences prefs;
   if (!prefs.begin(NVS_NS, true)) return false;
   credentialsProvisioned_ = prefs.getBool("provisioned", false);
-  clientCertificatePem_ = prefs.getString("cert", "");
-  clientPrivateKeyPem_ = prefs.getString("key", "");
+  if (!loadCommittedCertificateSlot(prefs, clientCertificatePem_, clientPrivateKeyPem_)) {
+    clientCertificatePem_ = prefs.getString("cert", "");
+    clientPrivateKeyPem_ = prefs.getString("key", "");
+  }
   pkiProvisioned_ = !clientCertificatePem_.isEmpty() && !clientPrivateKeyPem_.isEmpty();
   passwordProvisionedEpoch_ = static_cast<time_t>(prefs.getLong64("pass_epoch", 0));
+  certExpiryEpoch_ = static_cast<uint64_t>(prefs.getLong64("cert_expiry", 0));
+  certSubject_ = prefs.getString("cert_subject", "");
+  certIssuer_ = prefs.getString("cert_issuer", "");
+  certSerial_ = prefs.getString("cert_serial", "");
   prefs.end();
+
+  if (pkiProvisioned_) {
+    uint64_t expiry = 0;
+    String subject, issuer, serial;
+    if (!parseMqttCertificateMetadata(clientCertificatePem_, expiry, subject, issuer, serial)) {
+      pkiProvisioned_ = false;
+      return false;
+    }
+    certExpiryEpoch_ = expiry;
+    certSubject_ = subject;
+    certIssuer_ = issuer;
+    certSerial_ = serial;
+    Preferences meta;
+    if (meta.begin(NVS_NS, false)) {
+      (void)meta.putLong64("cert_expiry", static_cast<int64_t>(certExpiryEpoch_));
+      (void)meta.putString("cert_subject", certSubject_);
+      (void)meta.putString("cert_issuer", certIssuer_);
+      (void)meta.putString("cert_serial", certSerial_);
+      meta.end();
+    }
+  }
 
   // D-06: the broker credential authority is the device-specific X.509
   // certificate/private key. Username/password is no longer a connection
@@ -213,11 +315,22 @@ bool MqttClientManager::saveCredentials() {
   if (!encryptCredentials(blob)) return false;
   Preferences prefs;
   if (!prefs.begin(NVS_NS, false)) return false;
+  uint64_t expiry = certExpiryEpoch_;
+  String subject = certSubject_, issuer = certIssuer_, serial = certSerial_;
+  if (!parseMqttCertificateMetadata(clientCertificatePem_, expiry, subject, issuer, serial)) return false;
+  certExpiryEpoch_ = expiry;
+  certSubject_ = subject;
+  certIssuer_ = issuer;
+  certSerial_ = serial;
   const bool ok = prefs.putString("blob", blob) > 0 &&
                   prefs.putString("cert", clientCertificatePem_) > 0 &&
                   prefs.putString("key", clientPrivateKeyPem_) > 0 &&
                   prefs.putBool("provisioned", true) &&
-                  prefs.putLong64("pass_epoch", static_cast<int64_t>(timeSynchronized() ? time(nullptr) : 0)) > 0;
+                  prefs.putLong64("pass_epoch", static_cast<int64_t>(timeSynchronized() ? time(nullptr) : 0)) > 0 &&
+                  prefs.putLong64("cert_expiry", static_cast<int64_t>(certExpiryEpoch_)) > 0 &&
+                  prefs.putString("cert_subject", certSubject_) > 0 &&
+                  prefs.putString("cert_issuer", certIssuer_) > 0 &&
+                  prefs.putString("cert_serial", certSerial_) > 0;
   prefs.end();
   if (ok) {
     credentialsProvisioned_ = true;
@@ -279,10 +392,17 @@ bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
   if (!gConfig.mqttTlsRequired || port == 1883) return false;
 #endif
 
+  uint64_t expiry = 0;
+  String subject, issuer, serial;
+  if (!parseMqttCertificateMetadata(certificatePem, expiry, subject, issuer, serial)) return false;
   host_ = host;
   port_ = port;
   clientCertificatePem_ = certificatePem;
   clientPrivateKeyPem_ = privateKeyPem;
+  certExpiryEpoch_ = expiry;
+  certSubject_ = subject;
+  certIssuer_ = issuer;
+  certSerial_ = serial;
   pkiProvisioned_ = true;
   Preferences prefs;
   if (!prefs.begin(NVS_NS, false)) return false;
@@ -290,7 +410,12 @@ bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
                       prefs.putString("key", clientPrivateKeyPem_) > 0 &&
                       prefs.putBool("provisioned", true) &&
                       prefs.putLong64("pass_epoch",
-                                      static_cast<int64_t>(timeSynchronized() ? time(nullptr) : 0)) > 0;
+                                      static_cast<int64_t>(timeSynchronized() ? time(nullptr) : 0)) > 0 &&
+                      prefs.putLong64("cert_expiry", static_cast<int64_t>(certExpiryEpoch_)) > 0 &&
+                      prefs.putString("cert_subject", certSubject_) > 0 &&
+                      prefs.putString("cert_issuer", certIssuer_) > 0 &&
+                      prefs.putString("cert_serial", certSerial_) > 0 &&
+                      prefs.putBool("cert_enrolled", false);
   prefs.end();
   if (!stored) return false;
   credentialsProvisioned_ = true;
@@ -313,12 +438,43 @@ bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
 }
 
 bool MqttClientManager::passwordRotationWarning() const {
-  if (!credentialsProvisioned_) return false;
-  if (passwordProvisionedEpoch_ <= 0) return true;
-  const time_t now = time(nullptr);
-  return now >= MIN_VALID_EPOCH &&
-         now - passwordProvisionedEpoch_ >=
-             static_cast<time_t>(gConfig.mqttCredentialRotationDays) * 24LL * 60LL * 60LL;
+  // D-06 uses certificate lifecycle; password rotation is retained only as a
+  // compatibility API and is never used as an MQTT authentication policy.
+  return false;
+}
+
+bool MqttClientManager::reloadCertificateMaterial() {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, true)) return false;
+  String cert, key;
+  if (!loadCommittedCertificateSlot(prefs, cert, key)) {
+    cert = prefs.getString("cert", "");
+    key = prefs.getString("key", "");
+  }
+  prefs.end();
+  if (cert.isEmpty() || key.isEmpty()) return false;
+  uint64_t expiry = 0;
+  String subject, issuer, serial;
+  if (!parseMqttCertificateMetadata(cert, expiry, subject, issuer, serial)) return false;
+  clientCertificatePem_ = cert;
+  clientPrivateKeyPem_ = key;
+  certExpiryEpoch_ = expiry;
+  certSubject_ = subject;
+  certIssuer_ = issuer;
+  certSerial_ = serial;
+  if (gConfig.mqttTlsRequired) {
+    secure_.stop();
+    secure_.setCACert(MQTT_BROKER_ROOT_CA);
+    secure_.setCertificate(clientCertificatePem_.c_str());
+    secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
+    secure_.setHandshakeTimeout(10);
+    client_.setClient(secure_);
+  }
+  connected_ = false;
+  client_.disconnect();
+  nextRetryMs_ = 0;
+  retryDelayMs_ = gConfig.mqttReconnectMinMs;
+  return true;
 }
 
 void MqttClientManager::auditEvent(const char* event, int mqttState) {
@@ -660,6 +816,12 @@ void MqttClientManager::task() {
     ntpRequested = true;
   }
   if (!timeSynchronized()) return;
+  if (certExpiryEpoch_ != 0 && static_cast<uint64_t>(time(nullptr)) >= certExpiryEpoch_) {
+    connected_ = false;
+    client_.disconnect();
+    auditEvent("CERT_EXPIRED");
+    return;
+  }
 
   if (!client_.connected()) {
     if (connected_) auditEvent("DISCONNECT", client_.state());

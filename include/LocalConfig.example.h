@@ -28,3 +28,12 @@
 #define FIELDRADIO_MQTT_PASSWORD ""
 #define FIELDRADIO_MQTT_TOPIC_ROOT "fieldradio"
 #define FIELDRADIO_MQTT_SERVER_NAME "broker.emqx.io"
+
+// EST / PKI lifecycle is disabled by default. Enable only after an RFC 7030
+// endpoint/adapter and factory bootstrap certificate are provisioned.
+#define FIELDRADIO_EST_SERVER_URL ""
+#define FIELDRADIO_EST_LABEL "/.well-known/est"
+#define FIELDRADIO_CERT_RENEWAL_THRESHOLD_DAYS 30
+#define FIELDRADIO_CERT_CHECK_PERIOD_MS 86400000UL
+#define FIELDRADIO_EST_AUTH_MODE 0
+#define FIELDRADIO_CERT_LIFECYCLE_ENABLED 0

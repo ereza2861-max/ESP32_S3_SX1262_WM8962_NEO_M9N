@@ -232,7 +232,8 @@ constexpr uint8_t LORA_RANGE_TEST_MAGIC = 0xD4;
 constexpr uint8_t LORA_RANGE_TEST_ACK_MAGIC = 0xD5;
 constexpr uint8_t LORA_RANGE_TEST_VERSION = 1;
 constexpr uint32_t RANGE_TEST_MAX_DURATION_MS = 30UL * 60UL * 1000UL;
-constexpr uint8_t CONFIG_VERSION = 9;
+constexpr uint8_t CONFIG_VERSION = 10;
+constexpr uint16_t ATOMIC_CONFIG_SCHEMA_VERSION = 2;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
 constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;
@@ -495,6 +496,36 @@ constexpr bool MQTT_RETAIN_TELEMETRY = false;
 constexpr uint32_t MQTT_RECONNECT_MIN_MS = 5000UL;
 constexpr uint32_t MQTT_RECONNECT_MAX_MS = 300000UL;
 constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = MQTT_TELEMETRY_PERIOD_MS;
+
+// EST / PKI certificate lifecycle. Disabled by default; deployment supplies the
+// vendor-neutral RFC 7030 endpoint. The existing MQTT root CA is also used to
+// validate the EST TLS server and issued certificate chain unless the build
+// provisioning layer supplies a different generated CA.
+#ifndef FIELDRADIO_EST_SERVER_URL
+#define FIELDRADIO_EST_SERVER_URL ""
+#endif
+#ifndef FIELDRADIO_EST_LABEL
+#define FIELDRADIO_EST_LABEL "/.well-known/est"
+#endif
+#ifndef FIELDRADIO_CERT_RENEWAL_THRESHOLD_DAYS
+#define FIELDRADIO_CERT_RENEWAL_THRESHOLD_DAYS 30
+#endif
+#ifndef FIELDRADIO_CERT_CHECK_PERIOD_MS
+#define FIELDRADIO_CERT_CHECK_PERIOD_MS 86400000UL
+#endif
+#ifndef FIELDRADIO_EST_AUTH_MODE
+#define FIELDRADIO_EST_AUTH_MODE 0
+#endif
+#ifndef FIELDRADIO_CERT_LIFECYCLE_ENABLED
+#define FIELDRADIO_CERT_LIFECYCLE_ENABLED 0
+#endif
+constexpr char EST_SERVER_URL[] = FIELDRADIO_EST_SERVER_URL;
+constexpr char EST_LABEL[] = FIELDRADIO_EST_LABEL;
+constexpr uint16_t CERT_RENEWAL_THRESHOLD_DAYS = FIELDRADIO_CERT_RENEWAL_THRESHOLD_DAYS;
+constexpr uint32_t CERT_CHECK_PERIOD_MS = FIELDRADIO_CERT_CHECK_PERIOD_MS;
+constexpr uint8_t EST_AUTH_MODE = FIELDRADIO_EST_AUTH_MODE;
+constexpr bool CERT_LIFECYCLE_ENABLED = FIELDRADIO_CERT_LIFECYCLE_ENABLED;
+
 
 // Services
 constexpr uint32_t GPS_REPORT_PERIOD_MS = 30000;

@@ -30,12 +30,26 @@ Not included as speculative changes:
 Applied from `QnA.txt`:
 - D-04 = B: dedicated 16 kHz AEC working path with synchronized playback-reference resampling.
 - D-05 = C: Codec2 1600 bit/s, 8 kHz, 40 ms voice frames.
-- D-06 = A: factory-provisioned unique MQTT client certificate/private key with authenticated maintenance replacement.
+- D-06 = A: full automated PKI lifecycle using RFC 7030 EST.
+- EST architecture = D: firmware talks to a vendor-neutral EST endpoint or backend adapter.
+- Initial enrollment authentication = 3: factory bootstrap certificate.
 
 D-05 changes the voice application payload format and therefore requires all voice
 nodes to use the same locked Codec2 mode/version. It does not change the outer
 authenticated LoRa packet envelope.
 
-D-06 does not claim automatic self-service certificate rotation. It provides the
-selected factory + maintenance lifecycle and rejects the legacy username/password
-MQTT provisioning endpoint semantics.
+D-06 removes password rotation as the primary MQTT credential mechanism. The
+factory certificate bootstraps EST mTLS; renewal uses a newly generated P-256 key
+and CSR, and the issued certificate/key are committed atomically.
+
+## CONFIG_VERSION / ATOMIC_CONFIG_SCHEMA migration matrix
+
+| CONFIG_VERSION | ATOMIC_CONFIG_SCHEMA | Meaning |
+|---:|---:|---|
+| 9 | 1 | Existing runtime configuration; no EST lifecycle fields |
+| 10 | 2 | Adds EST endpoint/auth/lifecycle fields and extends the atomic payload |
+| future | 2+ | Must introduce a new schema when the atomic payload layout changes |
+
+Legacy per-key NVS fields are still read on boot. A configuration loaded from
+the legacy representation is normalized and written into the current atomic
+schema. A schema mismatch never gets interpreted as the current payload layout.

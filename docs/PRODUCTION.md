@@ -353,3 +353,20 @@ final eFuse locking.
 - [ ] Manufacturing record contains chip identity and eFuse verification result,
       not secret key material.
 - [ ] OTA remains explicitly marked FUTURE/TODO until implemented and tested.
+
+## EST Provisioning
+
+D-06 production provisioning uses a factory bootstrap X.509 certificate/private
+key. Configure the vendor-neutral RFC 7030 EST endpoint through RuntimeConfig;
+do not point `est_server_url` at a plain MQTT broker URL unless the deployment
+explicitly provides an EST adapter at that URL.
+
+Before enabling `cert_lifecycle_enabled`, verify:
+1. EST server TLS chains to the configured MQTT/EST trust anchor.
+2. The factory bootstrap certificate is accepted for EST mTLS.
+3. `simpleenroll` and `simplereenroll` return `application/pkcs7-mime`.
+4. The issued certificate subject contains the device identity/callsign.
+5. MQTT broker policy accepts the renewed certificate.
+6. Power-loss testing has passed for the NVS certificate A/B commit marker.
+
+The device will not renew while GNSS UTC time is invalid.

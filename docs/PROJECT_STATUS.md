@@ -27,3 +27,14 @@
 | HIL/factory test/fuzz/native unit test | **Not complete** | Repository belum memiliki hardware fixture/test harness lengkap |
 
 Status ini adalah baseline dokumentasi; jangan mengubahnya menjadi “production”, “deployed”, atau “hardware validated” tanpa bukti baru yang eksplisit.
+
+## D-06 PKI lifecycle status (2026-09-22)
+
+Decision is locked to automated RFC 7030 EST with a factory bootstrap
+certificate. Firmware support is implemented in `EstClient` and
+`CertLifecycleManager`; automatic lifecycle remains disabled by default.
+
+The repository includes native certificate/CSR/expiry tests and an HIL procedure
+for certificate NVS A/B power-loss validation. Target ESP32-S3 build validation
+must still be executed in the PlatformIO/CI environment because PlatformIO is
+not installed in this audit runtime.

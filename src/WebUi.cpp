@@ -28,6 +28,7 @@
 #include <ctype.h>
 
 extern SensorSpool sensorSpool;
+extern CertLifecycleManager certLifecycle;
 
 static String jsonEscape(const String& input) {
   String out;
@@ -361,7 +362,15 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <label>MQTT reconnect min/max ms <input id=mqttRetryMin type=number min=1000><input id=mqttRetryMax type=number min=1000></label>
 <label>MQTT telemetry/health ms <input id=mqttTelemetry type=number min=1000><input id=mqttHealth type=number min=1000></label>
 <label>Retain telemetry <input id=mqttRetainTelemetry type=checkbox></label><label>Retain availability/LWT <input id=mqttRetainAvailability type=checkbox checked></label>
-<label>MQTT credential rotation days <input id=mqttRotation type=number min=1 max=3650></label>
+<div class=card><h4>Certificate Lifecycle (EST / PKI)</h4>
+<label>Lifecycle enabled <input id=certLifecycleEnabled type=checkbox></label>
+<label>EST server URL <input id=estServerUrl maxlength=253 placeholder="https://est.example.com:8443"></label>
+<label>EST label <input id=estLabel maxlength=95 value="/.well-known/est"></label>
+<label>Renewal threshold (days) <input id=certRenewalThresholdDays type=number min=1 max=3650 value=30></label>
+<label>Check period (ms) <input id=certCheckPeriodMs type=number min=3600000 value=86400000></label>
+<label>EST auth mode <select id=estAuthMode><option value=0>Factory bootstrap certificate</option></select></label>
+<button onclick="renewCert()">Renew Now</button><button onclick="fetchCertCa()">Fetch CA Chain</button>
+<pre id=certStatus></pre><pre id=certHistory></pre></div>
 <label>BLE reader enabled <input id=bleEnabled type=checkbox checked></label><label>BLE pairing <input id=blePairing type=checkbox checked></label>
 <label>BLE scan interval/window ms <input id=bleScanInterval type=number min=100><input id=bleScanWindow type=number min=1></label>
 <label>BLE scan duration/connect timeout ms <input id=bleScanDuration type=number min=100><input id=bleConnectTimeout type=number min=500></label>
@@ -508,7 +517,12 @@ async function refresh(){
      mqttHealth.value=ra.mqttHealthPeriodMs||60000;
      mqttRetainTelemetry.checked=!!ra.mqttRetainTelemetry;
      mqttRetainAvailability.checked=!!ra.mqttRetainAvailability;
-     mqttRotation.value=ra.mqttCredentialRotationDays||90;
+     estServerUrl.value=ra.estServerUrl||'';
+     estLabel.value=ra.estLabel||'/.well-known/est';
+     certRenewalThresholdDays.value=ra.certRenewalThresholdDays||30;
+     certCheckPeriodMs.value=ra.certCheckPeriodMs||86400000;
+     estAuthMode.value=ra.estAuthMode??0;
+     certLifecycleEnabled.checked=!!ra.certLifecycleEnabled;
      vox.checked=!!ra.voxEnabled;
      voxThreshold.value=ra.voxThreshold||0.08;
      voxHang.value=ra.voxHangMs||700;
@@ -618,7 +632,12 @@ async function saveCfg(){
     mqtt_telemetry_period_ms:mqttTelemetry.value,mqtt_health_period_ms:mqttHealth.value,
     mqtt_retain_telemetry:mqttRetainTelemetry.checked?'1':'0',
     mqtt_retain_availability:mqttRetainAvailability.checked?'1':'0',
-    mqtt_rotation_days:mqttRotation.value,
+    est_server_url:estServerUrl.value,
+    est_label:estLabel.value,
+    cert_renewal_threshold_days:certRenewalThresholdDays.value,
+    cert_check_period_ms:certCheckPeriodMs.value,
+    est_auth_mode:estAuthMode.value,
+    cert_lifecycle_enabled:certLifecycleEnabled.checked?'1':'0',
     vox_enabled:vox.checked?'1':'0',vox_threshold:voxThreshold.value,vox_hang_ms:voxHang.value,
     aec_enabled:aec.checked?'1':'0',usb_monitor:usbmon.checked?'1':'0',
     usb_transport:usbtransport.checked?'1':'0',loopback:loop.checked?'1':'0',
@@ -638,6 +657,13 @@ async function saveCfg(){
   if(wp.value)q.set('web_password',wp.value);
   alert(await j('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q}));refresh()
 }
+async function refreshCertStatus(){
+ try{const a=await (await fetch('/api/mqtt/cert-status')).json();certStatus.textContent=JSON.stringify(a,null,2)}catch(e){certStatus.textContent='Certificate status unavailable'}
+}
+async function renewCert(){const r=await j('/api/mqtt/cert-renew',{method:'POST'});toast(r);await refreshCertStatus()}
+async function fetchCertCa(){const r=await j('/api/mqtt/cert-cacerts',{method:'POST'});toast(r)}
+async function refreshCertHistory(){try{const a=await (await fetch('/api/mqtt/cert-history')).json();certHistory.textContent=JSON.stringify(a,null,2)}catch(e){}}
+setInterval(refreshCertStatus,30000);refreshCertStatus();refreshCertHistory();
 async function play(){await j('/api/play?path='+encodeURIComponent(file.value),{method:'POST'});refresh()}
 async function stopPlay(){await j('/api/stop',{method:'POST'});refresh()}
 async function pausePlay(v){await j('/api/pause?on='+v,{method:'POST'});refresh()}
@@ -845,9 +871,12 @@ bool WebUi::sessionValid() {
   for (size_t i = 0; i < sizeof(raw); ++i)
     tokenDiff |= static_cast<uint8_t>(raw[i] ^ expected[i]);
   if (tokenDiff != 0) return false;
+  RuntimeConfig config;
+  if (!configSnapshot(config))
+    return false;
   return static_cast<int32_t>(millis() - authBlockedUntilMs_) >= 0 &&
          static_cast<uint32_t>(millis() - sessionIssuedMs_) <
-             gConfig.webSessionTimeoutMs;
+             config.webSessionTimeoutMs;
 }
 
 bool WebUi::csrfValid() {
@@ -903,9 +932,12 @@ bool WebUi::issueSession() {
     csrfTokenHex_ += digits[b >> 4];
     csrfTokenHex_ += digits[b & 0x0F];
   }
+  RuntimeConfig config;
+  if (!configSnapshot(config))
+    return false;
   server_.sendHeader("Set-Cookie",
       "FR-SESSION=" + hex + "; Max-Age=" +
-      String(gConfig.webSessionTimeoutMs / 1000) +
+      String(config.webSessionTimeoutMs / 1000) +
       "; HttpOnly; Secure; SameSite=Strict");
 
   return true;
@@ -962,13 +994,18 @@ static bool basicAuthMatches(WebServer& server, const String& user,
 
 bool WebUi::auth() {
   const uint32_t now = millis();
+  RuntimeConfig config;
+  if (!configSnapshot(config)) {
+    server_.send(503, "text/plain", "configuration unavailable");
+    return false;
+  }
   if (static_cast<int32_t>(now - authBlockedUntilMs_) < 0) {
     server_.send(429, "text/plain", "too many authentication failures");
     return false;
   }
 
   if (!sessionValid()) {
-    if (!basicAuthMatches(server_, gConfig.webUser, gConfig)) {
+    if (!basicAuthMatches(server_, config.webUser, config)) {
       if (now - authFailureWindowStartMs_ >= 60000) {
         authFailureWindowStartMs_ = now;
         authFailures_ = 0;
@@ -994,11 +1031,11 @@ bool WebUi::auth() {
     auditAuth(true);
   }
   if (server_.method() == HTTP_POST || server_.method() == HTTP_DELETE) {
-    if (gConfig.csrfPolicy != 2 && gConfig.csrfPolicy == 0 && !sameOrigin()) {
+    if (config.csrfPolicy != 2 && config.csrfPolicy == 0 && !sameOrigin()) {
       server_.send(403, "text/plain", "forbidden origin");
       return false;
     }
-    if (gConfig.csrfPolicy != 2 && !csrfValid()) {
+    if (config.csrfPolicy != 2 && !csrfValid()) {
       server_.send(403, "text/plain", "invalid CSRF token");
       return false;
     }
@@ -1064,6 +1101,10 @@ void WebUi::begin() {
   server_.on("/api/ble/passkey", HTTP_GET, [this]{ if (auth()) handleBlePasskeyList(); });
   server_.on("/api/mqtt/provision", HTTP_POST, [this]{ if (auth()) handleMqttProvision(); });
   server_.on("/api/mqtt/status", HTTP_GET, [this]{ if (auth()) handleMqttStatus(); });
+  server_.on("/api/mqtt/cert-status", HTTP_GET, [this]{ if (auth()) handleMqttCertStatus(); });
+  server_.on("/api/mqtt/cert-renew", HTTP_POST, [this]{ if (auth()) handleMqttCertRenew(); });
+  server_.on("/api/mqtt/cert-history", HTTP_GET, [this]{ if (auth()) handleMqttCertHistory(); });
+  server_.on("/api/mqtt/cert-cacerts", HTTP_POST, [this]{ if (auth()) handleMqttCertCaChain(); });
   server_.on("/api/routes", HTTP_GET, [this]{ if (auth()) handleRoutes(); });
   server_.on("/api/capture/start", HTTP_POST, [this]{ if (auth()) handleCaptureStart(); });
   server_.on("/api/capture/stop", HTTP_POST, [this]{ if (auth()) handleCaptureStop(); });
@@ -2544,7 +2585,7 @@ void WebUi::handleMqttStatus() {
   if (!rateLimit(lastMqttStatusMs, gConfig.webAuthRateLimitMs)) return;
   String j = "{\"ok\":true,\"provisioned\":";
   j += mqtt.credentialsProvisioned() ? "true" : "false";
-  j += ","auth":"x509"";
+  j += ",\"auth\":\"x509\"";
   j += ",\"connected\":";
   j += mqtt.isConnected() ? "true" : "false";
   j += ",\"passwordRotationWarning\":";
@@ -2552,6 +2593,34 @@ void WebUi::handleMqttStatus() {
   j += "}";
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", j);
+}
+
+void WebUi::handleMqttCertStatus() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", certLifecycle.statusJson());
+}
+
+void WebUi::handleMqttCertRenew() {
+  static uint32_t lastRenewMs = 0;
+  if (!rateLimit(lastRenewMs, 60000UL)) return;
+  const bool ok = certLifecycle.renewCertificate(true);
+  server_.send(ok ? 200 : 503, "application/json",
+               ok ? "{\"ok\":true,\"status\":\"renewed\"}" :
+                    "{\"ok\":false,\"status\":\"renew_failed\"}");
+}
+
+void WebUi::handleMqttCertHistory() {
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", certLifecycle.historyJson());
+}
+
+void WebUi::handleMqttCertCaChain() {
+  static uint32_t lastCaFetchMs = 0;
+  if (!rateLimit(lastCaFetchMs, 60000UL)) return;
+  const bool ok = certLifecycle.fetchCaChain();
+  server_.send(ok ? 200 : 503, "application/json",
+               ok ? "{\"ok\":true,\"status\":\"fetched\"}" :
+                    "{\"ok\":false,\"status\":\"fetch_failed\"}");
 }
 
 void WebUi::handleNeighbors() {
@@ -3223,6 +3292,45 @@ void WebUi::handleConfig() {
     if (!parseUnsigned(server_.arg("mqtt_rotation_days"), 3650, value) || value < 1) {
       server_.send(400, "text/plain", "invalid MQTT rotation policy"); return;
     } else candidate.mqttCredentialRotationDays = static_cast<uint16_t>(value);
+  if (server_.hasArg("est_server_url")) {
+    candidate.estServerUrl = server_.arg("est_server_url");
+    if (candidate.estServerUrl.length() > 253 ||
+        (!candidate.estServerUrl.isEmpty() && !candidate.estServerUrl.startsWith("https://"))) {
+      server_.send(400, "text/plain", "invalid EST server URL"); return;
+    }
+  }
+  if (server_.hasArg("est_label")) {
+    candidate.estLabel = server_.arg("est_label");
+    if (candidate.estLabel.isEmpty() || candidate.estLabel.length() > 95 ||
+        !candidate.estLabel.startsWith("/") || candidate.estLabel.indexOf('|') >= 0) {
+      server_.send(400, "text/plain", "invalid EST label"); return;
+    }
+  }
+  if (server_.hasArg("cert_renewal_threshold_days")) {
+    if (!parseUnsigned(server_.arg("cert_renewal_threshold_days"), 3650, value) || value < 1) {
+      server_.send(400, "text/plain", "invalid certificate renewal threshold"); return;
+    }
+    candidate.certRenewalThresholdDays = static_cast<uint16_t>(value);
+  }
+  if (server_.hasArg("cert_check_period_ms")) {
+    if (!parseUnsigned(server_.arg("cert_check_period_ms"), 7UL * 86400000UL, value) || value < 3600000UL) {
+      server_.send(400, "text/plain", "invalid certificate check period"); return;
+    }
+    candidate.certCheckPeriodMs = value;
+  }
+  if (server_.hasArg("est_auth_mode")) {
+    if (!parseUnsigned(server_.arg("est_auth_mode"), 0, value)) {
+      server_.send(400, "text/plain", "invalid EST auth mode"); return;
+    }
+    candidate.estAuthMode = static_cast<uint8_t>(value);
+  }
+  if (server_.hasArg("cert_lifecycle_enabled")) {
+    const String raw = server_.arg("cert_lifecycle_enabled");
+    if (raw != "0" && raw != "1") {
+      server_.send(400, "text/plain", "invalid certificate lifecycle setting"); return;
+    }
+    candidate.certLifecycleEnabled = raw == "1";
+  }
   if (server_.hasArg("wake_period_sec")) {
     if (!parseUnsigned(server_.arg("wake_period_sec"), 604800, value) || value < 60) {
       server_.send(400, "text/plain", "invalid wake period"); return;

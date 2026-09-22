@@ -24,6 +24,7 @@
 #include "LoRaWANManager.h"
 #include "WifiStaManager.h"
 #include "MqttClientManager.h"
+#include "CertLifecycleManager.h"
 #include "AudioManager.h"
 #include "StorageManager.h"
 #include "SensorSpool.h"
@@ -38,6 +39,7 @@ LoRaManager lora;
 LoRaWANManager lorawan(lora);
 WifiStaManager wifiSta;
 MqttClientManager mqtt;
+CertLifecycleManager certLifecycle(mqtt);
 AudioManager audio;
 StorageManager storage;
 SensorSpool sensorSpool;
@@ -685,6 +687,7 @@ static void taskNet(void*) {
   for (;;) {
     esp_task_wdt_reset();
     wifiSta.task();
+    certLifecycle.task();
     mqtt.task();
     vTaskDelay(pdMS_TO_TICKS(100));
   }
@@ -1322,6 +1325,16 @@ static void serviceSerialConsole() {
         Serial.println("BLE: peer forgotten");
     } else if (line == "ble list") {
       Serial.println(bleSensorReader.peersJson());
+    } else if (line == "cert status") {
+      Serial.println(certLifecycle.statusJson());
+    } else if (line == "cert renew") {
+      Serial.println(certLifecycle.renewCertificate(true) ? "CERT: renewal OK" : "CERT: renewal failed");
+    } else if (line == "cert history") {
+      Serial.println(certLifecycle.historyJson());
+    } else if (line == "est cacerts") {
+      Serial.println(certLifecycle.fetchCaChain() ? "EST: CA chain fetched" : "EST: CA chain fetch failed");
+    } else if (line == "est csrattrs") {
+      Serial.println(certLifecycle.fetchCsrAttrs() ? "EST: CSR attributes fetched" : "EST: CSR attributes fetch failed");
     } else if (line == "reboot") {
       (void)sensorSpool.flush();
       ESP.restart();
@@ -1335,7 +1348,7 @@ static void serviceSerialConsole() {
           (unsigned)gState.healthLogCount);
     } else if (line == "help" || line.isEmpty()) {
       Serial.printf("wdt=%lu,%lu,%lu,%lu\n", (unsigned long)gState.wdtResetCounts[0], (unsigned long)gState.wdtResetCounts[1], (unsigned long)gState.wdtResetCounts[2], (unsigned long)gState.wdtResetCounts[3]);
-      Serial.println("commands: status auth challenge auth <64-hex-hmac> config ble passkey <addr> <passkey> ble irk <addr> <32-hex> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
+      Serial.println("commands: status auth challenge auth <64-hex-hmac> config cert status cert renew cert history est cacerts est csrattrs ble passkey <addr> <passkey> ble irk <addr> <32-hex> ble forget <addr> ble list lw status lw connect lw disconnect lw uplink <hex> reboot wipe log help");
     } else {
       Serial.println("unknown command; type help");
     }
@@ -1423,6 +1436,7 @@ void setup() {
 
   setupWifi();
   (void)mqtt.begin();
+  (void)certLifecycle.begin();
   web.begin();
 
   const bool usbAudioOk = audio.usbStart();

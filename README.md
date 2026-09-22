@@ -236,3 +236,15 @@ Sensor forwarding uses a fixed depth-16 queue. The default `DROP_OLDEST` policy 
 
 ## Version pinning
 `platformio.ini` pins the active pioarduino 55.03.39 platform (Arduino-ESP32 3.3.9 / ESP-IDF 5.5.4). Dependencies whose exact upstream version could not be established from the repository are explicitly marked in `VERSIONS.md`; `tools/audit_versions.py` reports remaining pinning work. Run `python tools/audit_versions.py` in CI and before release.
+
+## PKI Certificate Lifecycle
+
+D-06 now uses a vendor-neutral RFC 7030 EST certificate lifecycle. The firmware
+uses the factory-provisioned device certificate for EST mTLS bootstrap/renewal,
+generates a fresh P-256 key pair for renewal, submits a PKCS#10 CSR, validates
+the issued X.509 certificate, and commits the new certificate/key through an
+NVS A/B commit-marker scheme. Automatic lifecycle is disabled by default.
+
+The configured EST URL is an RFC 7030 endpoint (or backend adapter), while the
+MQTT broker remains the certificate-validation authority for MQTT mTLS. See
+`docs/MQTT_PKI_LIFECYCLE.md`.

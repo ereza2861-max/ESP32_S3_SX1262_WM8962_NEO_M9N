@@ -101,8 +101,13 @@ native-test harness. No fake pass result is generated.
 
 ## QnA D-06 closure
 
-MQTT PKI enrollment is now certificate-based. A device-specific client certificate
-and private key are stored in the protected MQTT provisioning namespace and loaded
-for mutual TLS. `/api/mqtt/provision` accepts `host`, `port`, `cert`, and `key` only;
-the legacy username/password provisioning path is rejected. Factory provisioning
-and later authenticated maintenance replacement are the supported lifecycle.
+D-06 is CLOSED with option C: full PKI certificate lifecycle using RFC 7030 EST.
+The factory-provisioned certificate is used as the EST mTLS bootstrap credential.
+Renewal generates a new P-256 key pair and CSR, validates the issued certificate,
+and commits the replacement through NVS certificate/key slots with a commit marker.
+`/api/mqtt/cert-status`, `/api/mqtt/cert-renew`, `/api/mqtt/cert-history`, and
+`/api/mqtt/cert-cacerts` expose the authenticated lifecycle operations.
+
+The firmware expects an actual RFC 7030 EST endpoint or backend adapter. It does
+not assume that an MQTT broker URL is itself an EST endpoint. Automatic lifecycle
+is disabled by default and is guarded by valid GNSS UTC time.

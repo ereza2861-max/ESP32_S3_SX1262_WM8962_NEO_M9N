@@ -180,13 +180,20 @@ payload changes from PCM/μ-law samples to the fixed 8-byte Codec2 frame. Codec2
 1600 produces 64 bits per 40 ms, materially reducing airtime compared with the
 previous 160-byte μ-law voice payload.
 
-## D-06 — MQTT PKI enrollment/rotation — FINAL
+## D-06 — MQTT PKI certificate lifecycle with EST — FINAL
 
-Use a factory-provisioned, device-unique MQTT client certificate/private key.
-The authenticated maintenance provisioning endpoint may replace that certificate
-and key during controlled maintenance. The MQTT runtime uses mutual TLS and the
-device certificate as the connection authority; username/password MQTT
-authentication is no longer selected by the production connection path. The
-broker
-CA remains separately provisioned. Automatic self-service certificate rotation is
-not claimed; replacement is an authenticated maintenance operation.
+Use a full automated PKI lifecycle based on RFC 7030 EST. The factory provisions
+a device-unique bootstrap certificate/private key. The firmware uses that
+certificate for EST mTLS, generates a fresh P-256 key pair for renewal, creates
+a PKCS#10 CSR with the device identity, requests `simpleenroll`/`simplereenroll`,
+validates the returned X.509 certificate, and atomically commits the replacement.
+
+The EST endpoint is a vendor-neutral component or backend adapter. AWS IoT
+Core/EMQX may remain the MQTT broker/certificate authority integration, but the
+firmware does not assume that either broker directly exposes RFC 7030 endpoints.
+Username/password rotation is no longer an MQTT authentication mechanism.
+
+Automatic lifecycle remains disabled by default. When enabled, the device checks
+certificate validity only after GNSS UTC time is valid, renews inside the configured
+threshold, reconnects MQTT with the new certificate, and records lifecycle events
+in `/LOG/CERT-LIFECYCLE.LOG`.
