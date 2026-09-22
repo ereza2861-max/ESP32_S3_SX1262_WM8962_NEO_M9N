@@ -166,23 +166,12 @@ The actual offsets must match the repository partition table. For this repositor
 the factory application starts at `0x10000`; the script refuses to silently invent
 different offsets.
 
-The encrypted device decrypts the firmware transparently at runtime. Flash
-encryption also covers the second-stage bootloader, partition table, NVS key
-partition and application partitions according to ESP-IDF's flash-encryption
-rules.
+The repository's `tools/provision.sh` workflow does not pre-encrypt the first-boot
+images. It flashes the signed plaintext bootloader, partition table, and
+application after Secure Boot enrollment; the ESP32-S3 Release-mode bootloader
+performs the first-boot in-place encryption transition.
 
-**Do not interrupt power during a first-boot in-place encryption operation.**
-This repository's production workflow prefers host-encrypted ciphertext flashing
-so the release-mode device is not intentionally exposed to a plaintext serial
-flash operation.
-
-### Host key disposal
-
-If a host-generated flash-encryption key is used, delete the local copy after the
-initial ciphertext images have been flashed and verified, unless the organization's
-documented production recovery policy explicitly requires retaining it in a
-dedicated secure key-management system. Never leave the key in the repository,
-CI artifacts, build output, or a normal workstation backup.
+**Do not interrupt power during that first-boot encryption operation.**
 
 ## 5. eFuse procedure
 
@@ -334,8 +323,8 @@ final eFuse locking.
 - [ ] Secure Boot state verified.
 - [ ] Flash Encryption state verified.
 - [ ] Release-mode/download security state verified.
-- [ ] Ciphertext images, not plaintext production images, were flashed when
-      Release-mode host encryption is used.
+- [ ] Signed production images were flashed only through the controlled
+      Release-mode first-boot provisioning workflow.
 - [ ] Device boots successfully.
 - [ ] HTTPS WebUI verified.
 - [ ] MQTT production security verified.

@@ -29,6 +29,8 @@ void GnssManager::task() {
   }
 
   static uint32_t lastTrackLogMs = 0;
+  RuntimeConfig runtimeConfig;
+  if (!configSnapshot(runtimeConfig)) return;
   const uint32_t now = millis();
   bool logFix = false;
   double lat = 0.0, lon = 0.0, alt = 0.0;
@@ -79,7 +81,7 @@ void GnssManager::task() {
             (lastSyncMs_ == 0U || systemNow < 1700000000 ||
              llabs(static_cast<long long>(systemNow) - static_cast<long long>(epoch)) > 2 ||
              now - lastSyncMs_ >=
-                static_cast<uint64_t>(gConfig.wakePeriodSec) * 1000ULL);
+                static_cast<uint64_t>(runtimeConfig.wakePeriodSec) * 1000ULL);
       }
       if (now - lastTrackLogMs >= Config::TRACK_LOG_PERIOD_MS) {
         lastTrackLogMs = now;

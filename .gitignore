@@ -47,6 +47,7 @@ sdkconfig.old
 # Build / generated output
 build/
 dist/
+.host-test/
 
 # ESP-IDF component-manager output
 managed_components/
@@ -59,6 +60,8 @@ managed_components/
 # Local patch/diff artifacts; do not accidentally commit review patches.
 *.patch
 *.diff
+
+build.log
 
 # Generated WebUI TLS material
 include/generated/WebTlsProvisioning.h

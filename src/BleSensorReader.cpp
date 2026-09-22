@@ -11,7 +11,9 @@ bool BleSensorReader::begin(const String& deviceName) {
 }
 
 void BleSensorReader::task() {
-  if (!gConfig.sensorReaderEnabled) return;
+  RuntimeConfig runtimeConfig;
+  if (!configSnapshot(runtimeConfig)) return;
+  if (!runtimeConfig.sensorReaderEnabled) return;
   const uint32_t now = millis();
   if (!ready_) {
     if (static_cast<int32_t>(now - retryAtMs_) >= 0) {
