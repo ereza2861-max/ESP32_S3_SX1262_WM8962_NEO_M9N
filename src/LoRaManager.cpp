@@ -69,6 +69,34 @@ constexpr size_t FORWARD_RECORD_FIXED_V1 = 2 + 1 + 1 + 1 + 1 + 2 + 4 + 2 + 4;
 constexpr size_t FORWARD_RECORD_FIXED = FORWARD_RECORD_FIXED_V1 + 1;
 constexpr uint8_t FORWARD_RECORD_VERSION = 2;
 
+String jsonEscapeText(const String& input) {
+  String out;
+  out.reserve(input.length() + 8);
+  for (size_t i = 0; i < input.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(input[i]);
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '"': out += "\\\""; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          const char hex[] = "0123456789ABCDEF";
+          out += "\\u00";
+          out += hex[(c >> 4) & 0x0F];
+          out += hex[c & 0x0F];
+        } else {
+          out += static_cast<char>(c);
+        }
+        break;
+    }
+  }
+  return out;
+}
+
 struct RtcRadioState {
   uint32_t magic;
   uint32_t hopFrame;
@@ -3778,9 +3806,8 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
     // Serialize the whole pending envelope assignment with the LoRa task;
     // String mutation is not atomic and can otherwise race processPendingTx().
     if (!queuePendingTx(packet)) return false;
-    // Try once immediately. If CAD reports a busy channel, task() will
-    // continue the retry state machine after a randomized backoff.
-    (void)processPendingTx();
+    // Do not transmit synchronously from the caller. task() owns the
+    // pending-TX state machine so WebUI/other callers remain non-blocking.
     return true;
   }
 
@@ -4622,7 +4649,7 @@ String LoRaManager::scheduledMessagesJson() const {
     first = false;
     out += "{\"id\":" + String(e.id) +
            ",\"at\":" + String(static_cast<unsigned long long>(e.atEpoch)) +
-           ",\"text\":\"" + e.text + "\"}";
+           ",\"text\":\"" + jsonEscapeText(e.text) + "\"}";
   }
   out += "]";
   if (mutex_) xSemaphoreGive(mutex_);

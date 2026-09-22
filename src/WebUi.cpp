@@ -427,7 +427,7 @@ refreshSensorNodes();setInterval(refreshSensorNodes,5000);setInterval(refreshSen
 
 async function j(u,o={}){o.headers=Object.assign({},o.headers||{},o.method&&o.method.toUpperCase()!=='GET'?{'X-CSRF-Token':CSRF_TOKEN}:{});let r=await fetch(u,o);return await r.text()}
 function toast(t){document.getElementById('toast').textContent=t;setTimeout(()=>document.getElementById('toast').textContent='',2500)}
-async function setLang(){const c=document.getElementById('lang').value;localStorage.setItem('fieldradio-lang',c);try{await fetch('/api/lang?set='+c)}catch(e){};document.getElementById('title').textContent=c==='id'?'FieldRadio':'FieldRadio'}
+async function setLang(){const c=document.getElementById('lang').value;localStorage.setItem('fieldradio-lang',c);try{await fetch('/api/lang?set='+c,{method:'POST',headers:{'X-CSRF-Token':csrfToken}})}catch(e){};document.getElementById('title').textContent=c==='id'?'FieldRadio':'FieldRadio'}
 if(localStorage.getItem('fieldradio-lang'))document.getElementById('lang').value=localStorage.getItem('fieldradio-lang');
 async function toggleTheme(){const m=document.body.classList.toggle('light')?'light':'dark';localStorage.setItem('fieldradio-theme',m);try{await fetch('/api/theme?mode='+m,{method:'POST',headers:{'X-CSRF-Token':'__CSRF_TOKEN__'}})}catch(e){}}
 if(localStorage.getItem('fieldradio-theme')==='light')document.body.classList.add('light');
@@ -1039,7 +1039,7 @@ void WebUi::begin() {
   server_.on("/api/messages/read", HTTP_POST, [this]{ if (auth()) handleMessageRead(); });
   server_.on("/api/messages/reply", HTTP_POST, [this]{ if (auth()) handleMessageReply(); });
   server_.on("/api/messages/export", HTTP_GET, [this]{ if (auth()) handleMessageExport(); });
-  server_.on("/api/messages/persist", HTTP_GET, [this]{ if (auth()) handleMessagePersist(); });
+  server_.on("/api/messages/persist", HTTP_POST, [this]{ if (auth()) handleMessagePersist(); });
   server_.on("/api/message/schedule", HTTP_POST, [this]{ if (auth()) handleMessageSchedule(); });
   server_.on("/api/message/schedule", HTTP_GET, [this]{ if (auth()) handleMessageScheduleList(); });
   server_.on("/api/message/schedule", HTTP_DELETE, [this]{ if (auth()) handleMessageScheduleDelete(); });
@@ -1048,7 +1048,7 @@ void WebUi::begin() {
   server_.on("/api/sos/format", HTTP_POST, [this]{ if (auth()) handleSosFormat(); });
   server_.on("/api/selftest", HTTP_POST, [this]{ if (auth()) handleSelfTest(); });
   server_.on("/api/selftest/result", HTTP_GET, [this]{ if (auth()) handleSelfTestResult(); });
-  server_.on("/api/lang", HTTP_GET, [this]{ if (auth()) handleLang(); });
+  server_.on("/api/lang", HTTP_POST, [this]{ if (auth()) handleLang(); });
   server_.on("/api/neighbors", HTTP_GET, [this]{ if (auth()) handleNeighbors(); });
   server_.on("/api/sensors/nodes", HTTP_GET, [this]{ if (auth()) {
     if (server_.hasArg("id")) handleSensorNodeDetail(); else handleSensorNodes();
@@ -3052,7 +3052,8 @@ static void auditConfigChange(const RuntimeConfig& previous,
 void WebUi::handleConfig() {
   if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   RuntimeConfig candidate{};
-  if (!configSnapshot(candidate)) {
+  uint32_t configGenerationSnapshot = 0;
+  if (!configSnapshot(candidate, configGenerationSnapshot)) {
     server_.send(503, "text/plain", "configuration snapshot unavailable");
     return;
   }
@@ -3419,9 +3420,9 @@ void WebUi::handleConfig() {
   if (candidate.audioRecordSource != previousSource && !audio.setRecordSource(candidate.audioRecordSource)) {
     server_.send(503, "text/plain", "Audio source is busy"); return;
   }
-  if (!configCommit(candidate)) {
+  if (!configCommit(candidate, configGenerationSnapshot)) {
     (void)audio.setRecordSource(previousSource);
-    server_.send(503, "text/plain", "NVS save failed"); return;
+    server_.send(409, "text/plain", "configuration changed; retry"); return;
   }
   if (!audio.setClassDConfig(candidate.classDEnabled,candidate.classDBoostLevel) ||
       !audio.setVox(candidate.voxEnabled,candidate.voxThreshold,candidate.voxHangMs) ||

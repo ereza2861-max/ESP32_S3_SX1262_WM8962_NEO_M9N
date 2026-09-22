@@ -65,6 +65,8 @@ constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t SOS_CANCEL_LONG_PRESS_MS = 1500;
 static uint32_t wifiIdleSince = 0;
 static uint32_t wifiRetryMs = 0;
+static uint32_t wifiStaFailureSince = 0;
+static bool wifiApFallbackActive = false;
 static volatile uint32_t hbGnss = 0, hbLoRa = 0, hbAudio = 0, hbWeb = 0, hbLoRaWAN = 0, hbBleSensor = 0, hbSensorForward = 0;
 static TaskHandle_t hGnss = nullptr, hLoRa = nullptr, hAudio = nullptr, hWeb = nullptr, hLoRaWAN = nullptr, hNet = nullptr, hBleSensor = nullptr, hSensorForward = nullptr;
 static uint32_t bootCount = 0;
@@ -624,8 +626,21 @@ static void setupWifi() {
     return;
   }
 
-  WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);
+  wifiStaFailureSince = 0;
+  wifiApFallbackActive = false;
+  if (Config::STA_SSID[0] != 0) {
+    // D-GAP-2: try persistent STA first; AP is recovery-only after the
+    // configured fallback delay, rather than being exposed on every boot.
+    (void)wifiSta.connect(Config::STA_SSID, Config::STA_PASSWORD);
+    StateLock lock(gState);
+    if (lock.ok()) gState.wifiReady = false;
+    return;
+  }
+
+  // No STA credential exists, so there is nothing useful to retry. Expose
+  // the configured AP immediately as the initial provisioning/recovery path.
+  WiFi.mode(WIFI_AP);
   if (WiFi.softAP(gConfig.apSsid.c_str(), gConfig.apPassword.c_str())) {
     StateLock lock(gState);
     if (lock.ok()) gState.wifiReady = true;
@@ -932,13 +947,35 @@ static void handlePhysicalControls(uint32_t now) {
 
 static void manageWifi(uint32_t now) {
   const wifi_mode_t mode = WiFi.getMode();
-  if (mode == WIFI_OFF) {
+
+  if (Config::STA_SSID[0] != 0 && mode != WIFI_AP && mode != WIFI_AP_STA) {
     if (now - wifiRetryMs >= Config::WIFI_AP_RETRY_MS) {
       wifiRetryMs = now;
       setupWifi();
     }
     return;
   }
+
+  if (Config::STA_SSID[0] != 0 && mode == WIFI_AP_STA) {
+    if (wifiSta.isConnected()) {
+      wifiStaFailureSince = 0;
+      return;
+    }
+    if (wifiApFallbackActive) return;
+    if (!wifiStaFailureSince) wifiStaFailureSince = now;
+    if (now - wifiStaFailureSince < Config::WIFI_AP_FALLBACK_DELAY_MS) return;
+
+    // D-GAP-2: hybrid fallback. Keep STA reconnect enabled, but expose the
+    // recovery AP only after the bounded failure window has elapsed.
+    if (WiFi.softAP(gConfig.apSsid.c_str(), gConfig.apPassword.c_str())) {
+      StateLock lock(gState);
+      if (lock.ok()) gState.wifiReady = true;
+      wifiIdleSince = now;
+      wifiApFallbackActive = true;
+    }
+    return;
+  }
+
   if (mode != WIFI_AP) return;
   if (WiFi.softAPgetStationNum() > 0) {
     wifiIdleSince = now;
@@ -952,6 +989,8 @@ static void manageWifi(uint32_t now) {
     if (lock.ok()) gState.wifiReady = false;
     wifiRetryMs = now;
     wifiIdleSince = now;
+    wifiStaFailureSince = 0;
+    wifiApFallbackActive = false;
   }
 }
 
@@ -1383,7 +1422,6 @@ void setup() {
   audio.setVolume(gConfig.volume);
 
   setupWifi();
-  if (Config::STA_SSID[0] != 0) (void)wifiSta.connect(Config::STA_SSID, Config::STA_PASSWORD);
   (void)mqtt.begin();
   web.begin();
 

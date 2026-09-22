@@ -63,10 +63,17 @@ is hard-bounded to 2048 bytes / 16 fragments / 3 concurrent messages. This is a 
 decision; no old-node compatibility branch is required.
 
 ## GAP K — Wi-Fi STA lifecycle — DECISION LOCKED
-Use **Persistent STA + reconnect + AP fallback**. The AP remains the local recovery path
-when STA credentials are absent or the STA link is unavailable. End-to-end credential
-provisioning UI remains a delivery gate and must not silently store plaintext credentials
-outside the platform's protected configuration store.
+Use **Hybrid timeout fallback (D)**. Persistent STA credentials are attempted first
+with reconnect/backoff. If STA remains unavailable for the configured fallback
+window (`WIFI_AP_FALLBACK_DELAY_MS`, default 10 minutes), the device opens the
+configured AP as a recovery/provisioning path while continuing STA reconnect.
+If no STA credential exists at all, the configured AP is available immediately
+because there is no STA attempt to wait for. AP recovery closes after the existing
+idle timeout and the STA-first workflow is retried.
+
+The AP fallback is therefore not exposed automatically after every transient STA
+failure. The end-to-end credential provisioning workflow remains subject to
+authenticated WebUI/configuration controls and protected persistence.
 
 ## GAP L — MQTT authority and durability — DECISION LOCKED
 MQTT is **authoritative** for upstream sensor delivery. The SD spool remains the durability
@@ -86,6 +93,25 @@ retention of the previous key. The current repository compiles ECDH support by d
 keeps the feature disabled at runtime until explicitly selected by `ecdh_rekey_policy`.
 Enabling the policy is not a production acceptance criterion by itself; multi-node
 interoperability and hardware validation remain required.
+
+## Phase A decision closure — production acceptance gaps — FINAL
+
+The implementation phase uses the following locked decisions from `QnA.txt`:
+
+- **Decision Gap 1 = B — CONDITIONAL:** host/unit/compile validation may establish
+  feature-complete firmware status, but production acceptance remains **NOT VERIFIED**
+  until the applicable RF/HIL evidence is complete.
+- **Decision Gap 2 = D — Hybrid timeout:** persistent STA/reconnect is attempted first;
+  AP recovery is opened automatically only after the configured fallback window.
+- **Decision Gap 3 = A — Manual authenticated maintenance rotation:** the
+  device-unique MQTT certificate/private key is replaced only through an authenticated
+  maintenance provisioning operation. Automatic self-service rotation is not claimed.
+- **Decision Gap 4 = B — Staged:** development/HIL validation may use a non-production
+  security profile, while the production image must be built/provisioned with the
+  secure production profile and manufacturing security procedure.
+
+These decisions do not convert unavailable hardware evidence into PASS and do not
+permit host-only tests to claim RF/HIL or manufacturing acceptance.
 
 ## D-02 — configuration ownership — FINAL
 A dedicated Configuration Manager task is the sole owner of runtime `gConfig` mutation.

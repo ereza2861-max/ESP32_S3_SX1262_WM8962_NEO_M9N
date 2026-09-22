@@ -26,6 +26,19 @@ A wrong key, key-purpose, security-download setting, or other eFuse selection ca
 make a device permanently unusable. Never use `--force` merely to overcome an
 eFuse refusal. Stop and inspect the current state first.
 
+## 1.1 Acceptance staging
+
+Production acceptance is **staged**. Development and host/HIL preparation may be
+performed without production Secure Boot V2 / Flash Encryption enabled, but a
+production image must use the secure provisioning profile documented in this file
+and the manufacturing flow must verify the resulting security state.
+
+Compile, unit, fuzz, and host-only transport results may establish firmware as
+**feature-complete**, but they must not be reported as production-accepted for RF,
+fragmentation/SACK interoperability, power-loss, PPS, sleep/wake, audio, or other
+hardware-dependent behavior until the corresponding HIL evidence exists.
+
+
 ## 2. Prerequisites
 
 Use one consistent ESP-IDF/esptool toolchain for the whole manufacturing run.
