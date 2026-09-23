@@ -8,6 +8,8 @@
 #include "LoRaWANManager.h"
 #include "AudioManager.h"
 #include "PersistentConfig.h"
+#include "WebUiNumericParser.h"
+#include "WebUiSessionPolicy.h"
 #include "MqttClientManager.h"
 #include "BleSensorReader.h"
 #include <cstring>
@@ -77,6 +79,8 @@ static String configBackupPlaintext() {
   p += "lorakey=" + c.loraKeyHex + "\n";
   p += "apssid=" + c.apSsid + "\n";
   p += "apppass=" + c.apPassword + "\n";
+  p += "stassid=" + c.staSsid + "\n";
+  p += "stapass=" + c.staPassword + "\n";
   p += "webuser=" + c.webUser + "\n";
   p += "websalt=" + c.webPasswordSaltHex + "\n";
   p += "webph=" + c.webPasswordHashHex + "\n";
@@ -346,7 +350,7 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <input id=cs value="FIELD" placeholder="Callsign"><input id=key placeholder="LoRa AES-128 key (32 hex chars)"><input id=vol value="70" placeholder="Volume">
 <input id=bat value="1.0" placeholder="Battery calibration">
 <input id=batActual placeholder="Actual battery voltage, e.g. 3.95"><button onclick="calBattery()">CALIBRATE BATTERY</button>
-<input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
+<input id=staSsid value="" maxlength="32" placeholder="STA SSID"><input id=staPassword value="" maxlength="63" type=password placeholder="STA password (8-63)"><input id=aps value="" placeholder="AP password"><input id=wp value="" placeholder="Web password">
 <button onclick="saveCfg()">Save config</button><button onclick="reboot()">Reboot</button><button onclick="factoryReset()">Factory reset</button></div>
 <div class=card><h3>Runtime Advanced Settings</h3>
 <label>MQTT enabled <input id=mqttEnabled type=checkbox checked></label>
@@ -357,13 +361,13 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <label>Critical-battery shutdown delay (ms) <input id=criticalShutdownDelayMs type=number min=100 max=600000 value=1500></label>
 <label>Battery low threshold (V) <input id=batteryLowThreshold type=number step="0.01" min=2.5 max=4.2 value=3.4></label>
 <label>Battery critical threshold (V) <input id=batteryCriticalThreshold type=number step="0.01" min=2.5 max=4.2 value=3.2></label>
-<label>Class-D speaker enabled <input id=classDEnabled type=checkbox></label>
+<label>Class-D speaker enabled <input id=classDEnabled type=checkbox disabled></label>
 <label>Class-D boost (0..7) <input id=classDBoost type=number min=0 max=7 value=0></label>
 <label>MQTT host <input id=mqttHost maxlength=253></label><label>MQTT port <input id=mqttPort type=number min=1 max=65535></label>
-<label>MQTT TLS required <input id=mqttTls type=checkbox checked></label>
+<label>MQTT TLS required <input id=mqttTls type=checkbox checked__MQTT_TLS_DISABLED__></label>
 <label>MQTT reconnect min/max ms <input id=mqttRetryMin type=number min=1000><input id=mqttRetryMax type=number min=1000></label>
 <label>MQTT telemetry/health ms <input id=mqttTelemetry type=number min=1000><input id=mqttHealth type=number min=1000></label>
-<label>Retain telemetry <input id=mqttRetainTelemetry type=checkbox></label><label>Retain availability/LWT <input id=mqttRetainAvailability type=checkbox checked></label>
+<small>MQTT credential rotation days is compatibility metadata only; it never triggers automatic credential rotation.</small> <label>Retain telemetry <input id=mqttRetainTelemetry type=checkbox></label><label>Retain availability/LWT <input id=mqttRetainAvailability type=checkbox checked></label>
 <div class=card><h4>Certificate Lifecycle (EST / PKI)</h4>
 <label>Lifecycle enabled <input id=certLifecycleEnabled type=checkbox></label>
 <label>EST server URL <input id=estServerUrl maxlength=253 placeholder="https://est.example.com:8443"></label>
@@ -513,6 +517,8 @@ async function refresh(){
      batteryCriticalThreshold.value=ra.batteryCriticalThreshold??3.2;
      mqttEnabled.checked=!!ra.mqttEnabled;
      wakePeriodSec.value=String(ra.wakePeriodSec||43200);
+     staSsid.value=ra.staSsid||'';
+     staPassword.value='';
      mqttHost.value=ra.mqttHost||'';
      mqttPort.value=ra.mqttPort||1883;
      mqttTls.checked=!!ra.mqttTlsRequired;
@@ -624,6 +630,7 @@ async function saveCfg(){
     power:pwr.value,sync:sw.value,callsign:cs.value,volume:vol.value,batcal:bat.value,
     audio_source:audsrc.value,mqtt_enabled:mqttEnabled.checked?'1':'0',
     wake_period_sec:wakePeriodSec.value,
+    sta_ssid:staSsid.value,
     deep_sleep_enabled:deepSleepEnabled.checked?'1':'0',
     deep_sleep_idle_sec:deepSleepIdleSec.value,
     deep_sleep_wake_grace_ms:deepSleepWakeGraceMs.value,
@@ -658,6 +665,8 @@ async function saveCfg(){
     csrf_policy:csrfPolicy.value,ble_pairing_policy:blePairingPolicy.value,
     ecdh_rekey_policy:ecdhPolicy.value,replay_window_bits:replayWindow.value});
   if(key.value)q.set('lora_key',key.value);
+  if(staPassword.value)q.set('sta_password',staPassword.value);
+  q.set('sta_ssid',staSsid.value);
   if(aps.value)q.set('ap_password',aps.value);
   if(wp.value)q.set('web_password',wp.value);
   if(estUsername.value) q.set('est_username',estUsername.value);
@@ -869,8 +878,7 @@ bool WebUi::sessionValid() {
                            (static_cast<uint32_t>(ip[1]) << 8) |
                            (static_cast<uint32_t>(ip[2]) << 16) |
                            (static_cast<uint32_t>(ip[3]) << 24);
-  memcpy(msg, &ipValue, sizeof(ipValue));
-  memcpy(msg + 4, &sessionIssuedMs_, sizeof(sessionIssuedMs_));
+  WebUiSessionPolicy::makeSessionMessage(ipValue, sessionIssuedMs_, msg);
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
                              msg, sizeof(msg), expected, sizeof(expected)) != 0)
@@ -883,19 +891,24 @@ bool WebUi::sessionValid() {
   if (!configSnapshot(config))
     return false;
   return static_cast<int32_t>(millis() - authBlockedUntilMs_) >= 0 &&
-         static_cast<uint32_t>(millis() - sessionIssuedMs_) <
-             config.webSessionTimeoutMs;
+         WebUiSessionPolicy::isFresh(millis(), sessionIssuedMs_,
+                                     config.webSessionTimeoutMs);
 }
 
 bool WebUi::csrfValid() {
   if (server_.method() != HTTP_POST && server_.method() != HTTP_DELETE) return false;
-  if (csrfTokenHex_.isEmpty() || csrfTokenHex_.length() != 32) {
+  if (!WebUiSessionPolicy::isHexToken(
+          csrfTokenHex_.c_str(), csrfTokenHex_.length(),
+          WebUiSessionPolicy::CSRF_TOKEN_HEX_LENGTH)) {
     ++csrfFailures_;
     auditAuth(false);
     return false;
   }
   const String supplied = server_.header("X-CSRF-Token");
-  if (supplied.length() != 32 || supplied.length() != csrfTokenHex_.length()) {
+  if (!WebUiSessionPolicy::isHexToken(
+          supplied.c_str(), supplied.length(),
+          WebUiSessionPolicy::CSRF_TOKEN_HEX_LENGTH) ||
+      supplied.length() != csrfTokenHex_.length()) {
     ++csrfFailures_;
     (void)auditAuth(false);
     return false;
@@ -919,8 +932,7 @@ bool WebUi::issueSession() {
                            (static_cast<uint32_t>(ip[2]) << 16) |
                            (static_cast<uint32_t>(ip[3]) << 24);
   sessionIssuedMs_ = millis();
-  memcpy(msg, &ipValue, sizeof(ipValue));
-  memcpy(msg + 4, &sessionIssuedMs_, sizeof(sessionIssuedMs_));
+  WebUiSessionPolicy::makeSessionMessage(ipValue, sessionIssuedMs_, msg);
   uint8_t token[32] = {};
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
   if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
@@ -943,10 +955,12 @@ bool WebUi::issueSession() {
   RuntimeConfig config;
   if (!configSnapshot(config))
     return false;
-  server_.sendHeader("Set-Cookie",
-      "FR-SESSION=" + hex + "; Max-Age=" +
-      String(config.webSessionTimeoutMs / 1000) +
-      "; Path=/; HttpOnly; Secure; SameSite=Strict");
+  char cookie[160] = {};
+  if (!WebUiSessionPolicy::buildSessionCookie(
+          hex.c_str(), config.webSessionTimeoutMs / 1000, cookie,
+          sizeof(cookie)))
+    return false;
+  server_.sendHeader("Set-Cookie", cookie);
 
   return true;
 }
@@ -1306,6 +1320,7 @@ void WebUi::handleRoot() {
   String persistedTheme = "dark";
   if (themePrefs.begin("fieldradio", true)) { persistedTheme = themePrefs.getString("theme", "dark"); themePrefs.end(); }
   page.replace("__THEME_CLASS__", persistedTheme == "light" ? "light" : "");
+  page.replace("__MQTT_TLS_DISABLED__", Config::mqttTlsIsMandatory() ? " disabled" : "");
   server_.send(200, "text/html", page);
 }
 
@@ -1379,6 +1394,8 @@ void WebUi::handleStatus() {
   j += "\"volume\":" + String(gState.volume) + ",";
   j += "\"runtimeAdvanced\":{\"mqttEnabled\":" + String(config.mqttEnabled ? "true" : "false") +
        ",\"wakePeriodSec\":" + String(config.wakePeriodSec) +
+       ",\"staSsid\":\"" + jsonEscape(config.staSsid) + "\"" +
+       ",\"staConfigured\":" + String(config.staSsid.length() > 0 ? "true" : "false") +
        ",\"deepSleepEnabled\":" + String(config.deepSleepEnabled ? "true" : "false") +
        ",\"deepSleepIdleMs\":" + String(config.deepSleepIdleMs) +
        ",\"deepSleepWakeGraceMs\":" + String(config.deepSleepWakeGraceMs) +
@@ -1387,6 +1404,7 @@ void WebUi::handleStatus() {
        ",\"batteryCriticalThreshold\":" + String(config.batteryCriticalThreshold, 3) +
        ",\"classDEnabled\":" + String(config.classDEnabled ? "true" : "false") +
        ",\"classDBoostLevel\":" + String(config.classDBoostLevel) +
+       ",\"mqttTlsMandatory\":" + String(Config::mqttTlsIsMandatory() ? "true" : "false") +
        ",\"classDHardwareEnabled\":" + String(Config::CLASS_D_ENABLED ? "true" : "false") +
        ",\"mqttHost\":\"" + jsonEscape(config.mqttHost) + "\"" +
        ",\"mqttPort\":" + String(config.mqttPort) +
@@ -1464,10 +1482,11 @@ void WebUi::handleStatus() {
 }
 
 void WebUi::handleLoRaWANStatus() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   StateLock lock(gState);
   if (!lock.ok()) { server_.send(503, "text/plain", "busy"); return; }
-  String j = "{\"enabled\":" + String(gConfig.lorawanEnabled ? "true" : "false") +
-             ",\"mode\":" + String(gConfig.lorawanMode) +
+  String j = "{\"enabled\":" + String(config.lorawanEnabled ? "true" : "false") +
+             ",\"mode\":" + String(config.lorawanMode) +
              ",\"region\":" + String(static_cast<uint8_t>(lorawan.regionalProfile())) +
              ",\"state\":" + String(static_cast<uint8_t>(lorawan.state())) +
              ",\"joined\":" + String(lorawan.isJoined() ? "true" : "false") +
@@ -1485,19 +1504,22 @@ void WebUi::handleLoRaWANStatus() {
 }
 
 void WebUi::handleLoRaWANConnect() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
-  const bool ok = gConfig.lorawanMode == 0 ? lorawan.connectOTAA() : lorawan.connectABP();
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
+  const bool ok = config.lorawanMode == 0 ? lorawan.connectOTAA() : lorawan.connectABP();
   server_.send(ok ? 202 : 400, "text/plain", ok ? "LoRaWAN connect requested" : "LoRaWAN connect rejected");
 }
 
 void WebUi::handleLoRaWANDisconnect() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   const bool ok = lorawan.disconnect();
   server_.send(ok ? 202 : 400, "text/plain", ok ? "LoRaWAN disconnect requested" : "LoRaWAN disconnect rejected");
 }
 
 void WebUi::handleLoRaWANConfig() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   RuntimeConfig candidate;
   uint32_t configGenerationSnapshot = 0;
   if (!configSnapshot(candidate, configGenerationSnapshot)) {
@@ -1609,7 +1631,8 @@ void WebUi::handleLoRaWANConfig() {
 }
 
 void WebUi::handleLoRaWANUplink() {
-  if (!rateLimit(lastMessageMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastMessageMs_, config.webAuthRateLimitMs)) return;
   const String text = server_.arg("text");
   const String raw = server_.arg("hex");
   uint8_t payload[Config::LORAWAN_MAX_PAYLOAD] = {};
@@ -1639,7 +1662,7 @@ void WebUi::handleLoRaWANUplink() {
   }
   const String confirmed = server_.arg("confirmed");
   const bool isConfirmed = confirmed == "1";
-  const bool ok = lorawan.sendUplink(gConfig.lorawanFPort, payload, len, isConfirmed);
+  const bool ok = lorawan.sendUplink(config.lorawanFPort, payload, len, isConfirmed);
   server_.send(ok ? 202 : 409, "text/plain", ok ? "uplink queued" : "uplink rejected");
 }
 
@@ -1785,7 +1808,8 @@ void WebUi::handleMessageRead() {
 }
 
 void WebUi::handleMessageReply() {
-  if (!rateLimit(lastMessageMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastMessageMs_, config.webAuthRateLimitMs)) return;
   const String target = server_.arg("source");
   const String text = server_.arg("plain");
   if (target.isEmpty() || target.length() > 10 || text.isEmpty() ||
@@ -1874,7 +1898,8 @@ void WebUi::handleRadioHistory() {
 }
 
 void WebUi::handleRadioTune() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   const String raw = server_.arg("freq");
   char* end = nullptr;
   const float freq = strtof(raw.c_str(), &end);
@@ -2002,7 +2027,8 @@ void WebUi::handleBatteryCalibrate() {
 }
 
 void WebUi::handleMessage() {
-  if (!rateLimit(lastMessageMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastMessageMs_, config.webAuthRateLimitMs)) return;
   if (server_.contentLength() > Config::MAX_WEB_BODY) {
     server_.send(413, "text/plain", "payload too large");
     return;
@@ -2078,7 +2104,8 @@ void WebUi::handleScanStatus() {
 }
 
 void WebUi::handleScanStart() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   const String modeRaw = server_.arg("mode");
   const String dwellRaw = server_.arg("dwell");
   if (modeRaw != "1" && modeRaw != "2") {
@@ -2130,7 +2157,8 @@ void WebUi::handleScanResults() {
 }
 
 void WebUi::handleHopSuggest() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   uint8_t suggested[Config::HOP_CHANNEL_MAX] = {};
   const size_t n = lora.scannerSuggestBestChannels(
       suggested, Config::HOP_CHANNEL_MAX);
@@ -2176,7 +2204,8 @@ void WebUi::handleHopStatus() {
 }
 
 void WebUi::handleHopEnable() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid enable"); return;
@@ -2190,7 +2219,7 @@ void WebUi::handleHopEnable() {
     }
   }
 
-  // LoRaManager consumes gConfig.loraHopEnabled. Keep the runtime toggle and
+  // LoRaManager consumes config.loraHopEnabled. Keep the runtime toggle and
   // persisted configuration on the same source of truth; updating only
   // gState.hopEnabled made the UI report HOP ENABLED while the radio kept
   // using the configured value.
@@ -2206,7 +2235,8 @@ void WebUi::handleHopEnable() {
 }
 
 void WebUi::handlePtt() {
-  if (!rateLimit(lastPttMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastPttMs_, config.webAuthRateLimitMs)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid ptt");
@@ -2477,7 +2507,8 @@ static String sensorNodeJson(size_t index, const SensorRegistry::Node& node, boo
 }
 
 void WebUi::handleSensorNodes() {
-  if (!rateLimit(lastSensorNodesMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorNodesMs_, config.webAuthRateLimitMs)) return;
   size_t count = 0;
   if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) {
     server_.send(503, "application/json", "{\"ok\":false,\"error\":\"sensor snapshot unavailable\"}"); return;
@@ -2488,7 +2519,8 @@ void WebUi::handleSensorNodes() {
 }
 
 void WebUi::handleSensorNodeDetail() {
-  if (!rateLimit(lastSensorNodesMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorNodesMs_, config.webAuthRateLimitMs)) return;
   const String raw = server_.arg("id");
   if (raw.isEmpty()) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"missing id\"}"); return; }
   const long id = raw.toInt();
@@ -2499,7 +2531,8 @@ void WebUi::handleSensorNodeDetail() {
 }
 
 void WebUi::handleSensorLive() {
-  if (!rateLimit(lastSensorLiveMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorLiveMs_, config.webAuthRateLimitMs)) return;
   size_t count = 0;
   if (!bleSensorReader.sensorReader().snapshotNodes(gSensorSnapshots, SensorRegistry::MAX_SUPPORTED_NODES, count)) { server_.send(503, "application/json", "{\"ok\":false}"); return; }
   String j = "{\"ok\":true,\"sensorDropped\":" + String(bleSensorReader.sensorReader().droppedSamples()) + ",\"queueDepth\":" + String(bleSensorReader.sensorReader().queueDepth()) + ",\"nodes\":[";
@@ -2516,7 +2549,8 @@ bool parseSensorNodeId(ESPWebServerSecure& server, size_t& id) {
 }
 
 void WebUi::handleSensorForget() {
-  if (!rateLimit(lastSensorActionMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorActionMs_, config.webAuthRateLimitMs)) return;
   size_t id = 0;
   if (!parseSensorNodeId(server_, id)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
   if (!bleSensorReader.sensorReader().requestForgetNode(id)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
@@ -2524,7 +2558,8 @@ void WebUi::handleSensorForget() {
 }
 
 void WebUi::handleSensorRefresh() {
-  if (!rateLimit(lastSensorActionMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorActionMs_, config.webAuthRateLimitMs)) return;
   size_t id = 0;
   if (!parseSensorNodeId(server_, id)) { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid id\"}"); return; }
   if (!bleSensorReader.sensorReader().requestRefreshNode(id)) { server_.send(404, "application/json", "{\"ok\":false,\"error\":\"node not found\"}"); return; }
@@ -2555,7 +2590,8 @@ static bool parseBleAddressArg(ESPWebServerSecure& server, SensorProtocol::BleAd
 }
 
 void WebUi::handleBlePasskeySet() {
-  if (!rateLimit(lastBlePasskeyMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastBlePasskeyMs_, config.webAuthRateLimitMs)) return;
   SensorProtocol::BleAddress address{};
   const String pass = server_.arg("passkey");
   if (!parseBleAddressArg(server_, address) || pass.length() != 6) {
@@ -2572,7 +2608,8 @@ void WebUi::handleBlePasskeySet() {
 }
 
 void WebUi::handleBlePasskeyDelete() {
-  if (!rateLimit(lastBlePasskeyMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastBlePasskeyMs_, config.webAuthRateLimitMs)) return;
   SensorProtocol::BleAddress address{};
   if (!parseBleAddressArg(server_, address) || !bleSensorReader.forgetPeerPasskey(address)) {
     server_.send(404, "application/json", "{\"ok\":false,\"error\":\"peer not found\"}"); return;
@@ -2581,13 +2618,15 @@ void WebUi::handleBlePasskeyDelete() {
 }
 
 void WebUi::handleBlePasskeyList() {
-  if (!rateLimit(lastBlePasskeyMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastBlePasskeyMs_, config.webAuthRateLimitMs)) return;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", "{\"ok\":true,\"peers\":" + bleSensorReader.peersJson() + "}");
 }
 
 void WebUi::handleSensorQueuePolicy() {
-  if (!rateLimit(lastSensorQueuePolicyMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorQueuePolicyMs_, config.webAuthRateLimitMs)) return;
   const String policy = server_.arg("policy");
   if (policy == "oldest") bleSensorReader.sensorReader().setQueuePolicy(SensorReader::SampleQueuePolicy::DROP_OLDEST);
   else if (policy == "newest") bleSensorReader.sensorReader().setQueuePolicy(SensorReader::SampleQueuePolicy::DROP_NEWEST);
@@ -2597,8 +2636,9 @@ void WebUi::handleSensorQueuePolicy() {
 
 
 void WebUi::handleMqttProvision() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   static uint32_t lastMqttProvisionMs = 0;
-  if (!rateLimit(lastMqttProvisionMs, gConfig.webAuthRateLimitMs)) return;
+  if (!rateLimit(lastMqttProvisionMs, config.webAuthRateLimitMs)) return;
   const String host = server_.arg("host");
   const String rawPort = server_.arg("port");
   const String certificatePem = server_.arg("cert");
@@ -2635,8 +2675,9 @@ void WebUi::handleMqttProvision() {
 }
 
 void WebUi::handleMqttStatus() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   static uint32_t lastMqttStatusMs = 0;
-  if (!rateLimit(lastMqttStatusMs, gConfig.webAuthRateLimitMs)) return;
+  if (!rateLimit(lastMqttStatusMs, config.webAuthRateLimitMs)) return;
   String j = "{\"ok\":true,\"provisioned\":";
   j += mqtt.credentialsProvisioned() ? "true" : "false";
   j += ",\"auth\":\"x509\"";
@@ -2983,7 +3024,8 @@ void WebUi::handleRadioStats() {
 }
 
 void WebUi::handleRangeTest() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   const String raw = server_.arg("on");
   if (raw != "0" && raw != "1") {
     server_.send(400, "text/plain", "invalid range-test");
@@ -3007,13 +3049,15 @@ void WebUi::handleRangeTest() {
 }
 
 void WebUi::handleRangeTestStatus() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", lora.rangeTestStatusJson());
 }
 
 void WebUi::handleHopSetChannels() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastConfigMs_, config.webAuthRateLimitMs)) return;
   const String raw = server_.arg("list");
   if (raw.isEmpty() || raw.length() > 32) {
     server_.send(400, "text/plain", "invalid channel list"); return;
@@ -3173,26 +3217,17 @@ static void auditConfigChange(const RuntimeConfig& previous,
 }
 
 void WebUi::handleConfig() {
-  if (!rateLimit(lastConfigMs_, gConfig.webAuthRateLimitMs)) return;
   RuntimeConfig candidate{};
   uint32_t configGenerationSnapshot = 0;
   if (!configSnapshot(candidate, configGenerationSnapshot)) {
     server_.send(503, "text/plain", "configuration snapshot unavailable");
     return;
   }
+  if (!rateLimit(lastConfigMs_, candidate.webAuthRateLimitMs)) return;
   bool radioChanged = false;
 
   auto parseUnsigned = [](const String& raw, uint32_t maxValue, uint32_t& out) {
-    if (raw.isEmpty() || raw.length() > 10) return false;
-    uint32_t value = 0;
-    for (size_t i = 0; i < raw.length(); ++i) {
-      if (raw[i] < '0' || raw[i] > '9') return false;
-      const uint32_t digit = static_cast<uint32_t>(raw[i] - '0');
-      if (value > (maxValue - digit) / 10U) return false;
-      value = value * 10U + digit;
-    }
-    out = value;
-    return true;
+    return WebUiNumericParser::parseUnsigned(raw.c_str(), raw.length(), maxValue, out);
   };
 
   auto validHex32 = [](const String& raw) {
@@ -3302,6 +3337,22 @@ void WebUi::handleConfig() {
   if (server_.hasArg("callsign")) candidate.callsign = server_.arg("callsign");
   if (server_.hasArg("lora_key")) candidate.loraKeyHex = server_.arg("lora_key");
   if (server_.hasArg("ap_password")) candidate.apPassword = server_.arg("ap_password");
+  if (server_.hasArg("sta_ssid")) {
+    candidate.staSsid = server_.arg("sta_ssid");
+    if (candidate.staSsid.length() > Config::STA_SSID_MAX_LEN) {
+      server_.send(400, "text/plain", "invalid STA SSID"); return;
+    }
+    if (candidate.staSsid.isEmpty()) candidate.staPassword.clear();
+  }
+  if (server_.hasArg("sta_password")) {
+    candidate.staPassword = server_.arg("sta_password");
+    if (!candidate.staSsid.isEmpty() &&
+        (candidate.staPassword.length() < Config::STA_PASSWORD_MIN_LEN ||
+         candidate.staPassword.length() > Config::STA_PASSWORD_MAX_LEN ||
+         !validPassword(candidate.staPassword))) {
+      server_.send(400, "text/plain", "invalid STA password"); return;
+    }
+  }
   if (server_.hasArg("web_password")) candidate.webPassword = server_.arg("web_password");
   if (server_.hasArg("ble_pairing")) {
     const String raw = server_.arg("ble_pairing");
@@ -3334,6 +3385,9 @@ void WebUi::handleConfig() {
     const String raw = server_.arg("mqtt_tls");
     if (raw != "0" && raw != "1") {
       server_.send(400, "text/plain", "invalid MQTT TLS setting"); return;
+    }
+    if (Config::mqttTlsIsMandatory() && raw == "0") {
+      server_.send(400, "text/plain", "MQTT TLS is mandatory in this build"); return;
     }
     candidate.mqttTlsRequired = raw == "1";
   }
@@ -3615,6 +3669,10 @@ void WebUi::handleConfig() {
       candidate.batteryLowThreshold <= candidate.batteryCriticalThreshold ||
       candidate.batteryLowThreshold > Config::BATTERY_LOW_THRESHOLD_MAX ||
       candidate.classDBoostLevel > 7 ||
+      candidate.staSsid.length() > Config::STA_SSID_MAX_LEN ||
+      ((!candidate.staSsid.isEmpty()) &&
+       (candidate.staPassword.length() < Config::STA_PASSWORD_MIN_LEN ||
+        candidate.staPassword.length() > Config::STA_PASSWORD_MAX_LEN)) ||
       (candidate.classDEnabled && !Config::CLASS_D_ENABLED) ||
       !validHex32(candidate.loraKeyHex) ||
       !validPassword(candidate.apPassword) ||
@@ -3669,9 +3727,9 @@ void WebUi::handleConfig() {
   {
     StateLock lock(gState);
     if (lock.ok()) {
-      gState.rangeTest = gConfig.loraRangeTestMode;
+      gState.rangeTest = candidate.loraRangeTestMode;
       const uint8_t profileCount = min<uint8_t>(
-          max<uint8_t>(1U, gConfig.loraHopChannelProfile),
+          max<uint8_t>(1U, candidate.loraHopChannelProfile),
           Config::HOP_CHANNEL_MAX);
       gState.hopChannelCount = profileCount;
       for (uint8_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
@@ -3811,6 +3869,8 @@ void WebUi::handleConfigRestore() {
       else if (key == "lorakey") candidate.loraKeyHex = value;
       else if (key == "apssid") candidate.apSsid = value;
       else if (key == "apppass") candidate.apPassword = value;
+      else if (key == "stassid") candidate.staSsid = value;
+      else if (key == "stapass") candidate.staPassword = value;
       else if (key == "webuser") candidate.webUser = value;
       else if (key == "websalt") candidate.webPasswordSaltHex = value;
       else if (key == "webph") candidate.webPasswordHashHex = value;
@@ -3845,6 +3905,10 @@ void WebUi::handleConfigRestore() {
       candidate.batteryLowThreshold <= candidate.batteryCriticalThreshold ||
       candidate.batteryLowThreshold > Config::BATTERY_LOW_THRESHOLD_MAX ||
       candidate.classDBoostLevel > 7 ||
+      candidate.staSsid.length() > Config::STA_SSID_MAX_LEN ||
+      ((!candidate.staSsid.isEmpty()) &&
+       (candidate.staPassword.length() < Config::STA_PASSWORD_MIN_LEN ||
+        candidate.staPassword.length() > Config::STA_PASSWORD_MAX_LEN)) ||
       (candidate.classDEnabled && !Config::CLASS_D_ENABLED) ||
       !candidate.webPasswordConfigured()) {
     server_.send(400, "text/plain", "backup config invalid");
@@ -3988,13 +4052,15 @@ void WebUi::handleAudioSource() {
 }
 
 void WebUi::handleSensorSpool() {
-  if (!rateLimit(lastSensorNodesMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorNodesMs_, config.webAuthRateLimitMs)) return;
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json", sensorSpool.statusJson());
 }
 
 void WebUi::handleSensorSpoolClear() {
-  if (!rateLimit(lastSensorActionMs_, gConfig.webAuthRateLimitMs)) return;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (!rateLimit(lastSensorActionMs_, config.webAuthRateLimitMs)) return;
   if (!sensorSpool.clear()) {
     server_.send(503, "application/json", "{\"ok\":false,\"error\":\"spool clear failed\"}");
     return;

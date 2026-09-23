@@ -642,10 +642,10 @@ static void setupWifi() {
   WiFi.setSleep(false);
   wifiStaFailureSince = 0;
   wifiApFallbackActive = false;
-  if (Config::STA_SSID[0] != 0) {
-    // D-GAP-2: try persistent STA first; AP is recovery-only after the
-    // configured fallback delay, rather than being exposed on every boot.
-    (void)wifiSta.connect(Config::STA_SSID, Config::STA_PASSWORD);
+  if (!config.staSsid.isEmpty()) {
+    // D-GAP-2: persistent STA credentials are attempted first; AP is
+    // recovery-only after the configured fallback delay.
+    (void)wifiSta.connect(config.staSsid, config.staPassword);
     StateLock lock(gState);
     if (lock.ok()) gState.wifiReady = false;
     return;
@@ -964,7 +964,7 @@ static void manageWifi(uint32_t now) {
   if (!configSnapshot(config)) return;
   const wifi_mode_t mode = WiFi.getMode();
 
-  if (Config::STA_SSID[0] != 0 && mode != WIFI_AP && mode != WIFI_AP_STA) {
+  if (!config.staSsid.isEmpty() && mode != WIFI_AP && mode != WIFI_AP_STA) {
     if (now - wifiRetryMs >= Config::WIFI_AP_RETRY_MS) {
       wifiRetryMs = now;
       setupWifi();
@@ -972,7 +972,7 @@ static void manageWifi(uint32_t now) {
     return;
   }
 
-  if (Config::STA_SSID[0] != 0 && mode == WIFI_AP_STA) {
+  if (!config.staSsid.isEmpty() && mode == WIFI_AP_STA) {
     if (wifiSta.isConnected()) {
       wifiStaFailureSince = 0;
       return;
@@ -1394,12 +1394,18 @@ void setup() {
     Serial.println("FATAL: config mutex initialization");
     for (;;) delay(1000);
   }
-  gConfig.load();
+  configLoad();
   if (!configManagerBegin()) {
     Serial.println("FATAL: configuration manager initialization");
     for (;;) delay(1000);
   }
   watchdogInit();
+
+  RuntimeConfig config{};
+  if (!configSnapshot(config)) {
+    Serial.println("FATAL: configuration snapshot unavailable");
+    for (;;) delay(1000);
+  }
 
   gState.mutex = xSemaphoreCreateMutex();
   gSpiMutex = xSemaphoreCreateMutex();
@@ -1410,7 +1416,7 @@ void setup() {
   }
   {
     StateLock lock(gState);
-    if (lock.ok()) gState.rangeTest = gConfig.loraRangeTestMode;
+    if (lock.ok()) gState.rangeTest = config.loraRangeTestMode;
   }
 
   recordBootDiagnostics();
@@ -1450,7 +1456,7 @@ void setup() {
   bool audioOk = audio.begin();
   const bool batteryGaugeOk = fuelGauge.begin();
   recordBrownoutMarker();
-  audio.setVolume(gConfig.volume);
+  audio.setVolume(config.volume);
 
   setupWifi();
   (void)mqtt.begin();

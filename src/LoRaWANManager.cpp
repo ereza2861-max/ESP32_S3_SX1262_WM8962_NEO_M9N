@@ -56,6 +56,7 @@ static String deviceDevEuiFromEfuse() {
 }
 
 bool LoRaWANManager::begin() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (ready_) return true;
   mutex_ = xSemaphoreCreateMutex();
   downlinkQueue_ = xQueueCreateStatic(
@@ -75,8 +76,8 @@ bool LoRaWANManager::begin() {
 
   // DevEUI is hardware-derived; never mutate RuntimeConfig from the LoRaWAN task.
   hardwareDevEui_ = deviceDevEuiFromEfuse();
-  region_ = static_cast<RegionalProfile>(gConfig.lorawanRegion <= 3 ?
-                                          gConfig.lorawanRegion :
+  region_ = static_cast<RegionalProfile>(config.lorawanRegion <= 3 ?
+                                          config.lorawanRegion :
                                           Config::LORAWAN_REGION_DEFAULT);
   if (!recreateNode()) {
     setError("LoRaWAN node init failed");
@@ -85,15 +86,15 @@ bool LoRaWANManager::begin() {
   loadNonces();
   ready_ = true;
   state_ = LoRaWANState::Disconnected;
-  if (gConfig.lorawanEnabled) {
-    requestedMode_ = gConfig.lorawanMode;
+  if (config.lorawanEnabled) {
+    requestedMode_ = config.lorawanMode;
     connectRequested_ = true;
     state_ = LoRaWANState::Joining;
     lastJoinAttemptMs_ = millis();
   }
   updateState();
   Serial.printf("LORAWAN: ready region=%u enabled=%d\n",
-                static_cast<unsigned>(region_), gConfig.lorawanEnabled);
+                static_cast<unsigned>(region_), config.lorawanEnabled);
   return true;
 }
 
@@ -225,11 +226,12 @@ void LoRaWANManager::updateState() {
 }
 
 bool LoRaWANManager::startActivation(uint8_t mode) {
-  if (!ready_ || !node_ || !gConfig.lorawanEnabled) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  if (!ready_ || !node_ || !config.lorawanEnabled) {
     setError("LoRaWAN is disabled or not initialized");
     return false;
   }
-  if (!gConfig.validLoRaWAN()) {
+  if (!config.validLoRaWAN()) {
     setError("Invalid LoRaWAN configuration");
     return false;
   }
@@ -244,8 +246,8 @@ bool LoRaWANManager::startActivation(uint8_t mode) {
   if (mode == 0) {
     uint64_t joinEui = 0;
     uint8_t appKey[16] = {};
-    if (!parseEui(gConfig.lorawanJoinEui, joinEui) ||
-        !parseKey(gConfig.lorawanAppKey, appKey)) {
+    if (!parseEui(config.lorawanJoinEui, joinEui) ||
+        !parseKey(config.lorawanAppKey, appKey)) {
       setError("Invalid OTAA credentials");
       return false;
     }
@@ -270,9 +272,9 @@ bool LoRaWANManager::startActivation(uint8_t mode) {
     uint8_t nwkKey[16] = {};
     uint8_t appSKey[16] = {};
     uint32_t devAddr = 0;
-    if (!parseKey(gConfig.lorawanNwkSKey, nwkKey) ||
-        !parseKey(gConfig.lorawanAppSKey, appSKey) ||
-        !parseDevAddr(gConfig.lorawanDevAddr, devAddr)) {
+    if (!parseKey(config.lorawanNwkSKey, nwkKey) ||
+        !parseKey(config.lorawanAppSKey, appSKey) ||
+        !parseDevAddr(config.lorawanDevAddr, devAddr)) {
       setError("Invalid ABP credentials");
       return false;
     }
@@ -471,10 +473,11 @@ bool LoRaWANManager::performUplink(uint8_t fPort, const uint8_t* data,
 }
 
 void LoRaWANManager::servicePeriodicTelemetry() {
-  if (state_ != LoRaWANState::Joined || gConfig.lorawanUplinkPeriodSec == 0)
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
+  if (state_ != LoRaWANState::Joined || config.lorawanUplinkPeriodSec == 0)
     return;
   const uint32_t periodMs =
-      static_cast<uint32_t>(gConfig.lorawanUplinkPeriodSec) * 1000UL;
+      static_cast<uint32_t>(config.lorawanUplinkPeriodSec) * 1000UL;
   if (millis() - lastUplinkMs_ < periodMs) return;
 
   const String payload = makeLoRaWANUplinkJson();
@@ -483,7 +486,7 @@ void LoRaWANManager::servicePeriodicTelemetry() {
   if (manualUplinkPending_) return;
   memcpy(manualPayload_, payload.c_str(), payload.length());
   manualLen_ = static_cast<uint8_t>(payload.length());
-  manualFPort_ = gConfig.lorawanFPort;
+  manualFPort_ = config.lorawanFPort;
   manualConfirmed_ = false;
   manualUplinkPending_ = true;
   lastUplinkMs_ = millis();

@@ -62,6 +62,14 @@ the SACK bitmap is 8 bits, each fragment has an independent retry budget, and re
 is hard-bounded to 2048 bytes / 16 fragments / 3 concurrent messages. This is a greenfield
 decision; no old-node compatibility branch is required.
 
+## GAP K — implementation closure
+The locked hybrid-timeout decision is now backed by the runtime configuration path:
+STA SSID/password are persisted in the atomic RuntimeConfig record, exposed through the
+authenticated WebUI, loaded before network startup, and used for the STA-first attempt.
+Clearing the STA SSID disables the STA attempt and retains the immediate configured AP
+recovery path. STA credential changes are reboot-applied; no automatic plaintext credential
+logging or export is introduced.
+
 ## GAP K — Wi-Fi STA lifecycle — DECISION LOCKED
 Use **Hybrid timeout fallback (D)**. Persistent STA credentials are attempted first
 with reconnect/backoff. If STA remains unavailable for the configured fallback
@@ -245,3 +253,7 @@ preserve existing fields, endpoints, persistence, and protocol behavior.
 
 No wire-format change is introduced. The LoRa V2/V3/V4/V5 framing, fragment/ACK
 behavior, and ECDH beacon protocol remain unchanged.
+
+## F001-F005 decision closure
+
+See `docs/DECISIONS_F001_F005.md` for the locked decision contract and additive implementation boundary. Production-security acceptance remains OPEN until physical provisioning/eFuse/HIL evidence exists.

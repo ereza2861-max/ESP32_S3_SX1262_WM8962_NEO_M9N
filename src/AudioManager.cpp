@@ -25,10 +25,11 @@ static bool configureCodecForI2S() {
 }
 
 bool AudioManager::initCodec() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   Wire.begin(Board::I2C_SDA, Board::I2C_SCL, 400000);
   Wire.setTimeOut(50);
   if (!codec.begin(Wire, Board::WM8962_I2C_ADDR)) return false;
-  if (!codec.setClassDConfig(gConfig.classDEnabled, gConfig.classDBoostLevel)) return false;
+  if (!codec.setClassDConfig(config.classDEnabled, config.classDBoostLevel)) return false;
   return configureCodecForI2S();
 }
 
@@ -197,8 +198,9 @@ void AudioManager::logEvent(const char* event, const String& detail) {
 }
 
 bool AudioManager::begin() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   instance_ = this;
-  recordQuality_ = gConfig.audioRecordQuality;
+  recordQuality_ = config.audioRecordQuality;
   mutex_ = xSemaphoreCreateMutex();
   i2sMutex_ = xSemaphoreCreateMutex();
   usbRecordBuffer_ = xStreamBufferCreate(Config::USB_RECORD_BUFFER_BYTES, 1);
@@ -280,13 +282,13 @@ bool AudioManager::begin() {
   }
 
   initialized_ = true;
-  (void)setRecordSource(gConfig.audioRecordSource);
-  (void)setVox(gConfig.voxEnabled, gConfig.voxThreshold, gConfig.voxHangMs);
-  (void)setAec(gConfig.aecEnabled);
-  (void)setUsbMonitor(gConfig.usbMonitor);
-  (void)setUsbPlaybackTransport(gConfig.usbPlaybackTransport);
-  (void)setLoopback(gConfig.audioLoopback);
-  setVolume(gConfig.volume);
+  (void)setRecordSource(config.audioRecordSource);
+  (void)setVox(config.voxEnabled, config.voxThreshold, config.voxHangMs);
+  (void)setAec(config.aecEnabled);
+  (void)setUsbMonitor(config.usbMonitor);
+  (void)setUsbPlaybackTransport(config.usbPlaybackTransport);
+  (void)setLoopback(config.audioLoopback);
+  setVolume(config.volume);
   StateLock lock(gState);
   if (lock.ok()) {
     gState.codecReady = true;

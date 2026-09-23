@@ -263,6 +263,7 @@ bool MqttClientManager::decryptCredentials(const String& envelope) {
 }
 
 bool MqttClientManager::loadCredentials() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   Preferences prefs;
   if (!prefs.begin(NVS_NS, true)) return false;
   credentialsProvisioned_ = prefs.getBool("provisioned", false);
@@ -303,9 +304,9 @@ bool MqttClientManager::loadCredentials() {
   // certificate/private key. Username/password is no longer a connection
   // prerequisite and is not used by the MQTT task.
   if (!credentialsProvisioned_ || !pkiProvisioned_) return false;
-  host_ = gConfig.mqttHost;
-  port_ = gConfig.mqttPort;
-  if (!gConfig.mqttTlsRequired || host_.isEmpty() || port_ == 0) return false;
+  host_ = config.mqttHost;
+  port_ = config.mqttPort;
+  if (!config.mqttTlsRequired || host_.isEmpty() || port_ == 0) return false;
   return true;
 }
 
@@ -341,12 +342,11 @@ bool MqttClientManager::saveCredentials() {
 
 bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
                                              const String& user, const String& pass) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (host.isEmpty() || host.length() > 253 || port == 0 ||
       user.length() > 128 || pass.length() > 128 ||
       host.indexOf('|') >= 0 || user.indexOf('|') >= 0 || pass.indexOf('|') >= 0) return false;
-#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (port == 1883) return false;
-#endif
+  if (Config::mqttTlsIsMandatory() && port == 1883) return false;
   // Username/password provisioning is no longer an accepted production path.
   // Use provisionCertificate() so the device has a unique client certificate.
   (void)host; (void)port; (void)user; (void)pass;
@@ -354,10 +354,8 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
 
   plain_.stop();
   secure_.stop();
-  useTls_ = gConfig.mqttTlsRequired;
-#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (!gConfig.mqttTlsRequired) return false;
-#endif
+  useTls_ = config.mqttTlsRequired;
+  if (Config::mqttTlsIsMandatory() && !config.mqttTlsRequired) return false;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
@@ -371,7 +369,7 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
   client_.setServer(host_.c_str(), port_);
   connected_ = false;
   nextRetryMs_ = 0;
-  retryDelayMs_ = gConfig.mqttReconnectMinMs;
+  retryDelayMs_ = config.mqttReconnectMinMs;
   auditEvent("PROVISIONED");
   return true;
 }
@@ -379,6 +377,7 @@ bool MqttClientManager::provisionCredentials(const String& host, uint16_t port,
 bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
                                                 const String& certificatePem,
                                                 const String& privateKeyPem) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (host.isEmpty() || host.length() > 253 || port == 0 ||
       certificatePem.length() < 64 || certificatePem.length() > 8192 ||
       privateKeyPem.length() < 64 || privateKeyPem.length() > 8192 ||
@@ -388,9 +387,7 @@ bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
       privateKeyPem.indexOf("PRIVATE KEY-----") < 0) {
     return false;
   }
-#if defined(FIELDRADIO_PRODUCTION_BUILD) || (CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED)
-  if (!gConfig.mqttTlsRequired || port == 1883) return false;
-#endif
+  if (Config::mqttTlsIsMandatory() && (port == 1883 || !config.mqttTlsRequired)) return false;
 
   uint64_t expiry = 0;
   String subject, issuer, serial;
@@ -432,7 +429,7 @@ bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
   client_.setServer(host_.c_str(), port_);
   connected_ = false;
   nextRetryMs_ = 0;
-  retryDelayMs_ = gConfig.mqttReconnectMinMs;
+  retryDelayMs_ = config.mqttReconnectMinMs;
   auditEvent("PKI_PROVISIONED");
   return true;
 }
@@ -444,6 +441,7 @@ bool MqttClientManager::passwordRotationWarning() const {
 }
 
 bool MqttClientManager::reloadCertificateMaterial() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   Preferences prefs;
   if (!prefs.begin(NVS_NS, true)) return false;
   String cert, key;
@@ -462,7 +460,7 @@ bool MqttClientManager::reloadCertificateMaterial() {
   certSubject_ = subject;
   certIssuer_ = issuer;
   certSerial_ = serial;
-  if (gConfig.mqttTlsRequired) {
+  if (config.mqttTlsRequired) {
     secure_.stop();
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     secure_.setCertificate(clientCertificatePem_.c_str());
@@ -473,7 +471,7 @@ bool MqttClientManager::reloadCertificateMaterial() {
   connected_ = false;
   client_.disconnect();
   nextRetryMs_ = 0;
-  retryDelayMs_ = gConfig.mqttReconnectMinMs;
+  retryDelayMs_ = config.mqttReconnectMinMs;
   return true;
 }
 
@@ -501,7 +499,13 @@ void MqttClientManager::auditEvent(const char* event, int mqttState) {
 
 
 bool MqttClientManager::begin() {
-  enabled_ = gConfig.mqttEnabled;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  if (Config::mqttTlsIsMandatory() && !config.mqttTlsRequired) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "MQTT TLS is mandatory in this build";
+    return false;
+  }
+  enabled_ = config.mqttEnabled;
   if (!enabled_) {
     connected_ = false;
     client_.disconnect();
@@ -518,7 +522,7 @@ bool MqttClientManager::begin() {
 
   plain_.stop();
   secure_.stop();
-  useTls_ = gConfig.mqttTlsRequired;
+  useTls_ = config.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
@@ -535,12 +539,13 @@ bool MqttClientManager::begin() {
 
 bool MqttClientManager::connect(const String& host, uint16_t port,
                                 const String& user, const String& pass) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (host.isEmpty() || host.length() > 253 || port == 0 ||
       user.length() > 128 || pass.length() > 128) return false;
   host_ = host; port_ = port; user_ = user; pass_ = pass;
   plain_.stop();
   secure_.stop();
-  useTls_ = gConfig.mqttTlsRequired;
+  useTls_ = config.mqttTlsRequired;
   if (useTls_) {
     secure_.setCACert(MQTT_BROKER_ROOT_CA);
     if (!pkiProvisioned_ || clientCertificatePem_.isEmpty() || clientPrivateKeyPem_.isEmpty()) return false;
@@ -771,6 +776,11 @@ void MqttClientManager::setEnabled(bool enabled) {
 bool MqttClientManager::applyConfig() {
   RuntimeConfig config;
   if (!configSnapshot(config)) return false;
+  if (Config::mqttTlsIsMandatory() && !config.mqttTlsRequired) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "MQTT TLS is mandatory in this build";
+    return false;
+  }
   if (!config.mqttEnabled) {
     if (enabled_) setEnabled(false);
     return true;

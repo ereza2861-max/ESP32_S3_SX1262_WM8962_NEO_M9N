@@ -33,8 +33,9 @@ constexpr size_t PACKET_HEADER_V5 = Config::LORA_ECDH_V5_HEADER_BYTES;
 static_assert(PACKET_HEADER_V5 == PACKET_HEADER_V3 + 1,
               "V5 header must be V3 header plus key_epoch_delta");
 size_t packetHeaderTxBytes() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return PACKET_HEADER_V5;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-  return gConfig.ecdhRekeyPolicy == 1 ? PACKET_HEADER_V5 : PACKET_HEADER_V4;
+  return config.ecdhRekeyPolicy == 1 ? PACKET_HEADER_V5 : PACKET_HEADER_V4;
 #else
   return PACKET_HEADER_V2;
 #endif
@@ -242,9 +243,10 @@ uint32_t LoRaManager::forwardQueued() const {
 }
 
 bool LoRaManager::loadKey(uint8_t key[16]) const {
-  if (!key || gConfig.loraKeyHex.length() != 32) return false;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  if (!key || config.loraKeyHex.length() != 32) return false;
   for (size_t i = 0; i < 16; ++i) {
-    if (!hexByte(gConfig.loraKeyHex.c_str() + i * 2, key[i])) return false;
+    if (!hexByte(config.loraKeyHex.c_str() + i * 2, key[i])) return false;
   }
   return true;
 }
@@ -299,7 +301,8 @@ bool LoRaManager::nextTxSequence(uint16_t& seq) {
 }
 
 int8_t LoRaManager::effectiveTxPowerDbm() const {
-  int8_t configured = gConfig.loraPowerDbm;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return Config::LORA_POWER_DBM;
+  int8_t configured = config.loraPowerDbm;
   {
     StateLock lock(gState);
     if (lock.ok() && gState.brownoutReset && millis() < 60000UL)
@@ -328,6 +331,7 @@ int8_t LoRaManager::effectiveTxPowerDbm() const {
 }
 
 bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, uint32_t payloadHash, uint32_t packetEpochSec) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return true;
   const uint32_t now = millis();
   const uint32_t currentEpoch = currentEpochSec();
   if (packetEpochSec != 0 && currentEpoch != 0) {
@@ -377,7 +381,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   if (delta != 0 && delta < 0x8000U) {
     const ReplayEntry previousSlot = *slot;
     const uint8_t shift = static_cast<uint8_t>(
-        min<uint16_t>(delta, gConfig.replayWindowBits));
+        min<uint16_t>(delta, config.replayWindowBits));
     slot->bitmap = shift >= 32 ? 1U : (slot->bitmap << shift) | 1U;
     slot->highestSeq = seq;
     slot->highestPayloadHash = payloadHash;
@@ -401,7 +405,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
   }
 
   const uint16_t age = static_cast<uint16_t>(slot->highestSeq - seq);
-  if (age >= gConfig.replayWindowBits &&
+  if (age >= config.replayWindowBits &&
       age < 0x8000U) {
     ++replayRejects_;
     return true;
@@ -411,7 +415,7 @@ bool LoRaManager::acceptReplay(uint32_t sourceId, uint16_t seq, uint8_t type, ui
     return true;
   }
   const uint8_t clampedAge = static_cast<uint8_t>(
-      min<uint16_t>(age, static_cast<uint16_t>(gConfig.replayWindowBits - 1U)));
+      min<uint16_t>(age, static_cast<uint16_t>(config.replayWindowBits - 1U)));
   const uint32_t bit = 1UL << clampedAge;
   if (slot->bitmap & bit) {
     ++replayRejects_;
@@ -509,8 +513,9 @@ uint16_t LoRaManager::crc16(const uint8_t* data, size_t len) {
 
 bool LoRaManager::encryptPacket(const uint8_t* plain, size_t len, uint8_t type,
                                 uint16_t seq, String& packet) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-  if (gConfig.ecdhRekeyPolicy == 1 &&
+  if (config.ecdhRekeyPolicy == 1 &&
       type != Config::LORA_TYPE_NEIGHBOR_BEACON) {
     // DECISION: under flag=1 every data packet is pairwise V5. The peer is
     // resolved from the authenticated route envelope; broadcast without a
@@ -1044,9 +1049,10 @@ bool LoRaManager::retuneToHopChannelLocked(uint8_t index) {
 }
 
 bool LoRaManager::retuneToChannel0Locked() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   SpiLock spiLock(pdMS_TO_TICKS(1000));
   if (!spiLock.ok()) return false;
-  return radio_.setFrequency(gConfig.loraFreqMHz) == RADIOLIB_ERR_NONE &&
+  return radio_.setFrequency(config.loraFreqMHz) == RADIOLIB_ERR_NONE &&
          radio_.startReceive() == RADIOLIB_ERR_NONE;
 }
 
@@ -1065,6 +1071,7 @@ bool LoRaManager::retuneToChannel0() {
 }
 
 bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t destination) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (!ready_ || !mutex_ || text.isEmpty()) return false;
 
   // Establish the global lock order before entering the text transaction.
@@ -1073,7 +1080,7 @@ bool LoRaManager::transmitHopped(const String& text, uint8_t type, uint32_t dest
   {
     StateLock lock(gState);
     if (!lock.ok()) return false;
-    hopOn = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
+    hopOn = config.loraHopEnabled && gState.hopChannelCount > 0;
   }
 
   bool textStateHeld = false;
@@ -2184,6 +2191,7 @@ void LoRaManager::addSosHistory(uint8_t event, uint32_t peer) {
 }
 
 void LoRaManager::serviceSosRetry() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   if (!sosAwaitingAck_ || sosPacket_.isEmpty()) return;
   const uint32_t now = millis();
   if (now - sosSentMs_ < Config::SOS_REPEAT_MS) return;
@@ -2203,7 +2211,7 @@ void LoRaManager::serviceSosRetry() {
   bool hopEnabled = false;
   {
     StateLock lock(gState);
-    if (lock.ok()) hopEnabled = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
+    if (lock.ok()) hopEnabled = config.loraHopEnabled && gState.hopChannelCount > 0;
   }
   if (hopEnabled && retryPacket.length() >= PACKET_HEADER_V2 &&
       static_cast<uint8_t>(retryPacket[1]) == Config::LORA_PROTOCOL_VERSION) {
@@ -2340,6 +2348,7 @@ bool LoRaManager::validateTextAckHop(bool hopEnabled) const {
 }
 
 void LoRaManager::serviceTextRetry() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   String packet;
   uint32_t sentMs = 0;
   uint8_t retryCount = 0;
@@ -2347,7 +2356,7 @@ void LoRaManager::serviceTextRetry() {
   {
     StateLock stateLock(gState);
     if (stateLock.ok())
-      hopEnabled = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
+      hopEnabled = config.loraHopEnabled && gState.hopChannelCount > 0;
   }
   {
     if (!textStateMutex_ ||
@@ -2554,6 +2563,7 @@ void LoRaManager::suspendForLoRaWAN() {
 }
 
 bool LoRaManager::resumeFromLoRaWAN() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (!mutex_) return false;
   if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(500)) != pdTRUE) return false;
   bool ok = false;
@@ -2561,8 +2571,8 @@ bool LoRaManager::resumeFromLoRaWAN() {
     SpiLock spiLock(pdMS_TO_TICKS(500));
     if (spiLock.ok()) {
       const int16_t st = radio_.begin(
-          gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
-          gConfig.loraCr, gConfig.loraSyncWord, effectiveTxPowerDbm(),
+          config.loraFreqMHz, config.loraBwKHz, config.loraSf,
+          config.loraCr, config.loraSyncWord, effectiveTxPowerDbm(),
           Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
       if (st == RADIOLIB_ERR_NONE) {
         radio_.setPacketReceivedAction(onDio1);
@@ -2675,6 +2685,7 @@ bool LoRaManager::processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
 #endif
 
 bool LoRaManager::begin() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
   seqMutex_ = xSemaphoreCreateMutex();
@@ -2682,12 +2693,12 @@ bool LoRaManager::begin() {
   captureMutex_ = xSemaphoreCreateMutex();
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
-  sourceId_.store(sourceIdFromCallsign(gConfig.callsign), std::memory_order_release);
+  sourceId_.store(sourceIdFromCallsign(config.callsign), std::memory_order_release);
   {
     StateLock lock(gState);
     if (!lock.ok()) return false;
     const uint8_t profileCount = min<uint8_t>(
-        max<uint8_t>(1U, gConfig.loraHopChannelProfile),
+        max<uint8_t>(1U, config.loraHopChannelProfile),
         Config::HOP_CHANNEL_MAX);
     gState.hopChannelCount = profileCount;
     for (uint8_t i = 0; i < Config::HOP_CHANNEL_MAX; ++i)
@@ -2744,8 +2755,8 @@ bool LoRaManager::begin() {
   if (!spiLock.ok()) return false;
 
   int16_t st = radio_.begin(
-      gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
-      gConfig.loraCr, gConfig.loraSyncWord, effectiveTxPowerDbm(),
+      config.loraFreqMHz, config.loraBwKHz, config.loraSf,
+      config.loraCr, config.loraSyncWord, effectiveTxPowerDbm(),
       Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
 
   if (st != RADIOLIB_ERR_NONE) {
@@ -2825,6 +2836,7 @@ void LoRaManager::serviceVoiceReorder() {
 }
 
 void LoRaManager::task() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   if (!mutex_ || suspendedForLoRaWAN_.load(std::memory_order_acquire)) return;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   uint32_t ecdhEpochSec = currentEpochSec();
@@ -2969,7 +2981,7 @@ void LoRaManager::task() {
     {
       StateLock lock(gState);
       if (lock.ok()) {
-        hopEnabled = gConfig.loraHopEnabled && gState.hopChannelCount > 0;
+        hopEnabled = config.loraHopEnabled && gState.hopChannelCount > 0;
         busy = gState.ptt || gState.recording;
       }
     }
@@ -3054,8 +3066,8 @@ void LoRaManager::task() {
       SpiLock spiLock(pdMS_TO_TICKS(1000));
       if (spiLock.ok()) {
         beginSt = radio_.begin(
-            gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
-            gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
+            config.loraFreqMHz, config.loraBwKHz, config.loraSf,
+            config.loraCr, config.loraSyncWord, config.loraPowerDbm,
             Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
         if (beginSt == RADIOLIB_ERR_NONE) {
           radio_.setPacketReceivedAction(onDio1);
@@ -3182,7 +3194,7 @@ void LoRaManager::task() {
          plain[0] == Config::LORA_RANGE_TEST_ACK_MAGIC);
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
     const bool ecdhPolicyAccepted =
-        gConfig.ecdhRekeyPolicy == 0 ||
+        config.ecdhRekeyPolicy == 0 ||
         authenticatedV5 ||
         rangeTestFrame ||
         (authenticatedV3 &&
@@ -3736,6 +3748,7 @@ bool LoRaManager::processPendingTx() {
 }
 
 bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   if (!alreadyEncrypted) {
     StateLock lock(gState);
@@ -3748,7 +3761,7 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
           ? Config::LORA_MAX_PACKET
           : Config::LORA_MAX_PACKET - packetHeaderTxBytes() - PACKET_TAG - ROUTE_EXT_BYTES))
     return false;
-  if (Config::LORA_REQUIRE_ENCRYPTION && gConfig.loraKeyHex.length() != 32)
+  if (Config::LORA_REQUIRE_ENCRYPTION && config.loraKeyHex.length() != 32)
     return false;
 
   String packet;
@@ -4437,9 +4450,10 @@ String LoRaManager::ecdhStatusJson() const {
 #endif
 
 bool LoRaManager::setAdrEnabled(bool enabled) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   adrEnabled_ = enabled;
   if (!enabled) {
-    currentAdrSf_ = gConfig.loraSf;
+    currentAdrSf_ = config.loraSf;
     return true;
   }
   serviceAdr();
@@ -4717,6 +4731,7 @@ void LoRaManager::updateSourceId() {
 }
 
 bool LoRaManager::applyConfig() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
   if (!radioGuard.ok()) return false;
   if (!mutex_) return false;
@@ -4727,8 +4742,8 @@ bool LoRaManager::applyConfig() {
     SpiLock spiLock(pdMS_TO_TICKS(1000));
     if (spiLock.ok()) {
       const int16_t st = radio_.begin(
-          gConfig.loraFreqMHz, gConfig.loraBwKHz, gConfig.loraSf,
-          gConfig.loraCr, gConfig.loraSyncWord, gConfig.loraPowerDbm,
+          config.loraFreqMHz, config.loraBwKHz, config.loraSf,
+          config.loraCr, config.loraSyncWord, config.loraPowerDbm,
           Config::LORA_PREAMBLE, Config::LORA_TCXO_VOLTAGE);
       if (st == RADIOLIB_ERR_NONE) {
         radio_.setPacketReceivedAction(onDio1);
@@ -5025,6 +5040,7 @@ void LoRaManager::serviceVoiceAckRetry() {
 }
 
 void LoRaManager::serviceNeighborBeacon() {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   const uint32_t now = millis();
   for (auto& route : routes_) {
     if (route.seenMs != 0 && now - route.seenMs > ROUTE_CACHE_TTL_MS)
@@ -5037,7 +5053,7 @@ void LoRaManager::serviceNeighborBeacon() {
   if (!ready_ || now - lastNeighborBeaconMs_ < Config::LORA_NEIGHBOR_BEACON_PERIOD_MS)
     return;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-  if (gConfig.ecdhRekeyPolicy == 1) {
+  if (config.ecdhRekeyPolicy == 1) {
     const uint32_t epochSec = currentEpochSec();
     if (epochSec == 0 || !ecdhKeyMaterial_.hasEphemeralKey())
       return;

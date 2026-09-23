@@ -38,6 +38,13 @@ Compile, unit, fuzz, and host-only transport results may establish firmware as
 fragmentation/SACK interoperability, power-loss, PPS, sleep/wake, audio, or other
 hardware-dependent behavior until the corresponding HIL evidence exists.
 
+## 1.2 Production-security acceptance evidence
+
+The repository source and build configuration are not, by themselves, production-security
+acceptance evidence. The formal definition of done and the evidence checklist are tracked
+in `docs/PRODUCTION_ACCEPTANCE.md`. The acceptance remains **OPEN** until the required
+manufacturing evidence is supplied.
+
 
 ## 2. Prerequisites
 

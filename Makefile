@@ -130,6 +130,7 @@ check-provisioning:
 	@sh "$(PROJECT_PATH)/tools/check-provisioning.sh"
 
 preflight:
+	@python3 "$(PROJECT_PATH)/tools/check_gconfig_direct.py"
 	@sh "$(PROJECT_PATH)/tools/preflight-git-push.sh"
 
 check-secrets: preflight

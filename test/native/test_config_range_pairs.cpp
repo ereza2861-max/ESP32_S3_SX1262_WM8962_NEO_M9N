@@ -55,6 +55,10 @@ int main() {
   assert(Config::LORA_REPLAY_WINDOW_BITS_MIN == 8);
   assert(Config::CERT_RENEWAL_THRESHOLD_DAYS_MIN == 1);
   assert(Config::CERT_RENEWAL_THRESHOLD_DAYS_MAX == 3650);
+  assert(Config::STA_SSID_MAX_LEN == 32);
+  assert(Config::STA_PASSWORD_MIN_LEN == 8);
+  assert(Config::STA_PASSWORD_MAX_LEN == 63);
+  assert(Config::STA_PASSWORD_MIN_LEN <= Config::STA_PASSWORD_MAX_LEN);
 
   return 0;
 }

@@ -65,6 +65,7 @@ bool pairingBlocked(const SensorProtocol::BleAddress& address) {
 }
 
 void pairingFailure(const SensorProtocol::BleAddress& address) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   PairingFailure* selected = nullptr;
   for (auto& entry : gPairingFailures) {
     if (entry.address == address) { selected = &entry; break; }
@@ -73,8 +74,8 @@ void pairingFailure(const SensorProtocol::BleAddress& address) {
   if (!selected) selected = &gPairingFailures[0];
   selected->address = address;
   if (selected->failures < 0xFF) ++selected->failures;
-  if (selected->failures >= gConfig.blePairingFailureThreshold)
-    selected->blockUntilMs = millis() + gConfig.blePairingBlockMs;
+  if (selected->failures >= config.blePairingFailureThreshold)
+    selected->blockUntilMs = millis() + config.blePairingBlockMs;
 }
 
 void pairingSuccess(const SensorProtocol::BleAddress& address) {
@@ -84,7 +85,8 @@ void pairingSuccess(const SensorProtocol::BleAddress& address) {
 }
 
 bool deriveBlePasskey(uint8_t out6[6]) {
-  if (!out6 || gConfig.loraKeyHex.length() != 32) return false;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  if (!out6 || config.loraKeyHex.length() != 32) return false;
   uint8_t key[16] = {};
   auto hex = [](char c) -> int {
     if (c >= '0' && c <= '9') return c - '0';
@@ -93,8 +95,8 @@ bool deriveBlePasskey(uint8_t out6[6]) {
     return -1;
   };
   for (size_t i = 0; i < sizeof(key); ++i) {
-    const int h = hex(gConfig.loraKeyHex[i * 2]);
-    const int l = hex(gConfig.loraKeyHex[i * 2 + 1]);
+    const int h = hex(config.loraKeyHex[i * 2]);
+    const int l = hex(config.loraKeyHex[i * 2 + 1]);
     if (h < 0 || l < 0) return false;
     key[i] = static_cast<uint8_t>((h << 4) | l);
   }
@@ -146,7 +148,8 @@ bool hasIrk(const uint8_t irk[16]) {
 bool peerStoreSave(const PeerRecord in[PEER_MAX]);
 
 bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
-  if (!out || !gConfig.loraKeyHex.length()) return false;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  if (!out || !config.loraKeyHex.length()) return false;
   std::memset(out, 0, sizeof(PeerRecord) * PEER_MAX);
 
   Preferences prefs;
@@ -165,7 +168,7 @@ bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
 
     // V1 is decrypted with the legacy AES-ECB store only during migration.
     uint8_t key[16] = {};
-    if (gConfig.loraKeyHex.length() != 32) return false;
+    if (config.loraKeyHex.length() != 32) return false;
     auto hex = [](char c) -> int {
       if (c >= '0' && c <= '9') return c - '0';
       if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -173,8 +176,8 @@ bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
       return -1;
     };
     for (size_t i = 0; i < sizeof(key); ++i) {
-      const int hi = hex(gConfig.loraKeyHex[i * 2]);
-      const int lo = hex(gConfig.loraKeyHex[i * 2 + 1]);
+      const int hi = hex(config.loraKeyHex[i * 2]);
+      const int lo = hex(config.loraKeyHex[i * 2 + 1]);
       if (hi < 0 || lo < 0) return false;
       key[i] = static_cast<uint8_t>((hi << 4) | lo);
     }
@@ -235,7 +238,7 @@ bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
             offsetof(BlePeerStore::PeerRecordV2, crc32))) {
       continue;
     }
-    if (!BlePeerStore::openV2(record, gConfig.loraKeyHex.c_str())) {
+    if (!BlePeerStore::openV2(record, config.loraKeyHex.c_str())) {
       gPeerMacFailures.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
@@ -245,12 +248,13 @@ bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
 }
 
 bool peerStoreSave(const PeerRecord in[PEER_MAX]) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (!in) return false;
   uint8_t blob[BlePeerStore::V2_BYTES * PEER_MAX] = {};
   for (size_t i = 0; i < PEER_MAX; ++i) {
     PeerRecord record = in[i];
     if (record.magic != BlePeerStore::MAGIC) continue;
-    if (!BlePeerStore::sealV2(record, gConfig.loraKeyHex.c_str())) return false;
+    if (!BlePeerStore::sealV2(record, config.loraKeyHex.c_str())) return false;
     std::memcpy(blob + i * BlePeerStore::V2_BYTES, &record, sizeof(record));
   }
 
@@ -306,9 +310,10 @@ String addressText(const SensorProtocol::BleAddress& address) {
 
 void notifyCallback(NimBLERemoteCharacteristic* characteristic,
                     uint8_t* data, size_t length, bool) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return;
   if (!gReader || !characteristic || !data || length != sizeof(SensorProtocol::SensorValue)) return;
 
-  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
+  for (size_t i = 0; i < config.sensorMaxNodes; ++i) {
     ClientSlot& slot = gSlots[i];
     if (!slot.inUse || slot.value != characteristic) continue;
 
@@ -390,6 +395,7 @@ bool writeDescriptorRequest(ClientSlot& slot, const uint8_t request[3]) {
 }
 
 bool connectDevice(const NimBLEAdvertisedDevice* device) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (!gReader || !device) return false;
   const SensorProtocol::BleAddress advertised = toBleAddress(device->getAddress());
   SensorProtocol::BleAddress address{};
@@ -405,8 +411,8 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     addressIsRpa = true;
     bondedRpaPending = true;
   }
-  if (!bondedRpaPending && gConfig.blePairingEnabled && pairingBlocked(address)) return false;
-  if (gConfig.blePairingEnabled && !bondedRpaPending) {
+  if (!bondedRpaPending && config.blePairingEnabled && pairingBlocked(address)) return false;
+  if (config.blePairingEnabled && !bondedRpaPending) {
     uint32_t passkey = 0;
     if (!gReader->getPeerPasskey(address, passkey)) return false;
     // NimBLE-Arduino exposes a process-wide client passkey; set it immediately
@@ -423,7 +429,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
           address, advertisedName, device->getRSSI(), millis(), nodeIndex);
     } else {
       if (addressIsRpa || gReader->registry().isFull() &&
-          !gReader->registry().evictDisconnected(millis(), gConfig.sensorNodeEvictionMs, nodeIndex)) {
+          !gReader->registry().evictDisconnected(millis(), config.sensorNodeEvictionMs, nodeIndex)) {
         return false;
       }
       if (!gReader->registry().upsertNode(
@@ -435,7 +441,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
   if (bondedRpaPending) gBlePasskey = 0;
 
   ClientSlot* slot = nullptr;
-  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
+  for (size_t i = 0; i < config.sensorMaxNodes; ++i) {
     if (!gSlots[i].inUse) {
       slot = &gSlots[i];
       break;
@@ -448,7 +454,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     gReader->registry().markConnected(nodeIndex, false, millis());
     return false;
   }
-  slot->client->setConnectTimeout(gConfig.sensorConnectTimeoutMs);
+  slot->client->setConnectTimeout(config.sensorConnectTimeoutMs);
   slot->client->setClientCallbacks(&gClientCallbacks, false);
 
   esp_task_wdt_reset();
@@ -492,7 +498,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     } else {
       if (gReader->registry().isFull() &&
           !gReader->registry().evictDisconnected(
-              millis(), gConfig.sensorNodeEvictionMs, nodeIndex)) {
+              millis(), config.sensorNodeEvictionMs, nodeIndex)) {
         (void)NimBLEDevice::deleteClient(slot->client);
         slot->client = nullptr;
         return false;
@@ -509,7 +515,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
   }
 
   esp_task_wdt_reset();
-  if (gConfig.blePairingEnabled || gConfig.blePairingPolicy == 1) {
+  if (config.blePairingEnabled || config.blePairingPolicy == 1) {
     if (!slot->client->secureConnection()) {
       pairingFailure(address);
       (void)NimBLEDevice::deleteClient(slot->client);
@@ -519,7 +525,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     }
     pairingSuccess(address);
     if (addressIsRpa) (void)gReader->recordPeerRpa(address, advertised);
-  } else if ((gConfig.sensorRequireEncryption || gConfig.blePairingPolicy == 1) &&
+  } else if ((config.sensorRequireEncryption || config.blePairingPolicy == 1) &&
              !slot->client->secureConnection()) {
     (void)NimBLEDevice::deleteClient(slot->client);
     *slot = {};
@@ -616,13 +622,14 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
 } // namespace
 
 bool SensorReader::begin(const String& gatewayName) {
-  if (!gConfig.sensorReaderEnabled) return false;
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  if (!config.sensorReaderEnabled) return false;
   if (initialized_) return true;
   (void)peerMutexLock();
   peerMutexUnlock();
   if (!NimBLEDevice::isInitialized() &&
       !NimBLEDevice::init(std::string(gatewayName.c_str()))) return false;
-  if (gConfig.sensorRequireEncryption && !gConfig.blePairingEnabled) {
+  if (config.sensorRequireEncryption && !config.blePairingEnabled) {
     // The current sensor-node contract requires an authenticated connection.
     // Refuse an incompatible encryption-only configuration rather than
     // silently negotiating Just Works and failing the node-side auth gate.
@@ -637,9 +644,9 @@ bool SensorReader::begin(const String& gatewayName) {
   gScan = NimBLEDevice::getScan();
   if (!gScan) return false;
   gScan->setActiveScan(Config::SENSOR_ACTIVE_SCAN_VALUE);
-  gScan->setInterval(gConfig.sensorScanIntervalMs);
-  gScan->setWindow(gConfig.sensorScanWindowMs);
-  gScan->setMaxResults(static_cast<uint8_t>(gConfig.sensorMaxNodes));
+  gScan->setInterval(config.sensorScanIntervalMs);
+  gScan->setWindow(config.sensorScanWindowMs);
+  gScan->setMaxResults(static_cast<uint8_t>(config.sensorMaxNodes));
   sensorQueue_ = xQueueCreateStatic(Config::SENSOR_LORA_QUEUE_DEPTH, sizeof(SensorSample),
                                     sensorQueueStorage_, &sensorQueueStruct_);
   if (!sensorQueue_) return false;
@@ -647,7 +654,7 @@ bool SensorReader::begin(const String& gatewayName) {
   initialized_ = true;
   Serial.printf("SENSOR: reader enabled, NimBLE=%s maxNodes=%u maxSensors=%u\n",
                 NimBLEDevice::getVersion(),
-                static_cast<unsigned>(gConfig.sensorMaxNodes),
+                static_cast<unsigned>(config.sensorMaxNodes),
                 static_cast<unsigned>(Config::SENSOR_MAX_SENSORS_PER_NODE_VALUE));
   return true;
 }
@@ -775,10 +782,12 @@ bool SensorReader::requestRefreshNode(size_t nodeIndex) {
 
 uint32_t SensorReader::peerMacFailures() const { return gPeerMacFailures.load(std::memory_order_relaxed); }
 
-bool SensorReader::isEnabled() const { return gConfig.sensorReaderEnabled; }
+bool SensorReader::isEnabled() const { return config.sensorReaderEnabled; }
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 
 bool SensorReader::hasConnectedNode() const {
-  for (size_t i = 0; i < gConfig.sensorMaxNodes; ++i) {
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  for (size_t i = 0; i < config.sensorMaxNodes; ++i) {
     SensorRegistry::Node nodeSnapshot{};
     if (registry_.snapshotNode(i, nodeSnapshot) && nodeSnapshot.connected) return true;
   }
@@ -972,6 +981,7 @@ String SensorReader::peersJson() const {
 #else
 
 bool SensorReader::begin(const String&) { return false; }
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 bool SensorReader::enqueueSensorForLoRa(const SensorSample&) { return false; }
 uint32_t SensorReader::droppedSamples() const { return 0; }
 uint8_t SensorReader::queueDepth() const { return 0; }
@@ -991,6 +1001,8 @@ bool SensorReader::requestForgetNode(size_t) { return false; }
 bool SensorReader::requestRefreshNode(size_t) { return false; }
 void SensorReader::task() {}
 bool SensorReader::isEnabled() const { return false; }
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 bool SensorReader::hasConnectedNode() const { return false; }
+  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 
 #endif

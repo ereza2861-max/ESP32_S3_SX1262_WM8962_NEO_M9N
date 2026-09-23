@@ -85,14 +85,14 @@ provisioning and diagnostics.
 STA mode is useful when the radio has access to an infrastructure network,
 but it creates a dependency on a router/AP and its credentials. In an
 environment without a router, STA-only provisioning can strand the device.
-The optional STA scaffold is therefore deliberately not allowed to replace
+The STA manager is therefore deliberately not allowed to replace
 the existing AP provisioning path.
 
 ## Known limitations / TODO
 
 - AES-GCM P2P wire version 4 is the primary P2P packet path; legacy V2/V3 decoding remains for compatibility.
 - X25519/ECDH rekey is implemented behind the runtime `ecdh_rekey_policy` switch; HIL interoperability and multi-node validation remain pending.
-- Wi-Fi STA still lacks the locked end-to-end persistent credential provisioning workflow and AP-fallback integration. MQTT has TLS/CA provisioning and broker-PUBACK-gated sensor delivery, but the final PKI certificate design in `DECISIONS.md` is not production-complete. BLE Sensor Reader is implemented as a NimBLE GATT central; it is independent of LoRaWAN provisioning. The external sensor must be BLE GATT compatible; legacy Bluetooth transports are not supported.
+- Wi-Fi STA now uses persisted RuntimeConfig credentials, attempts STA before AP recovery, and exposes the AP only after the locked fallback window. Credential changes are reboot-applied; physical association remains a hardware-validation item. MQTT has TLS/CA provisioning and broker-PUBACK-gated sensor delivery, but the final PKI certificate design in `DECISIONS.md` is not production-complete. BLE Sensor Reader is implemented as a NimBLE GATT central; it is independent of LoRaWAN provisioning. The external sensor must be BLE GATT compatible; legacy Bluetooth transports are not supported.
 - Fragment payloads use a dedicated `LORA_TYPE_FRAG_DATA` wire type and the authenticated ACK path. Full Selective Repeat is implemented with an 8-frame sender window, 8-bit SACK bitmap, bounded reassembly, and per-fragment retry; RF/HIL validation remains pending.
 - The exact SDPPI/Komdigi deployment frequency plan must be verified against
   the current network operator and regulatory release before field TX.

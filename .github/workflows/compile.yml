@@ -53,6 +53,9 @@ jobs:
       - name: Validate PlatformIO configuration
         run: pio project config
 
+      - name: Check configuration ownership
+        run: python3 tools/check_gconfig_direct.py
+
       - name: Run repository preflight
         run: make preflight
 

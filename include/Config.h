@@ -1,5 +1,11 @@
 #pragma once
 #include <Arduino.h>
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+#ifndef CONFIG_SECURE_BOOT_V2_ENABLED
+#define CONFIG_SECURE_BOOT_V2_ENABLED 0
+#endif
 
 // Optional machine-local credentials. This file is intentionally ignored by Git.
 #if __has_include("LocalConfig.h")
@@ -8,6 +14,25 @@
 
 namespace Config {
 constexpr uint32_t SERIAL_BAUD = 115200;
+
+constexpr bool mqttTlsIsMandatory(bool productionBuild, bool secureBootEnabled) {
+  return productionBuild || secureBootEnabled;
+}
+
+constexpr bool mqttTlsIsMandatory() {
+#if defined(FIELDRADIO_PRODUCTION_BUILD)
+  constexpr bool productionBuild = true;
+#else
+  constexpr bool productionBuild = false;
+#endif
+#if defined(CONFIG_SECURE_BOOT_V2_ENABLED) && CONFIG_SECURE_BOOT_V2_ENABLED
+  constexpr bool secureBootEnabled = true;
+#else
+  constexpr bool secureBootEnabled = false;
+#endif
+  return mqttTlsIsMandatory(productionBuild, secureBootEnabled);
+}
+
 
 #ifndef FIELDRADIO_AP_SSID
 #define FIELDRADIO_AP_SSID "FieldRadio"
@@ -254,8 +279,8 @@ constexpr uint8_t LORA_RANGE_TEST_MAGIC = 0xD4;
 constexpr uint8_t LORA_RANGE_TEST_ACK_MAGIC = 0xD5;
 constexpr uint8_t LORA_RANGE_TEST_VERSION = 1;
 constexpr uint32_t RANGE_TEST_MAX_DURATION_MS = 30UL * 60UL * 1000UL;
-constexpr uint8_t CONFIG_VERSION = 10;
-constexpr uint16_t ATOMIC_CONFIG_SCHEMA_VERSION = 2;
+constexpr uint8_t CONFIG_VERSION = 11;
+constexpr uint16_t ATOMIC_CONFIG_SCHEMA_VERSION = 3;
 constexpr uint32_t SOS_RATE_LIMIT_MS = 3000;
 constexpr uint8_t SOS_MAX_RETRIES = 3;
 constexpr uint32_t SOS_ESCALATION_DELAY_MS = 30000UL;
@@ -313,6 +338,11 @@ enum class ClassDOutputMode : uint8_t {
   SingleEnded = 1,
 };
 constexpr bool CLASS_D_ENABLED = false;
+// Hardware evidence remains a separate immutable gate until schematic,
+// netlist, PCB routing, and speaker/load evidence are available.
+constexpr bool CLASS_D_HARDWARE_EVIDENCE_AVAILABLE = false;
+static_assert(!CLASS_D_ENABLED || CLASS_D_HARDWARE_EVIDENCE_AVAILABLE,
+              "CLASS_D_ENABLED requires hardware evidence");
 constexpr ClassDOutputMode CLASS_D_OUTPUT_MODE = ClassDOutputMode::BTL;
 constexpr bool CLASS_D_MONO = false;
 constexpr uint8_t CLASS_D_SPEAKER_IMPEDANCE_OHMS = 8;
@@ -473,6 +503,9 @@ static_assert(BLE_PAIRING_MAX_FAILURES >= 1,
 #endif
 constexpr char STA_SSID[] = FIELDRADIO_STA_SSID;
 constexpr char STA_PASSWORD[] = FIELDRADIO_STA_PASSWORD;
+constexpr size_t STA_SSID_MAX_LEN = 32;
+constexpr size_t STA_PASSWORD_MIN_LEN = 8;
+constexpr size_t STA_PASSWORD_MAX_LEN = 63;
 constexpr char DEVICE_ID[] = FIELDRADIO_DEVICE_ID;
 constexpr char DEVICE_CALLSIGN[] = FIELDRADIO_CALLSIGN;
 constexpr uint32_t STA_RETRY_MIN_MS = 5000UL;

@@ -1,6 +1,6 @@
 # Configuration migration matrix
 
-The atomic configuration record uses `ATOMIC_CONFIG_SCHEMA_VERSION = 2`.
+The atomic configuration record uses `ATOMIC_CONFIG_SCHEMA_VERSION = 3`.
 `CONFIG_VERSION` remains the human-visible legacy migration version.
 
 | CONFIG_VERSION | Atomic schema | Meaning / field migration |
@@ -15,7 +15,8 @@ The atomic configuration record uses `ATOMIC_CONFIG_SCHEMA_VERSION = 2`.
 | 8 | 1 | Adds web session/CSRF and replay-window policy. |
 | 9 | 1 | Adds EST server/label and certificate lifecycle timing fields. |
 | 10 | 2 | Uses atomic A/B configuration slots with generation + CRC and adds EST auth mode. |
-| 11+ | 2 | Reserved for future fields; bump the schema if the atomic payload layout changes. |
+| 11 | 3 | Adds persistent STA SSID/password for the locked Wi-Fi hybrid fallback workflow. Schema-2 atomic slots are decoded through the legacy payload prefix and rewritten as schema 3. |
+| 12+ | 3 | Reserved for future fields; bump the schema if the atomic payload layout changes. |
 
 ## Current EST fields
 
@@ -33,6 +34,4 @@ enrollment.
 4. Verify the slot CRC and commit marker before selecting it.
 5. After a successful commit, only the newest valid generation is selected.
 
-There is no requirement for backward compatibility with an older atomic payload
-layout; a schema change invalidates the old slots and requires the normal
-provisioning/migration path.
+Schema 3 preserves the schema-2 payload prefix so existing atomic slots can be read, default STA credentials can be recovered from the compile-time deployment defaults, and the complete record can then be rewritten to schema 3. Future incompatible layout changes must add an explicit decoder rather than silently treating old slots as current.

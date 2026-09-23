@@ -119,6 +119,8 @@ bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
 
 uint32_t configGeneration() { return gConfigGeneration.load(std::memory_order_acquire); }
 
+void configLoad() { gConfig.load(); }
+
 bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGeneration,
                             const std::function<bool()>& apply,
                             const std::function<bool()>& rollbackRuntime) {
@@ -322,9 +324,24 @@ struct __attribute__((packed)) PersistedConfigPayload {
   uint32_t webSessionTimeoutMs; uint32_t webAuthRateLimitMs; uint8_t csrfPolicy; uint8_t blePairingPolicy; uint8_t ecdhRekeyPolicy; uint8_t replayWindowBits;
   char estServerUrl[254]; char estLabel[96]; uint16_t certRenewalThresholdDays; uint32_t certCheckPeriodMs;
   uint8_t estAuthMode; char estUsername[65]; char estPassword[65]; char estBootstrapToken[129]; uint8_t estBootstrapTokenConsumed; uint8_t certLifecycleEnabled;
+  char staSsid[33]; char staPassword[64];
 };
 struct __attribute__((packed)) AtomicConfigRecord { uint32_t magic; uint16_t schema; uint16_t payloadSize; uint32_t generation; PersistedConfigPayload payload; uint32_t crc; };
 static_assert(sizeof(AtomicConfigRecord) < 4096, "atomic config must fit in one NVS blob");
+
+constexpr uint16_t ATOMIC_CONFIG_SCHEMA_V2 = 2;
+constexpr size_t ATOMIC_CONFIG_SCHEMA_V2_TAIL_BYTES = sizeof(char[33]) + sizeof(char[64]);
+constexpr size_t ATOMIC_CONFIG_SCHEMA_V2_PAYLOAD_SIZE =
+    sizeof(PersistedConfigPayload) - ATOMIC_CONFIG_SCHEMA_V2_TAIL_BYTES;
+struct __attribute__((packed)) AtomicConfigRecordV2 {
+  uint32_t magic;
+  uint16_t schema;
+  uint16_t payloadSize;
+  uint32_t generation;
+  uint8_t payload[ATOMIC_CONFIG_SCHEMA_V2_PAYLOAD_SIZE];
+  uint32_t crc;
+};
+static_assert(sizeof(AtomicConfigRecordV2) < 4096, "legacy atomic config must fit in one NVS blob");
 
 uint32_t atomicCrc32(const uint8_t* data, size_t len) {
   uint32_t crc=0xFFFFFFFFUL; for(size_t i=0;i<len;++i){ crc^=data[i]; for(uint8_t b=0;b<8;++b) crc=(crc&1U)?(crc>>1U)^0xEDB88320UL:crc>>1U; } return ~crc;
@@ -346,6 +363,8 @@ void encodePayload(const RuntimeConfig& c, PersistedConfigPayload& p) {
   putStr(p.estBootstrapToken,sizeof(p.estBootstrapToken),c.estBootstrapToken);
   p.estBootstrapTokenConsumed=c.estBootstrapTokenConsumed;
   p.certLifecycleEnabled=c.certLifecycleEnabled;
+  putStr(p.staSsid,sizeof(p.staSsid),c.staSsid);
+  putStr(p.staPassword,sizeof(p.staPassword),c.staPassword);
 }
 
 bool decodePayload(const PersistedConfigPayload& p, RuntimeConfig& c) {
@@ -356,11 +375,23 @@ bool decodePayload(const PersistedConfigPayload& p, RuntimeConfig& c) {
   c.estPassword=getStr(p.estPassword,sizeof(p.estPassword));
   c.estBootstrapToken=getStr(p.estBootstrapToken,sizeof(p.estBootstrapToken));
   c.estBootstrapTokenConsumed=p.estBootstrapTokenConsumed!=0;
-  c.certLifecycleEnabled=p.certLifecycleEnabled!=0; return true;
+  c.certLifecycleEnabled=p.certLifecycleEnabled!=0;c.staSsid=getStr(p.staSsid,sizeof(p.staSsid));c.staPassword=getStr(p.staPassword,sizeof(p.staPassword)); return true;
 }
 
 bool generationNewer(uint32_t a,uint32_t b){return a!=b&&static_cast<int32_t>(a-b)>0;}
 bool readAtomicSlot(Preferences& p,const char* slot,const char* commit,AtomicConfigRecord& r){memset(&r,0,sizeof(r));if(p.getUChar(commit,0)!=ATOMIC_CONFIG_COMMIT)return false;if(p.getBytes(slot,&r,sizeof(r))!=sizeof(r))return false;return r.magic==ATOMIC_CONFIG_MAGIC&&r.schema==ATOMIC_CONFIG_SCHEMA&&r.payloadSize==sizeof(r.payload)&&r.generation!=0&&r.crc==atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));}
+bool readAtomicSlotV2(Preferences& p,const char* slot,const char* commit,PersistedConfigPayload& payload,uint32_t& generation){
+  AtomicConfigRecordV2 r{};
+  if(p.getUChar(commit,0)!=ATOMIC_CONFIG_COMMIT) return false;
+  if(p.getBytes(slot,&r,sizeof(r))!=sizeof(r)) return false;
+  if(r.magic!=ATOMIC_CONFIG_MAGIC || r.schema!=ATOMIC_CONFIG_SCHEMA_V2 ||
+     r.payloadSize!=sizeof(r.payload) || r.generation==0 ||
+     r.crc!=atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecordV2,crc))) return false;
+  memset(&payload,0,sizeof(payload));
+  memcpy(&payload,r.payload,sizeof(r.payload));
+  generation=r.generation;
+  return true;
+}
 
 bool validRuntimeConfig(const RuntimeConfig& c) {
   return c.validRadio()&&c.volume<=100&&c.audioRecordSource<=Config::AUDIO_SOURCE_USB&&c.audioRecordQuality<=2&&c.classDBoostLevel<=7&&c.wakePeriodSec>=Config::WAKE_PERIOD_SEC_MIN&&c.wakePeriodSec<=Config::WAKE_PERIOD_SEC_MAX&&(!c.classDEnabled||Config::CLASS_D_ENABLED)&&c.deepSleepIdleMs>=Config::DEEP_SLEEP_IDLE_MS_MIN&&c.deepSleepIdleMs<=Config::DEEP_SLEEP_IDLE_MS_MAX&&c.deepSleepWakeGraceMs>=100UL&&c.deepSleepWakeGraceMs<=60000UL&&c.criticalShutdownDelayMs>=100UL&&c.criticalShutdownDelayMs<=600000UL&&isfinite(c.batteryLowThreshold)&&isfinite(c.batteryCriticalThreshold)&&c.batteryCriticalThreshold>=Config::BATTERY_CRITICAL_THRESHOLD_MIN&&c.batteryLowThreshold>c.batteryCriticalThreshold&&c.batteryLowThreshold<=Config::BATTERY_LOW_THRESHOLD_MAX&&(!c.mqttEnabled||(!c.mqttHost.isEmpty()&&c.mqttHost.length()<=253&&c.mqttHost.indexOf('|')<0&&c.mqttPort!=0))&&c.mqttReconnectMinMs>=Config::MQTT_RECONNECT_MS_MIN&&c.mqttReconnectMaxMs>=c.mqttReconnectMinMs&&c.mqttReconnectMaxMs<=Config::MQTT_RECONNECT_MS_MAX&&c.mqttTelemetryPeriodMs>=Config::MQTT_TELEMETRY_PERIOD_MS_MIN&&c.mqttTelemetryPeriodMs<=Config::MQTT_TELEMETRY_PERIOD_MS_MAX&&c.mqttHealthPeriodMs>=1000UL&&c.mqttHealthPeriodMs<=86400000UL&&c.mqttCredentialRotationDays>=1&&c.mqttCredentialRotationDays<=3650&&c.voxThreshold>=0.005f&&c.voxThreshold<=1.0f&&c.voxHangMs>=50U&&c.voxHangMs<=10000U&&c.loraHopChannelProfile>=1&&c.loraHopChannelProfile<=Config::HOP_CHANNEL_MAX&&c.sensorScanIntervalMs>=100&&c.sensorScanIntervalMs<=60000&&c.sensorScanWindowMs>0&&c.sensorScanWindowMs<=c.sensorScanIntervalMs&&c.sensorScanDurationMs>=100&&c.sensorScanDurationMs<=60000&&c.sensorConnectTimeoutMs>=500&&c.sensorConnectTimeoutMs<=30000&&c.sensorNodeEvictionMs>=10000&&c.sensorNodeEvictionMs<=7UL*86400000UL&&c.sensorMaxNodes>=1&&c.sensorMaxNodes<=Config::SENSOR_MAX_NODES_VALUE&&c.blePairingFailureThreshold>=1&&c.blePairingFailureThreshold<=20&&c.blePairingBlockMs>=1000&&c.blePairingBlockMs<=86400000UL&&c.webSessionTimeoutMs>=Config::WEB_SESSION_TIMEOUT_MS_MIN&&c.webSessionTimeoutMs<=Config::WEB_SESSION_TIMEOUT_MS_MAX&&c.webAuthRateLimitMs>=Config::WEB_AUTH_RATE_LIMIT_MS_MIN&&c.webAuthRateLimitMs<=Config::WEB_AUTH_RATE_LIMIT_MS_MAX&&c.csrfPolicy<=1&&c.blePairingPolicy<=1&&c.ecdhRekeyPolicy<=1&&c.replayWindowBits>=Config::LORA_REPLAY_WINDOW_BITS_MIN&&c.replayWindowBits<=Config::LORA_REPLAY_WINDOW_BITS&&
@@ -368,18 +399,42 @@ bool validRuntimeConfig(const RuntimeConfig& c) {
     c.estAuthMode<=2&&c.estUsername.length()<=64&&c.estPassword.length()<=64&&c.estBootstrapToken.length()<=128&&
     (c.estAuthMode!=1 || (validEstCredential(c.estUsername,64) && validEstCredential(c.estPassword,64)))&&
     (c.estAuthMode!=2 || validEstCredential(c.estBootstrapToken,128) || c.estBootstrapTokenConsumed)&&
+    c.staSsid.length()<=Config::STA_SSID_MAX_LEN &&
+    ((c.staSsid.isEmpty() && c.staPassword.isEmpty()) ||
+     (!c.staSsid.isEmpty() && c.staPassword.length()>=Config::STA_PASSWORD_MIN_LEN &&
+      c.staPassword.length()<=Config::STA_PASSWORD_MAX_LEN)) &&
     c.certRenewalThresholdDays>=Config::CERT_RENEWAL_THRESHOLD_DAYS_MIN&&c.certRenewalThresholdDays<=Config::CERT_RENEWAL_THRESHOLD_DAYS_MAX&&
     c.certCheckPeriodMs>=3600000UL&&c.certCheckPeriodMs<=7UL*86400000UL&&
     (!c.certLifecycleEnabled || (c.estServerUrl.startsWith("https://") && c.estLabel.startsWith("/")))&&
     isfinite(c.batteryCalibration)&&c.batteryCalibration>=0.5f&&c.batteryCalibration<=1.5f&&c.validLoRaWAN()&&validCallsign(c.callsign)&&validHexKey(c.loraKeyHex)&&!c.apSsid.isEmpty()&&c.apSsid.length()<=32&&c.apPassword.length()>=8&&c.apPassword.length()<=63&&!c.webUser.isEmpty()&&c.webUser.length()<=32&&c.webPasswordConfigured();
 }
 
-bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation){
+bool saveAtomicConfig(const RuntimeConfig& source);
+bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation,bool* legacySchema=nullptr){
+  if (legacySchema) *legacySchema = false;
   Preferences p;
   if(!p.begin(NVS_NS,true)) return false;
   AtomicConfigRecord a{},b{};
   bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);
-  if(!va&&!vb){p.end();return false;}
+  if(!va&&!vb){
+    PersistedConfigPayload legacyPayloadA{}, legacyPayloadB{};
+    uint32_t legacyGenerationA=0, legacyGenerationB=0;
+    const bool lva=readAtomicSlotV2(p,NVS_SLOT_A,NVS_COMMIT_A,legacyPayloadA,legacyGenerationA);
+    const bool lvb=readAtomicSlotV2(p,NVS_SLOT_B,NVS_COMMIT_B,legacyPayloadB,legacyGenerationB);
+    if(!lva&&!lvb){p.end();return false;}
+    const PersistedConfigPayload& legacyPayload =
+        lva&&(!lvb||generationNewer(legacyGenerationA,legacyGenerationB)) ? legacyPayloadA : legacyPayloadB;
+    RuntimeConfig candidate=out;
+    if(!decodePayload(legacyPayload,candidate)) {p.end();return false;}
+    candidate.staSsid = Config::STA_SSID;
+    candidate.staPassword = Config::STA_PASSWORD;
+    if(!validRuntimeConfig(candidate)){p.end();return false;}
+    out=candidate;
+    generation=lva&&(!lvb||generationNewer(legacyGenerationA,legacyGenerationB)) ? legacyGenerationA : legacyGenerationB;
+    if (legacySchema) *legacySchema = true;
+    p.end();
+    return true;
+  }
   const AtomicConfigRecord* newest = va&&(!vb||generationNewer(a.generation,b.generation)) ? &a : &b;
   const AtomicConfigRecord* chosen = newest;
   const bool pending = p.getUChar(NVS_TXN_STATE, 0) == CONFIG_TXN_PENDING;
@@ -464,9 +519,33 @@ bool RuntimeConfig::validLoRaWAN() const {
 void RuntimeConfig::load() {
   uint32_t atomicGeneration = 0;
   RuntimeConfig atomicCandidate = *this;
-  if (loadAtomicConfig(atomicCandidate, atomicGeneration)) {
+  bool migratedLegacyAtomic = false;
+  if (loadAtomicConfig(atomicCandidate, atomicGeneration, &migratedLegacyAtomic)) {
+    bool migratedMqttTls = false;
+    if (migratedLegacyAtomic) {
+      // Schema-2 atomic payloads predate persistent STA credentials. The
+      // compile-time defaults above are retained until the complete schema-3
+      // record is committed below.
+      if (saveAtomicConfig(atomicCandidate)) {
+        atomicGeneration = gConfigGeneration.load(std::memory_order_acquire);
+      } else {
+        Serial.println("CONFIG MIGRATION: failed to upgrade atomic schema 2 -> 3");
+      }
+    }
+    if (Config::mqttTlsIsMandatory() && !atomicCandidate.mqttTlsRequired) {
+      atomicCandidate.mqttTlsRequired = true;
+      migratedMqttTls = true;
+      if (saveAtomicConfig(atomicCandidate)) {
+        atomicGeneration = gConfigGeneration.load(std::memory_order_acquire);
+      } else {
+        Serial.println("CONFIG MIGRATION: failed to persist mqtt_tls=true; runtime remains TLS-only");
+      }
+    }
     *this = atomicCandidate;
     gConfigGeneration.store(atomicGeneration, std::memory_order_release);
+    if (migratedMqttTls) {
+      Serial.println("CONFIG MIGRATION: mqtt_tls false -> true (production TLS mandatory)");
+    }
     Preferences recovery;
     if (recovery.begin(NVS_NS, false)) {
       (void)recovery.remove(NVS_TXN_STATE);
@@ -617,6 +696,8 @@ void RuntimeConfig::load() {
   candidate.mqttHost = savedMqttHost;
   candidate.mqttPort = savedMqttPort;
   candidate.mqttTlsRequired = savedMqttTls;
+  const bool migratedMqttTls = Config::mqttTlsIsMandatory() && !candidate.mqttTlsRequired;
+  if (migratedMqttTls) candidate.mqttTlsRequired = true;
   candidate.mqttReconnectMinMs = savedMqttRetryMin;
   candidate.mqttReconnectMaxMs = savedMqttRetryMax;
   candidate.mqttTelemetryPeriodMs = savedMqttTelemetry;
@@ -829,12 +910,17 @@ void RuntimeConfig::load() {
   // One-time migration: remove the legacy plaintext web password from NVS.
   // Runtime memory may temporarily contain the password because HTTP Basic
   // authentication still needs the cleartext value until the next reboot.
-  if (!webPassword.isEmpty()) {
-    (void)save();
-  } else if (version == 4) {
-    (void)save();
-  } else if (version != CONFIG_VERSION && webPasswordConfigured()) {
-    (void)save();
+  const bool needsSave = !webPassword.isEmpty() ||
+                         version == 4 ||
+                         (version != CONFIG_VERSION && webPasswordConfigured()) ||
+                         migratedMqttTls;
+  if (needsSave) {
+    const bool saved = save();
+    if (migratedMqttTls) {
+      Serial.println(saved
+          ? "CONFIG MIGRATION: mqtt_tls false -> true (production TLS mandatory)"
+          : "CONFIG MIGRATION: mqtt_tls false -> true; persistence failed, runtime remains TLS-only");
+    }
   }
 }
 
