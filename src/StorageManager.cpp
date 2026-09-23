@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cmath>
 #include <zlib.h>
+#include <esp_heap_caps.h>
 
 bool StorageManager::begin() {
   if (!SD.begin(Board::SD_CS, SPI, 20000000U)) {
@@ -362,8 +363,6 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
       epsilonMeters <= 0.0) return "[]";
   struct Point { uint64_t epoch; uint32_t ms; double lat; double lon; double alt; uint32_t sat; };
   static constexpr size_t MAX_POINTS = 5000;
-  Point points[MAX_POINTS] = {};
-  size_t n = 0;
 
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return "[]";
@@ -372,6 +371,25 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
     if (f) f.close();
     return "[]";
   }
+
+  const size_t pointCapacity = min(limit, MAX_POINTS);
+  Point* points = static_cast<Point*>(
+      heap_caps_malloc(pointCapacity * sizeof(Point), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  uint8_t* keep = static_cast<uint8_t*>(
+      heap_caps_malloc(pointCapacity * sizeof(uint8_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  struct Range { size_t a, b; };
+  Range* stack = static_cast<Range*>(
+      heap_caps_malloc((pointCapacity + 1) * sizeof(Range), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (!points || !keep || !stack) {
+    if (points) heap_caps_free(points);
+    if (keep) heap_caps_free(keep);
+    if (stack) heap_caps_free(stack);
+    return "[]";
+  }
+  memset(points, 0, pointCapacity * sizeof(Point));
+  memset(keep, 0, pointCapacity * sizeof(uint8_t));
+  size_t n = 0;
+
   while (f.available() && n < min(limit, MAX_POINTS)) {
     String line = f.readStringUntil('\n');
     line.trim();
@@ -400,13 +418,13 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
              ",\"sat\":" + String(points[i].sat) + "}";
     }
     out += "]";
+    heap_caps_free(points);
+    heap_caps_free(keep);
+    heap_caps_free(stack);
     return out;
   }
 
-  bool keep[MAX_POINTS] = {};
-  keep[0] = keep[n - 1] = true;
-  struct Range { size_t a, b; };
-  Range stack[MAX_POINTS];
+  keep[0] = keep[n - 1] = 1;
   size_t sp = 0;
   stack[sp++] = {0, n - 1};
   const double rad = 0.017453292519943295;
@@ -438,9 +456,21 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
       if (dist > maxDist) { maxDist = dist; index = i; }
     }
     if (maxDist > epsilonMeters) {
-      keep[index] = true;
-      if (index > r.a + 1) stack[sp++] = {r.a, index};
-      if (r.b > index + 1) stack[sp++] = {index, r.b};
+      keep[index] = 1;
+      if (index > r.a + 1) {
+        if (sp >= pointCapacity + 1) {
+          heap_caps_free(points); heap_caps_free(keep); heap_caps_free(stack);
+          return "[]";
+        }
+        stack[sp++] = {r.a, index};
+      }
+      if (r.b > index + 1) {
+        if (sp >= pointCapacity + 1) {
+          heap_caps_free(points); heap_caps_free(keep); heap_caps_free(stack);
+          return "[]";
+        }
+        stack[sp++] = {index, r.b};
+      }
     }
   }
 
@@ -458,5 +488,8 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
            ",\"sat\":" + String(points[i].sat) + "}";
   }
   out += "]";
+  heap_caps_free(points);
+  heap_caps_free(keep);
+  heap_caps_free(stack);
   return out;
 }
