@@ -946,7 +946,7 @@ bool WebUi::issueSession() {
   server_.sendHeader("Set-Cookie",
       "FR-SESSION=" + hex + "; Max-Age=" +
       String(config.webSessionTimeoutMs / 1000) +
-      "; HttpOnly; Secure; SameSite=Strict");
+      "; Path=/; HttpOnly; Secure; SameSite=Strict");
 
   return true;
 }
@@ -968,7 +968,7 @@ void WebUi::auditAuth(bool success) {
   }
   if (f) {
     const uint32_t now = millis();
-    f.printf("%lu,%s,%s\\n",
+    f.printf("%lu,%s,%s\n",
              static_cast<unsigned long>(now),
              server_.client().remoteIP().toString().c_str(),
              success ? "AUTH_OK" : "AUTH_FAIL");
@@ -3501,7 +3501,7 @@ void WebUi::handleConfig() {
     const String raw = server_.arg("vox_threshold");
     char* end = nullptr;
     const float threshold = strtof(raw.c_str(), &end);
-    if (!end || *end != '\\0' || !isfinite(threshold)) {
+    if (!end || *end != '\0' || !isfinite(threshold)) {
       server_.send(400, "text/plain", "invalid VOX threshold"); return;
     }
     candidate.voxThreshold = threshold;

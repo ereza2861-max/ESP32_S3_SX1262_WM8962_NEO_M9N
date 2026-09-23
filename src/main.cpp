@@ -580,7 +580,7 @@ static void enterDeepSleep() {
       static_cast<uint64_t>(config.wakePeriodSec) * 1000000ULL;
   const esp_err_t timerWakeErr = esp_sleep_enable_timer_wakeup(wakePeriodUs);
   if (timerWakeErr != ESP_OK)
-    Serial.printf("POWER: failed to configure GNSS time-sync wake (%lus): %s\\n",
+    Serial.printf("POWER: failed to configure GNSS time-sync wake (%lus): %s\n",
                   static_cast<unsigned long>(config.wakePeriodSec),
                   esp_err_to_name(timerWakeErr));
 
@@ -588,7 +588,7 @@ static void enterDeepSleep() {
     const esp_err_t wakeErr =
         esp_sleep_enable_ext1_wakeup(wakeMask, ESP_EXT1_WAKEUP_ANY_HIGH);
     if (wakeErr != ESP_OK)
-      Serial.printf("POWER: failed to configure EXT1 wake: %d\\n", wakeErr);
+      Serial.printf("POWER: failed to configure EXT1 wake: %d\n", wakeErr);
   }
 
   if (!lora.prepareForDeepSleep()) {
