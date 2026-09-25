@@ -17,7 +17,8 @@ PROJECT_PATH := $(abspath $(PROJECT_DIR))
 PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 
 .PHONY: all build build-log ci-build sensor-node-build clean upload monitor provision check-provisioning \
-        preflight check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci auth-help info help         test test-hil fuzz failure-inject secure-boot-keys
+        preflight check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci \
+        auth-help info help test test-hil fuzz failure-inject secure-boot-keys security-profile
 
 GH ?= gh
 CI_WORKFLOW ?= compile.yml
@@ -100,7 +101,9 @@ download-ci:
 
 
 test:
-	@set -eu; 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; 	$(PIO) -d "$(PROJECT_PATH)" test -e native
+	@set -eu; \
+	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
+	$(PIO) -d "$(PROJECT_PATH)" test -e native
 
 test-hil:
 	@echo "HIL is manual hardware validation; see test/hil/*.md"

@@ -78,8 +78,10 @@ private:
   uint32_t apStartedAtMs_ = 0;
   uint32_t lastClientSeenMs_ = 0;
 
-  String wifiSsid_;       // loaded from NVS by main.cpp before begin()
-  String wifiPassword_;   // loaded from NVS by main.cpp before begin()
-  String otaPassword_;    // loaded from NVS by main.cpp before begin()
+  // Loaded by loadState() from the "ota" NVS namespace. The legacy SSID and
+  // Wi-Fi password are retained for compatibility but are not used for STA OTA.
+  String wifiSsid_;
+  String wifiPassword_;
+  String otaPassword_;
   String lastClientIp_;
 };

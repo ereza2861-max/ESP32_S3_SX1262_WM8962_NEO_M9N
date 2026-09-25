@@ -8,8 +8,9 @@
 // ProfileSensors owns the per-profile sensor roster: which drivers are
 // instantiated, on which interface, with which stable sensor ID.
 //
-// STEP 3 implements Profile 0 (Island/Sea) only. Profiles 1..3 return a
-// well-defined "not implemented" result rather than fabricating a roster.
+// The current implementation contains source-level rosters for all four
+// profiles. Placeholder drivers remain stale/invalid rather than fabricating
+// measurements when a hardware-specific protocol is not implemented.
 //
 // Design constraints (from artifact-goal.md):
 //   - No hidden architectural decisions: every driver type used here is
