@@ -1,5 +1,6 @@
 #include "BleSensorServer.h"
 #include "Config.h"
+#include "SensorProtocol.h"
 #include "NimBLEDevice.h"
 #include <Preferences.h>
 #include <esp_system.h>

@@ -3,24 +3,104 @@
 PlatformIO project for the BLE peripheral/counterpart of the gateway `SensorProtocol.h`.
 The canonical wire contract is `../shared/SensorProtocol.h`; do not create a second copy.
 
-## Hardware example
+## Profile hardware contract
 
-| Function | ESP32-C3 DevKitM-1 default |
+The sensor node has four mutually exclusive profiles selected by the two-bit DIP switch during
+prototype operation. In production, the DIP switch is replaced by a solder-jumper configuration.
+Only one profile's sensor cabling is installed at a time; changing profile means physically
+unplugging the previous profile's sensor cables and installing the new profile's PCB/cabling.
+Pin overlap between different profiles is therefore intentional. The MFRC522 RFID reader is the
+shared exception and must not be overlapped by profile-specific wiring.
+
+Profile rosters are source-level contracts and are not physical validation evidence. Sensor models,
+I2C addresses, UART/SDI-12 protocol variants, ADC calibration, and time-shared GPIO behavior still
+require hardware verification where marked as placeholders.
+
+- **Profile 0 — Island/Sea:** six sensors; GPIO3/GPIO4 are the two ADC1 channels used by the
+  wave and turbidity inputs. Legacy battery monitoring is not part of this profile.
+- **Profile 1 — Tropical Forest:** twelve sensors, at the current registry limit; three DS18B20
+  channels share OneWire GPIO3 and the rain gauge uses the I2C bus at the locked placeholder
+  address `RAIN_GAUGE_I2C_ADDRESS = 0x28`.
+- **Profile 2 — Volcanic Mountain:** eight sensors. GPIO3 is time-shared between the wind-vane
+  ADC and the ADXL355 chip-select; GPIO11 is used for the wind-pulse input. The integration layer
+  must serialize the two GPIO3 modes and allow the ADC to settle before sampling.
+- **Profile 3 — Sub-Zero Snow:** nine sensors using UART/SDI-12 and I2C substitutions where
+  dedicated ADC/pulse pins are unavailable. GPIO3 is shared by the optional DS18B20 OneWire bus
+  and ADXL355 CS; the estimated pull-up leakage is a **hardware-validation-required** item.
+
+No profile implementation should fabricate a sensor reading when its hardware-specific parser or
+calibration is not implemented; such drivers report stale quality instead.
+## ESP32-S3 LoRa/gateway OTA design
+
+The ESP32-S3 LoRa/gateway node has NO OTA by explicit design.
+
+## Pin map
+
+| Function | Pin |
 |---|---:|
-| BME280 SDA | GPIO8 |
-| BME280 SCL | GPIO9 |
-| BME280 VCC/GND | 3.3 V / GND |
-| Battery divider ADC | GPIO4 |
-| Button/reed input | GPIO5 to GND, internal pull-up |
+| DIP bit0 | GPIO0 |
+| DIP bit1 | GPIO1 |
+| MFRC522 CS | GPIO7 |
+| MFRC522 SCK | GPIO6 |
+| MFRC522 MOSI | GPIO5 |
+| MFRC522 MISO | GPIO4 |
+| I2C SDA | GPIO8 |
+| I2C SCL | GPIO9 |
+| Button / long-press | GPIO10 |
+| Wind pulse | GPIO11 |
+| UART1 RX | GPIO18 |
+| UART1 TX | GPIO19 |
+| RFID RST | GPIO20 |
+| Buzzer | GPIO21 |
 
-The firmware uses calibrated `analogReadMilliVolts()` with 11 dB attenuation for
-the battery ADC and applies `BATTERY_DIVIDER_RATIO` in software. Never expose a
-voltage above the ESP32-C3 ADC/input limits. GPIO2 is excluded because it is a
-strapping pin; interactive provisioning also rejects flash/USB-JTAG/strapping
-GPIOs.
+All pin assignments are source-level only and NOT PHYSICALLY VALIDATED.
 
-The example registers up to five sensors: temperature, humidity, pressure, battery voltage,
-and a digital/reed input. The registry itself supports eight descriptors.
+## Sensor profiles
+
+| Profile | Roster count | ID range | Status |
+|---|---:|---|---|
+| Profile 0 — Island/Sea | 6 | 0x0100..0x0105 | Source-level roster; hardware/protocol validation remains required |
+| Profile 1 — Tropical Forest | 12 | 0x0200..0x020B | Exact fit at MAX_SENSORS; hardware/protocol validation remains required |
+| Profile 2 — Volcanic Mountain | 8 | 0x0300..0x0307 | Source-level roster; GPIO3 time-sharing requires hardware validation |
+| Profile 3 — Sub-Zero Snow | 9 | 0x0400..0x0408 | Source-level roster; GPIO3 leakage requires hardware validation |
+
+Profile 1 is an exact 12-sensor fit at MAX_SENSORS.
+
+## Button long-press
+
+GPIO10 is the button input. A confirmed 1.5 s long press toggles the OTA
+AP through OtaApManager.
+
+## OTA over Wi-Fi AP
+
+- Trigger: physical button long-press.
+- AP: open, with a 10-minute window.
+- Upload: requires the OTA password provisioned from serial.
+- Partitions: unchanged; available headroom is NOT VERIFIED.
+- ESP32-S3: has NO OTA.
+
+## Build and test
+
+```text
+pio run -e esp32-c3-devkitm-1
+pio test -e native_test_profile
+pio test -e native_test_registry
+```
+
+## Unresolved gaps and NOT VERIFIED items
+
+See docs/INTEGRATION_NOTES.md.
+
+The following remain NOT VERIFIED:
+- pin assignments are NOT PHYSICALLY VALIDATED;
+- I2C addresses;
+- GPIO3 time-share contracts;
+- GPIO3 pull-up leakage;
+- placeholder drivers;
+- rain gauge address 0x28;
+- binary size / partition headroom;
+- ESP32-S3 no-OTA design.
+
 
 ## GATT contract
 
@@ -49,20 +129,28 @@ The PlatformIO environment is `esp32-c3-devkitm-1` with Arduino and NimBLE-Ardui
 
 ## OTA firmware update
 
-The ESP32-C3 sensor node owns its OTA lifecycle independently of the ESP32-S3 gateway. OTA uses the ArduinoOTA network transport with a per-device provisioned password and a dedicated dual-application partition table. The ESP32-S3 does not store or execute the C3 firmware image.
+OTA is **ESP32-C3 sensor-node only**. The ESP32-S3 LoRa/gateway target must not receive ArduinoOTA,
+Web OTA, OTA partitions, or an indirect OTA path through shared code. The ESP32-C3 partition table
+remains unchanged by this feature.
 
-Provision the node locally before enabling OTA:
+The C3 uses `OtaApManager` and a local Wi-Fi AP. The AP is opened only by the physical long-press
+button path (or an explicitly persisted AP-enabled state), is bounded by a 10-minute provisioning
+window, and requires the already-provisioned OTA password for firmware upload. The open AP itself
+does not grant upload authorization and the WebUI does not accept a new OTA password.
+
+The historical `wifi ssid` / `wifi pass` serial fields are retained only as NVS data for compatibility
+with the existing provisioning namespace; they are not used to create a station-mode OTA connection.
+
+Provision the OTA password locally over the serial console:
 
 ```text
-wifi ssid <ssid>
-wifi pass <password>
 ota password <12..64 character secret>
 ota save
 ```
 
-The node reconnects as a Wi-Fi station at boot and exposes ArduinoOTA only after a successful connection and valid stored OTA password. A failed Wi-Fi connection does not stop sensor/BLE operation. Do not expose OTA to an untrusted network; use an isolated management network and production flash-encryption/secure-boot provisioning where required by the deployment security policy.
-
-The OTA image is written to the inactive application slot. The bootloader selects the new slot after a successful transfer, so an interrupted transfer does not overwrite the running application. Automatic application rollback is not enabled by this patch; production validation should include boot-failure recovery before deployment.
+Use an isolated maintenance environment for OTA. An open AP is not a confidentiality boundary, and
+production security acceptance still requires the repository's secure-boot/flash-encryption and HIL
+procedures where applicable.
 
 ## Serial provisioning
 

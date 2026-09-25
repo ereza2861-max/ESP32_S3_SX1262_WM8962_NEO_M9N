@@ -1,8 +1,11 @@
 #include "SensorDriverRegistry.h"
 #include "Config.h"
+#include "ProfileConfig.h"
 #include <Adafruit_BME280.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <cmath>
 #include <cfloat>
 #include <cstring>
@@ -251,6 +254,319 @@ private:
   DriverConfig config_{};
 };
 
+// ---------------------------------------------------------------------------
+// STEP 3 driver additions. Each driver is intentionally minimal: it reads one
+// value and returns it with a quality flag. Calibration, temperature
+// compensation, and environmental rating checks are caller responsibilities
+// and are marked NOT VERIFIED in README.
+// ---------------------------------------------------------------------------
+
+class GenericAdcDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    analogReadResolution(12);
+    analogSetPinAttenuation(config_.pinSda, ADC_11db);
+    return true;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::GENERIC;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    const uint32_t mv = analogReadMilliVolts(config_.pinSda);
+    // Caller supplied scale/offset via descriptor; the driver returns volts.
+    // A zero reading is treated as stale (disconnected or floating pin).
+    value = static_cast<float>(mv) / 1000.0f;
+    quality = mv == 0 ? SensorProtocol::QUALITY_STALE
+                      : SensorProtocol::QUALITY_VALID;
+    return mv != 0;
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    std::strncpy(d.name, "generic_adc", sizeof(d.name) - 1);
+    std::strncpy(d.unit, "V", sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = 0.0f;
+    d.max = 3.3f;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+private:
+  DriverConfig config_{};
+};
+
+class GenericUartDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    // UART instances are owned by the profile, not this driver. The driver
+    // only validates the configuration and delegates I/O to a caller-supplied
+    // SerialX. STEP 3 does not open any UART here to avoid pin conflicts.
+    return config_.periodMs > 0;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::GENERIC;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    // Placeholder: the profile-specific read must be implemented by the
+    // caller that owns the UART peripheral. Return stale rather than fabricate
+    // a value. STEP 3 intentionally does NOT invent UART protocols.
+    value = 0.0f;
+    quality = SensorProtocol::QUALITY_STALE;
+    return false;
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    std::strncpy(d.name, "generic_uart", sizeof(d.name) - 1);
+    std::strncpy(d.unit, "raw", sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = -FLT_MAX;
+    d.max = FLT_MAX;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+private:
+  DriverConfig config_{};
+};
+
+class AtlasEzoDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    Wire.begin(config_.pinSda, config_.pinScl);
+    Wire.setClock(ProfileConfig::PROFILE0_I2C_HZ);
+    ready_ = probe();
+    return ready_;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::GENERIC;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    if (!ready_) {
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      return false;
+    }
+    // Atlas EZO I2C command protocol: send 'R' to request a reading, wait for
+    // the device to process, then read the response. STEP 3 sends the request
+    // only; parsing the response is deferred until a hardware sample is
+    // available. This avoids fabricating a protocol parser against an
+    // unverified device.
+    Wire.beginTransmission(config_.i2cAddr);
+    Wire.write('R');
+    const uint8_t txResult = Wire.endTransmission();
+    if (txResult != 0) {
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      ready_ = false;
+      return false;
+    }
+    value = 0.0f;
+    quality = SensorProtocol::QUALITY_STALE;
+    return false;  // Response parser NOT VERIFIED until hardware is present.
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    // config_.registerAddr selects the Atlas device family:
+    //   0 = EC (salinity/conductivity), 1 = pH
+    const bool isPh = config_.registerAddr == 1;
+    std::strncpy(d.name, isPh ? "water_ph" : "water_ec", sizeof(d.name) - 1);
+    std::strncpy(d.unit, isPh ? "pH" : "uS/cm", sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = isPh ? 0.0f : 0.0f;
+    d.max = isPh ? 14.0f : 100000.0f;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+private:
+  bool probe() {
+    Wire.beginTransmission(config_.i2cAddr);
+    return Wire.endTransmission() == 0;
+  }
+
+  DriverConfig config_{};
+  bool ready_ = false;
+};
+
+struct OneWireBusEntry {
+  int pin = -1;
+  OneWire* bus = nullptr;
+  DallasTemperature* sensors = nullptr;
+  size_t refCount = 0;
+};
+constexpr size_t ONEWIRE_POOL_MAX = 4;
+OneWireBusEntry gOneWirePool[ONEWIRE_POOL_MAX];
+
+OneWireBusEntry* acquireOneWireBus(int pin) {
+  for (auto& e : gOneWirePool) if (e.bus && e.pin == pin) { ++e.refCount; return &e; }
+  for (auto& e : gOneWirePool) if (!e.bus) {
+    e.pin = pin; e.bus = new OneWire(pin); e.sensors = new DallasTemperature(e.bus);
+    e.sensors->begin(); e.refCount = 1; return &e;
+  }
+  return nullptr;
+}
+
+void releaseOneWireBus(int pin) {
+  for (auto& e : gOneWirePool) if (e.bus && e.pin == pin) {
+    if (e.refCount) --e.refCount;
+    if (!e.refCount) { delete e.sensors; delete e.bus; e = OneWireBusEntry{}; }
+    return;
+  }
+}
+
+class OneWireTempDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    OneWireBusEntry* entry = acquireOneWireBus(config_.pinSda);
+    if (!entry) return false;
+    bus_ = entry->bus;
+    sensors_ = entry->sensors;
+    if (!sensors_ || sensors_->getDeviceCount() <= config_.channel) {
+      releaseOneWireBus(config_.pinSda);
+      bus_ = nullptr; sensors_ = nullptr;
+      return false;
+    }
+    // The channel identifies which device on the shared OneWire bus this
+    // driver instance reads. Actual device resolution is deferred until a
+    // hardware sample confirms the ROM layout; STEP 3 does not assume any
+    // ROM ordering.
+    return sensors_ != nullptr && sensors_->getDeviceCount() > config_.channel;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::TEMPERATURE;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    if (!sensors_) {
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      return false;
+    }
+    sensors_->requestTemperatures();
+    const float t = sensors_->getTempCByIndex(config_.channel);
+    if (t == DEVICE_DISCONNECTED_C || !std::isfinite(t)) {
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      return false;
+    }
+    value = t;
+    quality = SensorProtocol::QUALITY_VALID;
+    return true;
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    // registerAddr selects the semantic role:
+    //   0 = water temperature (Profile 0)
+    //   1 = soil temperature (Profile 1, future)
+    const bool isSoil = config_.registerAddr == 1;
+    std::strncpy(d.name, isSoil ? "soil_temp" : "water_temp",
+                 sizeof(d.name) - 1);
+    std::strncpy(d.unit, "degC", sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = isSoil ? -20.0f : -10.0f;
+    d.max = isSoil ? 60.0f : 50.0f;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+public:
+  ~OneWireTempDriver() override {
+    if (bus_) releaseOneWireBus(config_.pinSda);
+  }
+
+private:
+  OneWire* bus_ = nullptr;
+  DallasTemperature* sensors_ = nullptr;
+  DriverConfig config_{};
+};
+
+struct PulseSlot {
+  volatile uint32_t count = 0;
+  volatile uint32_t lastEdgeUs = 0;
+  uint32_t debounceUs = 2000;
+  bool attached = false;
+  int pin = -1;
+};
+PulseSlot gPulseSlots[SensorDriverRegistry::MAX_DRIVERS];
+void IRAM_ATTR pulseIsrHandler(void* arg) {
+  auto* slot = static_cast<PulseSlot*>(arg);
+  if (!slot) return;
+  const uint32_t nowUs = micros();
+  if (slot->lastEdgeUs && static_cast<uint32_t>(nowUs-slot->lastEdgeUs) < slot->debounceUs) return;
+  slot->lastEdgeUs = nowUs; ++slot->count;
+}
+
+class PulseCounterDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    if (config_.pinSda < 0 || config_.pinSda > 21 || config_.pinSda == 2) return false;
+    for (auto& s : gPulseSlots) if (!s.attached) { slot_=&s; break; }
+    if (!slot_) return false;
+    slot_->pin=config_.pinSda; slot_->count=0; slot_->lastEdgeUs=0; slot_->attached=true;
+    pinMode(slot_->pin, INPUT_PULLUP);
+    attachInterruptArg(digitalPinToInterrupt(slot_->pin), pulseIsrHandler, slot_, FALLING);
+    return true;
+  }
+  ~PulseCounterDriver() override {
+    if (slot_ && slot_->attached) { detachInterrupt(digitalPinToInterrupt(slot_->pin)); slot_->attached=false; slot_->pin=-1; }
+  }
+  SensorProtocol::SensorType type() const override { return SensorProtocol::SensorType::GENERIC; }
+  uint16_t sensorId() const override { return config_.sensorId; }
+  bool read(float& value, uint8_t& quality) override {
+    if (!slot_) { value=0; quality=SensorProtocol::QUALITY_STALE; return false; }
+    noInterrupts(); const uint32_t pulses=slot_->count; slot_->count=0; interrupts();
+    const float perPulse=config_.dataWidth?static_cast<float>(config_.dataWidth):1.0f;
+    value=pulses*perPulse; quality=SensorProtocol::QUALITY_VALID; return true;
+  }
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{}; d.id=config_.sensorId; d.type=(uint8_t)type();
+    const bool wind=config_.registerAddr==1; std::strncpy(d.name,wind?"wind_run":"rain",sizeof(d.name)-1);
+    std::strncpy(d.unit,wind?"m":"mm",sizeof(d.unit)-1); d.datatype=(uint8_t)SensorProtocol::SensorDataType::FLOAT32;
+    d.scale=1; d.offset=0; d.min=0; d.max=wind?10000:500; d.periodMs=config_.periodMs; d.flags=SensorProtocol::FLAG_ENABLED; return d;
+  }
+private: DriverConfig config_{}; PulseSlot* slot_=nullptr;
+};
+
 }  // namespace
 
 uint32_t SensorDriverRegistry::crc32(const uint8_t* data, size_t len) {
@@ -265,7 +581,7 @@ uint32_t SensorDriverRegistry::crc32(const uint8_t* data, size_t len) {
 
 bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
   if (config.sensorId == 0 || config.periodMs == 0 || config.periodMs > 86400000UL) return false;
-  if (config.driverType < DRIVER_BME280 || config.driverType > DRIVER_GENERIC_I2C) return false;
+  if (config.driverType < DRIVER_BME280 || config.driverType > DRIVER_PULSE_COUNTER) return false;
   if (config.pinSda > 21 || config.pinScl > 21) return false;
   if (config.driverType == DRIVER_BME280) {
     if (config.i2cAddr < 0x08 || config.i2cAddr > 0x77 || config.registerAddr > 2) return false;
@@ -277,6 +593,21 @@ bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
     if (config.i2cAddr < 0x08 || config.i2cAddr > 0x77 ||
         (config.dataWidth != 1 && config.dataWidth != 2 && config.dataWidth != 4))
       return false;
+  } else if (config.driverType == DRIVER_GENERIC_ADC) {
+    // ADC1 on ESP32-C3 is GPIO0..4. GPIO2 is a strapping pin and is excluded.
+    if (config.pinSda > 4 || config.pinSda == 2) return false;
+  } else if (config.driverType == DRIVER_GENERIC_UART) {
+    // UART pins are not validated here; the profile owns the SerialX mapping.
+    if (config.dataWidth == 0) return false;
+  } else if (config.driverType == DRIVER_ATLAS_EZO) {
+    if (config.i2cAddr < 0x08 || config.i2cAddr > 0x77) return false;
+    if (config.registerAddr > 1) return false;  // 0=EC, 1=pH
+  } else if (config.driverType == DRIVER_ONEWIRE_TEMP) {
+    if (config.pinSda == 2 || config.pinSda > 21) return false;
+    if (config.channel > 7) return false;
+  } else if (config.driverType == DRIVER_PULSE_COUNTER) {
+    if (config.pinSda == 2 || config.pinSda > 21) return false;
+    if (config.registerAddr > 1 || config.dataWidth > 100) return false;
   }
   return true;
 }
@@ -287,6 +618,11 @@ SensorDriver* SensorDriverRegistry::createDriver(const DriverConfig& config) {
     case DRIVER_BATTERY_ADC: return new BatteryAdcDriver();
     case DRIVER_DIGITAL_INPUT: return new DigitalInputDriver();
     case DRIVER_GENERIC_I2C: return new GenericI2cDriver();
+    case DRIVER_GENERIC_ADC: return new GenericAdcDriver();
+    case DRIVER_GENERIC_UART: return new GenericUartDriver();
+    case DRIVER_ATLAS_EZO: return new AtlasEzoDriver();
+    case DRIVER_ONEWIRE_TEMP: return new OneWireTempDriver();
+    case DRIVER_PULSE_COUNTER: return new PulseCounterDriver();
     default: return nullptr;
   }
 }

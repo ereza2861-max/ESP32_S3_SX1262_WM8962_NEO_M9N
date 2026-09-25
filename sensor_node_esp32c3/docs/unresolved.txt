@@ -1,0 +1,5 @@
+Unresolved decisions / blockers
+Ada tiga hal yang tidak boleh saya tebak pada patch berikutnya:
+GPIO mapping untuk DIP switch, buzzer, button, dan MFRC522 belum ditetapkan oleh current C3 hardware evidence. Ini ARCHITECTURAL/HARDWARE DECISION REQUIRED bila implementasi membutuhkan pin konkret.
+Physical validation sensor belum tersedia. Driver/interface dapat dibuat berdasarkan model sensor yang sudah ditetapkan prompt, tetapi kompatibilitas listrik, ADC range, calibration, dan environmental rating harus tetap NOT VERIFIED.
+Kapasitas registry multi-instance membutuhkan desain yang menjaga BLE wire contract dan persistence semantics. Ini bukan perubahan MAX_SENSORS satu baris.

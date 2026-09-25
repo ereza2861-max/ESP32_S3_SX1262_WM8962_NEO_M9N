@@ -1,4 +1,6 @@
 # FieldRadio build entry point.
+# Use POSIX /bin/sh so Make targets also work on minimal Unix environments.
+SHELL := /bin/sh
 #
 # Requirements:
 #   - PlatformIO CLI (`pio`) on PATH
@@ -49,9 +51,14 @@ sensor-node-build:
 	$(PIO) -d "$(PROJECT_PATH)/sensor_node_esp32c3" run -e sensor_node_c3
 
 build-log: check-provisioning
-	@set -o pipefail; \
+	@set -eu; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
-	$(PIO_RUN) 2>&1 | tee "$(PROJECT_PATH)/build.log"
+	log="$(PROJECT_PATH)/build.log"; \
+	set +e; \
+	$(PIO_RUN) >"$$log" 2>&1; \
+	pio_status=$$?; \
+	cat "$$log"; \
+	exit "$$pio_status"
 
 download-artifacts:
 	@$(gh_check); \

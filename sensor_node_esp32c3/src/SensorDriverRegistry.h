@@ -8,11 +8,17 @@
 
 class SensorDriverRegistry {
 public:
-  static constexpr size_t MAX_DRIVERS = 8;
+  // STEP 3: raised from 8 to 12 to match SensorRegistry::MAX_SENSORS.
+  static constexpr size_t MAX_DRIVERS = 12;
   static constexpr uint8_t DRIVER_BME280 = 1;
   static constexpr uint8_t DRIVER_BATTERY_ADC = 2;
   static constexpr uint8_t DRIVER_DIGITAL_INPUT = 3;
   static constexpr uint8_t DRIVER_GENERIC_I2C = 4;
+  static constexpr uint8_t DRIVER_GENERIC_ADC = 5;
+  static constexpr uint8_t DRIVER_GENERIC_UART = 6;
+  static constexpr uint8_t DRIVER_ATLAS_EZO = 7;
+  static constexpr uint8_t DRIVER_ONEWIRE_TEMP = 8;
+  static constexpr uint8_t DRIVER_PULSE_COUNTER = 9;
   static constexpr uint16_t FLAG_SIGNED = 1U << 0;
   static constexpr uint16_t FLAG_LITTLE_ENDIAN = 1U << 1;
   static constexpr uint16_t FLAG_REGISTER_16BIT = 1U << 2;
