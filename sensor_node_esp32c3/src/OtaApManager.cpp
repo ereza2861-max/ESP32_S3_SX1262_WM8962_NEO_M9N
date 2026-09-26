@@ -9,6 +9,7 @@
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <Update.h>
+#include <cctype>
 #include "webui_html.h"
 
 namespace {
@@ -18,6 +19,7 @@ constexpr uint16_t AP_PORT = 80;
 constexpr const char* AP_SSID_PREFIX = "FieldRadio-Sensor-";
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
+constexpr char PROFILE_CABLES_HEADER[] = "X-Profile-Cables-Changed";
 
 bool validOtaPassword(const String& value) {
   if (value.length() < OTA_PASSWORD_MIN_LEN ||
@@ -32,6 +34,35 @@ bool validOtaPassword(const String& value) {
 }
 
 WebServer* gServer = nullptr;
+
+bool parseProfileBody(const String& body, uint8_t& profile) {
+  String value = body;
+  value.trim();
+  if (!value.startsWith("{") || !value.endsWith("}")) return false;
+
+  const int key = value.indexOf("\"profile\"");
+  if (key < 0) return false;
+  const int colon = value.indexOf(':', key + 9);
+  if (colon < 0) return false;
+
+  size_t pos = static_cast<size_t>(colon + 1);
+  while (pos < value.length() && isspace(static_cast<unsigned char>(value[pos]))) ++pos;
+  if (pos >= value.length() || value[pos] < '0' || value[pos] > '3') return false;
+
+  const uint8_t parsed = static_cast<uint8_t>(value[pos] - '0');
+  ++pos;
+  while (pos < value.length() && isspace(static_cast<unsigned char>(value[pos]))) ++pos;
+  if (pos >= value.length() || value[pos] != '}') return false;
+
+  // Only the documented {profile: 0..3} payload is accepted.
+  const String prefix = value.substring(0, key);
+  if (prefix.indexOf('"') >= 0) return false;
+  const String suffix = value.substring(pos + 1);
+  if (suffix.length() != 0) return false;
+
+  profile = parsed;
+  return true;
+}
 
 // ArduinoOTA callbacks are free functions required by the ArduinoOTA API.
 void onOtaStart() {
@@ -107,6 +138,9 @@ bool OtaApManager::startAp() {
   gServer->on("/update", HTTP_POST,
               [this]() { handleUploadDone(); },
               [this]() { handleUpload(); });
+  gServer->on("/profile", HTTP_POST, [this]() { handleProfile(); });
+  const char* headerKeys[] = {PROFILE_CABLES_HEADER};
+  gServer->collectHeaders(headerKeys, 1);
   gServer->begin();
 
   ArduinoOTA.setHostname(ssid.c_str());
@@ -195,6 +229,38 @@ void OtaApManager::handleStatus() {
   j += ",\"otaReady\":" + String(otaPassword_.isEmpty() ? "false" : "true");
   j += "}";
   gServer->send(200, "application/json", j);
+}
+
+void OtaApManager::handleProfile() {
+  if (!gServer) return;
+  if (!profileChangeCallback_) {
+    gServer->send(503, "application/json",
+                  "{\"ok\":false,\"error\":\"profile handler unavailable\"}");
+    return;
+  }
+  if (gServer->header(PROFILE_CABLES_HEADER) != "true") {
+    gServer->send(409, "application/json",
+                  "{\"ok\":false,\"error\":\"confirm physical sensor cables were replaced\"}");
+    return;
+  }
+
+  uint8_t profile = 0;
+  if (!parseProfileBody(gServer->arg("plain"), profile)) {
+    gServer->send(400, "application/json",
+                  "{\"ok\":false,\"error\":\"body must be {\\\"profile\\\":0..3}\"}");
+    return;
+  }
+
+  if (!profileChangeCallback_(profile)) {
+    gServer->send(400, "application/json",
+                  "{\"ok\":false,\"error\":\"profile change rejected\"}");
+    return;
+  }
+
+  gServer->send(200, "application/json",
+                "{\"ok\":true,\"rebooting\":true}");
+  delay(100);
+  ESP.restart();
 }
 
 void OtaApManager::handleUpload() {

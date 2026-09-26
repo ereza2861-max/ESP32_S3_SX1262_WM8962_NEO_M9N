@@ -27,7 +27,7 @@ RfidReader::~RfidReader() {
 
 bool RfidReader::begin() {
   // SPI bus is initialized with the pins locked in ProfileConfig.h. The
-  // MFRC522 is the only SPI device in STEP 2; Profile 2/3 drivers (ADXL355)
+  // MFRC522 is the only SPI device in RFID; Profile 2/3 drivers (ADXL355)
   // will share this bus in later steps with their own CS pins.
   SPI.begin(ProfileConfig::RFID_SCK_PIN,
             ProfileConfig::RFID_MISO_PIN,

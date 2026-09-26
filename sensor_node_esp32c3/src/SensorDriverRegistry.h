@@ -8,8 +8,8 @@
 
 class SensorDriverRegistry {
 public:
-  // STEP 3: raised from 8 to 12 to match SensorRegistry::MAX_SENSORS.
-  static constexpr size_t MAX_DRIVERS = 12;
+  // Capacity includes the largest profile roster plus the global RFID descriptor.
+  static constexpr size_t MAX_DRIVERS = 13;
   static constexpr uint8_t DRIVER_BME280 = 1;
   static constexpr uint8_t DRIVER_BATTERY_ADC = 2;
   static constexpr uint8_t DRIVER_DIGITAL_INPUT = 3;

@@ -37,6 +37,7 @@
 class OtaApManager {
 public:
   static constexpr uint32_t OTA_AP_WINDOW_MS = 10UL * 60UL * 1000UL;  // 10 min
+  using ProfileChangeCallback = bool (*)(uint8_t profile);
 
   OtaApManager() = default;
 
@@ -61,6 +62,13 @@ public:
   // provisioning window is never extended by client activity.
   bool clientConnected() const { return clientConnected_; }
 
+  // Registers the runtime profile change handler. The WebUI supplies the
+  // profile value and must also confirm that physical sensor cabling was
+  // replaced before the callback is invoked.
+  void setProfileChangeCallback(ProfileChangeCallback callback) {
+    profileChangeCallback_ = callback;
+  }
+
 private:
   bool startAp();
   void stopAp();
@@ -70,6 +78,7 @@ private:
   void handleUpload();
   void handleUploadDone();
   void handleStatus();
+  void handleProfile();
   bool checkOtaPassword(const String& supplied);
 
   bool apEnabled_ = false;
@@ -79,4 +88,5 @@ private:
   // Loaded by loadState() from the "ota" NVS namespace.
   // Green-field OTA has no station-mode credential path.
   String otaPassword_;
+  ProfileChangeCallback profileChangeCallback_ = nullptr;
 };

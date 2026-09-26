@@ -6,7 +6,7 @@
 
 class SensorRegistry {
 public:
-  // STEP 3: raised from 8 to 12 to accommodate Profile 1 (12 sensors) and
+  // driver: raised from 8 to 12 to accommodate Profile 1 (12 sensors) and
   // Profile 3 (9 sensors) without truncation. RAM impact:
   //   SensorDescriptor (62 B) × 13 = 806 B
   //   SensorValue (15 B) × 13 = 195 B

@@ -241,7 +241,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// STEP 3 driver additions. Each driver is intentionally minimal: it reads one
+// driver driver additions. Each driver is intentionally minimal: it reads one
 // value and returns it with a quality flag. Calibration, temperature
 // compensation, and environmental rating checks are caller responsibilities
 // and are marked NOT VERIFIED in README.
@@ -297,7 +297,7 @@ public:
     config_ = config;
     // UART instances are owned by the profile, not this driver. The driver
     // only validates the configuration and delegates I/O to a caller-supplied
-    // SerialX. STEP 3 does not open any UART here to avoid pin conflicts.
+    // SerialX. driver does not open any UART here to avoid pin conflicts.
     return config_.periodMs > 0;
   }
 
@@ -309,7 +309,7 @@ public:
   bool read(float& value, uint8_t& quality) override {
     // Placeholder: the profile-specific read must be implemented by the
     // caller that owns the UART peripheral. Return stale rather than fabricate
-    // a value. STEP 3 intentionally does NOT invent UART protocols.
+    // a value. driver intentionally does NOT invent UART protocols.
     value = 0.0f;
     quality = SensorProtocol::QUALITY_STALE;
     return false;
@@ -355,7 +355,7 @@ public:
       return false;
     }
     // Atlas EZO I2C command protocol: send 'R' to request a reading, wait for
-    // the device to process, then read the response. STEP 3 sends the request
+    // the device to process, then read the response. driver sends the request
     // only; parsing the response is deferred until a hardware sample is
     // available. This avoids fabricating a protocol parser against an
     // unverified device.
@@ -443,7 +443,7 @@ public:
     }
     // The channel identifies which device on the shared OneWire bus this
     // driver instance reads. Actual device resolution is deferred until a
-    // hardware sample confirms the ROM layout; STEP 3 does not assume any
+    // hardware sample confirms the ROM layout; driver does not assume any
     // ROM ordering.
     return sensors_ != nullptr && sensors_->getDeviceCount() > config_.channel;
   }
@@ -607,9 +607,9 @@ bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
         (config.dataWidth != 1 && config.dataWidth != 2 && config.dataWidth != 4))
       return false;
   } else if (config.driverType == DRIVER_GENERIC_ADC) {
-    // Profile time-share contract uses GPIO15 for the wind-vane ADC path.
+    // Profile time-share contract uses GPIO3 for the wind-vane ADC path.
     // Hardware capability remains a board-level validation item.
-    if ((config.pinSda > 4 && config.pinSda != 15) || config.pinSda == 2) return false;
+    if ((config.pinSda > 4 && config.pinSda != 3) || config.pinSda == 2) return false;
   } else if (config.driverType == DRIVER_GENERIC_UART) {
     // UART pins are not validated here; the profile owns the SerialX mapping.
     if (config.dataWidth == 0) return false;
@@ -714,29 +714,29 @@ void SensorDriverRegistry::clear(SensorRegistry& registry) {
 namespace {
 
 #if __has_include(<freertos/FreeRTOS.h>)
-SemaphoreHandle_t gGpio15Mutex = nullptr;
+SemaphoreHandle_t gGpio3Mutex = nullptr;
 
-bool lockGpio15() {
-  if (!gGpio15Mutex) gGpio15Mutex = xSemaphoreCreateMutex();
-  return gGpio15Mutex && xSemaphoreTake(gGpio15Mutex, portMAX_DELAY) == pdTRUE;
+bool lockGpio3() {
+  if (!gGpio3Mutex) gGpio3Mutex = xSemaphoreCreateMutex();
+  return gGpio3Mutex && xSemaphoreTake(gGpio3Mutex, portMAX_DELAY) == pdTRUE;
 }
 
-void unlockGpio15() {
-  if (gGpio15Mutex) xSemaphoreGive(gGpio15Mutex);
+void unlockGpio3() {
+  if (gGpio3Mutex) xSemaphoreGive(gGpio3Mutex);
 }
 #else
-bool lockGpio15() { return true; }
-void unlockGpio15() {}
+bool lockGpio3() { return true; }
+void unlockGpio3() {}
 #endif
 
-class Gpio15TransactionGuard {
+class Gpio3TransactionGuard {
 public:
-  explicit Gpio15TransactionGuard(const DriverConfig& config)
-      : active_(config.pinSda == 15) {
+  explicit Gpio3TransactionGuard(const DriverConfig& config)
+      : active_(config.pinSda == 3) {
     if (!active_) return;
-    if (!lockGpio15()) {
+    if (!lockGpio3()) {
       active_ = false;
-      Serial.println("ERROR: GPIO15 mutex unavailable");
+      Serial.println("ERROR: GPIO3 mutex unavailable");
       return;
     }
     locked_ = true;
@@ -746,36 +746,36 @@ public:
     switch (kind) {
       case ProfileConfig::InterfaceKind::Adc:
         // Ensure any SPI-CS consumer is deselected before the ADC conversion.
-        pinMode(15, INPUT);
+        pinMode(3, INPUT);
         delay(ProfileConfig::PROFILE2_ADC_SETTLE_MS);
         break;
       case ProfileConfig::InterfaceKind::OneWire:
         // Keep the external pull-up as the only defined pull-up source.
-        pinMode(15, INPUT);
+        pinMode(3, INPUT);
         delay(ProfileConfig::PROFILE3_TIME_SHARE_SETTLE_MS);
         break;
       case ProfileConfig::InterfaceKind::SPI:
         modeWasSpi_ = true;
-        pinMode(15, OUTPUT);
-        digitalWrite(15, HIGH);
+        pinMode(3, OUTPUT);
+        digitalWrite(3, HIGH);
         break;
       default:
         active_ = false;
-        unlockGpio15();
+        unlockGpio3();
         locked_ = false;
         break;
     }
   }
 
-  ~Gpio15TransactionGuard() {
+  ~Gpio3TransactionGuard() {
     if (!active_) return;
-    if (modeWasSpi_) digitalWrite(15, HIGH);
-    pinMode(15, INPUT);
-    if (locked_) unlockGpio15();
+    if (modeWasSpi_) digitalWrite(3, HIGH);
+    pinMode(3, INPUT);
+    if (locked_) unlockGpio3();
   }
 
-  Gpio15TransactionGuard(const Gpio15TransactionGuard&) = delete;
-  Gpio15TransactionGuard& operator=(const Gpio15TransactionGuard&) = delete;
+  Gpio3TransactionGuard(const Gpio3TransactionGuard&) = delete;
+  Gpio3TransactionGuard& operator=(const Gpio3TransactionGuard&) = delete;
 
 private:
   bool active_ = false;
@@ -794,7 +794,7 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
     entry.lastSampleMs = nowMs;
     float value = 0.0f;
     uint8_t quality = SensorProtocol::QUALITY_STALE;
-    Gpio15TransactionGuard gpio15Guard(entry.config);
+    Gpio3TransactionGuard gpio3Guard(entry.config);
     const bool readOk = entry.driver->read(value, quality);
     if (!readOk) {
       Serial.printf("SENSOR: read failed id=0x%04X driver=%u quality=%u\n",

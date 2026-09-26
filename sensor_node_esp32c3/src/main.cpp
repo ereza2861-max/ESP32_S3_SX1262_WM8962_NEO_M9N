@@ -52,6 +52,24 @@ void onLongPressToggleAp() {
   otaApManager.toggleAp();
 }
 
+bool onWebProfileChange(uint8_t rawProfile) {
+  if (rawProfile >= ProfileConfig::PROFILE_COUNT) {
+    Serial.printf("WEBUI: invalid profile %u\n",
+                  static_cast<unsigned>(rawProfile));
+    return false;
+  }
+
+  const auto profile = static_cast<ProfileConfig::Profile>(rawProfile);
+  if (!profileManager.setProfile(profile)) {
+    Serial.println("WEBUI: profile NVS update failed");
+    return false;
+  }
+
+  Serial.printf("WEBUI: profile changed to %s; reboot required\n",
+                ProfileConfig::profileName(profile));
+  return true;
+}
+
 
 bool validNodeNameLength(const String& value, size_t maxBytes) {
   return value.length() > 0 && value.length() <= maxBytes;
@@ -132,7 +150,7 @@ void saveProvisioning() {
 void showProvisioning() {
   Serial.printf("name=%s profile=%u drivers=%u sensors=%u rfid=%s\n",
                 nodeName.c_str(),
-                static_cast<unsigned>(profileManager.rawProfileSelectorValue()),
+                static_cast<unsigned>(profileManager.activeProfile()),
                 static_cast<unsigned>(driverRegistry.count()),
                 static_cast<unsigned>(registry.count()),
                 rfidReader.isReady() ? "ready" : "unavailable");
@@ -334,6 +352,7 @@ void setup() {
     Serial.println("WARN: RFID unavailable; continuing without RFID events");
   }
 
+  otaApManager.setProfileChangeCallback(onWebProfileChange);
   otaApManager.begin();
   showProvisioning();
   Serial.printf("drivers=%s\n", driverRegistry.listJson().c_str());

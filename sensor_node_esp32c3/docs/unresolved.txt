@@ -1,9 +1,14 @@
-Unresolved decisions / blockers
-Ada tiga hal yang tidak boleh saya tebak pada patch berikutnya:
-Pin assignments are defined as a source-level contract in `ProfileConfig.h`, including
-the profile selector, buzzer, button, MFRC522, GPIO15 time-share, and shared I2C/UART pins.
-The PCB has not been produced, so all electrical pin validation remains NOT VERIFIED.
-Physical sensor validation is still pending. Driver/interface choices may follow the locked
-profile roster, but electrical compatibility, ADC range, calibration, device addresses, and
-environmental ratings remain NOT VERIFIED.
-Registry capacity is fixed at 13: up to 12 profile sensors plus the global RFID event descriptor.
+Final validation items (not unresolved design decisions)
+
+The following items remain hardware/integration validation status only:
+- GPIO2 MFRC522 MOSI strapping behavior with the required external 10 kOhm pull-up.
+- GPIO8/GPIO9 I2C strapping behavior with the external I2C pull-ups.
+- GPIO11 VDD_SPI/module-dependent suitability for wind-pulse and MAX31865 CS.
+- GPIO3 ADC/SPI-CS/OneWire electrical arbitration and the accepted OneWire pull-up leakage.
+- Placeholder I2C addresses and hardware-specific driver protocols.
+- Binary size headroom with app0/app1 at 0x190000.
+- Native/target build and HIL validation.
+
+Final design decisions are not unresolved: profile selection is runtime NVS + WebUI,
+profile rosters are immutable at 6/12/8/9 sensors, and the final pin map in
+PIN-MAPPING.md is authoritative.

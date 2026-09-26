@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cmath>
 
 #include "SensorRegistry.h"
 
@@ -85,7 +86,12 @@ void testInvalidValueRejected() {
   // Unknown id must be rejected.
   assert(!reg.updateValue(0x9999, 1.0f, SensorProtocol::QUALITY_VALID));
   // NaN must be rejected.
-  assert(!reg.updateValue(1, __builtin_nanf(""), SensorProtocol::QUALITY_VALID));
+  #if defined(_MSC_VER)
+  const float nanValue = std::nanf("");
+#else
+  const float nanValue = __builtin_nanf("");
+#endif
+  assert(!reg.updateValue(1, nanValue, SensorProtocol::QUALITY_VALID));
 }
 
 }  // namespace

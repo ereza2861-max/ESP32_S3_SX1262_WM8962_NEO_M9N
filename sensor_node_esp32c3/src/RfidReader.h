@@ -6,7 +6,7 @@
 
 // FieldRadio ESP32-C3 Sensor Node — MFRC522 RFID reader wrapper.
 //
-// STEP 2 scope:
+// RFID scope:
 //   - MFRC522 over SPI on the pins locked in ProfileConfig.h.
 //   - Non-blocking task() called from loop(); polls at ProfileConfig::RFID_POLL_INTERVAL_MS.
 //   - Debounces repeated detection of the same UID so the buzzer does not

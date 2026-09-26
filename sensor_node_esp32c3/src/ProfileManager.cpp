@@ -1,6 +1,7 @@
 #include "ProfileManager.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 
 namespace {
 
@@ -12,7 +13,7 @@ namespace {
 //     ledcAttachPin(pin, channel) at begin() once, then ledcWriteTone(channel,
 //     freq) and ledcWrite(channel, 0) to silence.
 //
-// STEP 1 does NOT guess which core version is in use. The code below uses the
+// The implementation targets Arduino-ESP32 3.x; which core version is in use. The code below uses the
 // 3.x API (ledcAttach / ledcWriteTone / ledcWrite on the pin). If you build
 // with Arduino-ESP32 2.x, replace the three calls marked [LEDC] with the
 // channel-based equivalents.
@@ -42,31 +43,51 @@ void buzzerHardwareSilence() {
 
 }  // namespace
 
-uint8_t ProfileManager::readProfileSelector(int bit0, int bit1, int bit2) {
-  // The selector inputs use INPUT_PULLUP: closed/open electrical levels are
-  // normalized by the canonical pure helper in ProfileConfig.
-  const bool b0High = digitalRead(bit0) == HIGH;
-  const bool b1High = digitalRead(bit1) == HIGH;
-  const bool b2High = digitalRead(bit2) == HIGH;
-  return ProfileConfig::decodeProfileSelectorBits(b0High, b1High, b2High);
+bool ProfileManager::loadProfileFromNvs() {
+  Preferences prefs;
+  if (!prefs.begin("sensor", true)) {
+    Serial.println("WARN: sensor NVS open failed; using profile 0");
+    activeProfile_ = ProfileConfig::Profile::IslandSea;
+    return false;
+  }
+
+  const uint8_t raw = prefs.getUChar("profile", 0);
+  prefs.end();
+  if (raw >= ProfileConfig::PROFILE_COUNT) {
+    Serial.printf("WARN: stored profile value %u invalid; using profile 0\n",
+                  static_cast<unsigned>(raw));
+    activeProfile_ = ProfileConfig::Profile::IslandSea;
+    return false;
+  }
+
+  activeProfile_ = static_cast<ProfileConfig::Profile>(raw);
+  return true;
+}
+
+bool ProfileManager::saveProfileToNvs() {
+  Preferences prefs;
+  if (!prefs.begin("sensor", false)) {
+    Serial.println("ERROR: sensor NVS open failed");
+    return false;
+  }
+  const bool ok = prefs.putUChar(
+      "profile", static_cast<uint8_t>(activeProfile_)) == 1;
+  prefs.end();
+  if (!ok) Serial.println("ERROR: profile NVS write failed");
+  return ok;
+}
+
+bool ProfileManager::setProfile(ProfileConfig::Profile profile) {
+  if (static_cast<uint8_t>(profile) >= ProfileConfig::PROFILE_COUNT) {
+    Serial.println("ERROR: requested profile is out of range");
+    return false;
+  }
+  activeProfile_ = profile;
+  return saveProfileToNvs();
 }
 
 bool ProfileManager::begin() {
-  pinMode(ProfileConfig::PROFILE_SEL_BIT0_PIN, INPUT_PULLUP);
-  pinMode(ProfileConfig::PROFILE_SEL_BIT1_PIN, INPUT_PULLUP);
-  pinMode(ProfileConfig::PROFILE_SEL_BIT2_PIN, INPUT_PULLDOWN);
-
-  rawProfileSelectorValue_ = readProfileSelector(ProfileConfig::PROFILE_SEL_BIT0_PIN,
-                                      ProfileConfig::PROFILE_SEL_BIT1_PIN,
-                                      ProfileConfig::PROFILE_SEL_BIT2_PIN);
-  if (!ProfileConfig::profileSelectorValueInRange(rawProfileSelectorValue_)) {
-    // Three selector bits encode 0..7; only 0..3 are currently assigned.
-    // Reserved values fail closed to the default profile.
-    Serial.printf("WARN: profile selector value %u out of range; using island_sea\n",
-                  static_cast<unsigned>(rawProfileSelectorValue_));
-    rawProfileSelectorValue_ = 0;
-  }
-  activeProfile_ = static_cast<ProfileConfig::Profile>(rawProfileSelectorValue_);
+  loadProfileFromNvs();
 
   pinMode(ProfileConfig::BUTTON_PIN, INPUT_PULLUP);
   lastRawButtonLevel_ = digitalRead(ProfileConfig::BUTTON_PIN) == HIGH;
@@ -77,9 +98,8 @@ bool ProfileManager::begin() {
   buzzerActive_ = false;
   buzzerOffAtMs_ = 0;
 
-  Serial.printf("PROFILE: %s (selector=%u)\n",
-                ProfileConfig::profileName(activeProfile_),
-                static_cast<unsigned>(rawProfileSelectorValue_));
+  Serial.printf("PROFILE: %s (runtime NVS)\n",
+                ProfileConfig::profileName(activeProfile_));
   return true;
 }
 

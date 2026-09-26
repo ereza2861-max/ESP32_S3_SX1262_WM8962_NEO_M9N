@@ -1,4 +1,4 @@
-// Native test for ProfileConfig pure profile selector decoding helpers.
+// Native test for runtime profile and immutable pin/roster contracts.
 //
 // This test does NOT depend on Arduino.h, Preferences.h, Wire.h, SPI.h, or
 // any ESP-IDF headers. It only exercises constexpr logic that is compiled
@@ -16,34 +16,15 @@
 
 namespace {
 
-void testDipBitEncoding() {
-  // Electrical LOW  => logical 0 (switch closed, pulled to GND)
-  // Electrical HIGH => logical 1 (switch open, pulled to VCC)
-  static_assert(ProfileConfig::encodeProfileSelectorBit(false) == 0, "LOW must map to 0");
-  static_assert(ProfileConfig::encodeProfileSelectorBit(true) == 1, "HIGH must map to 1");
-}
-
-void testDecodeAllCombinations() {
-  // bit0 is LSB, bit1 is MSB.
-  // (b0High, b1High) -> profile index
-  assert(ProfileConfig::decodeProfileSelectorBits(false, false, false) == 0);
-  assert(ProfileConfig::decodeProfileSelectorBits(true,  false, false) == 1);
-  assert(ProfileConfig::decodeProfileSelectorBits(false, true,  false) == 2);
-  assert(ProfileConfig::decodeProfileSelectorBits(true,  true,  false)  == 3);
-  assert(ProfileConfig::decodeProfileSelectorBits(false, false, true) == 4);
-  assert(ProfileConfig::decodeProfileSelectorBits(true,  false, true) == 5);
-  assert(ProfileConfig::decodeProfileSelectorBits(false, true,  true)  == 6);
-  assert(ProfileConfig::decodeProfileSelectorBits(true,  true,  true)  == 7);
-}
-
-void testDipRange() {
-  assert(ProfileConfig::profileSelectorValueInRange(0));
-  assert(ProfileConfig::profileSelectorValueInRange(1));
-  assert(ProfileConfig::profileSelectorValueInRange(2));
-  assert(ProfileConfig::profileSelectorValueInRange(3));
-  // Values 4..7 are reserved selector encodings; 8..255 are invalid.
-  assert(!ProfileConfig::profileSelectorValueInRange(4));
-  assert(!ProfileConfig::profileSelectorValueInRange(255));
+void testRuntimeProfileRange() {
+  assert(ProfileConfig::PROFILE_COUNT == 4);
+  for (uint8_t value = 0; value < ProfileConfig::PROFILE_COUNT; ++value) {
+    assert(value < ProfileConfig::PROFILE_COUNT);
+  }
+  assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::IslandSea) == 0x0100);
+  assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::TropicalForest) == 0x0200);
+  assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::VolcanicMountain) == 0x0300);
+  assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::SubZeroSnow) == 0x0400);
 }
 
 void testProfileNamesDistinct() {
@@ -112,37 +93,38 @@ void testProfileInterfacesAndPins() {
   assert(static_cast<uint8_t>(Interface::OneWire) == 3);
   assert(static_cast<uint8_t>(Interface::Adc) == 4);
   assert(static_cast<uint8_t>(Interface::Pulse) == 5);
-  assert(ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN == 15);
-  assert(ProfileConfig::PROFILE2_ADXL355_CS_PIN == 15);
+  assert(ProfileConfig::RFID_SCK_PIN == 6);
+  assert(ProfileConfig::RFID_MOSI_PIN == 2);
+  assert(ProfileConfig::RFID_MISO_PIN == 1);
+  assert(ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN == 3);
+  assert(ProfileConfig::PROFILE2_ADXL355_CS_PIN == 3);
   assert(ProfileConfig::PROFILE2_WIND_PULSE_PIN == 11);
-  assert(ProfileConfig::PROFILE3_ONEWIRE_PIN == 15);
-  assert(ProfileConfig::PROFILE3_ADXL355_CS_PIN == 15);
+  assert(ProfileConfig::PROFILE3_ONEWIRE_PIN == 3);
+  assert(ProfileConfig::PROFILE3_ADXL355_CS_PIN == 3);
   assert(ProfileConfig::PROFILE3_MAX31865_CS_PIN == 11);
   assert(ProfileConfig::PROFILE3_VEML6075_I2C_ADDR == 0x10);
   assert(ProfileConfig::PROFILE3_SNOW_I2C_ADDR == 0x70);
   assert(ProfileConfig::PROFILE3_O2_I2C_ADDR == 0x73);
 }
 
-void testGpio15Contract() {
-  assert(ProfileConfig::ProfileSensorsContract::gpio15IsTimeSharedInProfile2());
-  assert(ProfileConfig::ProfileSensorsContract::gpio15OwnerWhenSamplingAdc() ==
+void testGpio3Contract() {
+  assert(ProfileConfig::ProfileSensorsContract::gpio3IsTimeShared());
+  assert(ProfileConfig::ProfileSensorsContract::gpio3OwnerWhenSamplingAdc() ==
          ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN);
-  assert(ProfileConfig::ProfileSensorsContract::gpio15OwnerWhenSamplingSpi() ==
+  assert(ProfileConfig::ProfileSensorsContract::gpio3OwnerWhenSamplingSpi() ==
          ProfileConfig::PROFILE2_ADXL355_CS_PIN);
-  assert(ProfileConfig::ProfileSensorsContract::gpio15RuntimeSerializationImplemented());
+  assert(ProfileConfig::ProfileSensorsContract::gpio3RuntimeSerializationImplemented());
 }
 
 }  // namespace
 
 int main() {
-  testDipBitEncoding();
-  testDecodeAllCombinations();
-  testDipRange();
+  testRuntimeProfileRange();
   testProfileNamesDistinct();
   testSensorIdBasesDistinct();
   testProfileRosterContracts();
   testProfileInterfacesAndPins();
   testDriverTypes();
-  testGpio15Contract();
+  testGpio3Contract();
   return 0;
 }

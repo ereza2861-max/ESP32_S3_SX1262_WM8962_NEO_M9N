@@ -18,7 +18,7 @@
 //     SensorDriverRegistry::validConfig.
 //   - No fabricated sensor models: a sensor is only registered if its driver
 //     can actually return a value. Sensors that require a UART/SPI protocol
-//     parser that STEP 3 does not implement are declared as placeholder
+//     parser that driver does not implement are declared as placeholder
 //     entries with QUALITY_STALE, not as fake readings.
 //   - Stable IDs: each sensor ID is derived from the profile base so that
 //     identity survives reboots and NVS reloads.
@@ -37,7 +37,7 @@ public:
   size_t registeredCount() const { return registeredCount_; }
 
   // Number of sensors the profile intended to register (may exceed
-  // registeredCount() when a driver is unavailable). Used by STEP 8 to log a
+  // registeredCount() when a driver is unavailable). Used by integration to log a
   // clear "partial roster" warning.
   size_t expectedCount() const { return expectedCount_; }
 

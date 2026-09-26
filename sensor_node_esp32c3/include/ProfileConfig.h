@@ -6,13 +6,13 @@
 // FieldRadio ESP32-C3 Sensor Node — profile configuration.
 //
 // ARCHITECTURAL DECISION:
-//   - 4 profiles selected by a 3-bit production solder-jumper configuration at boot.
-//   - Prototype hardware used a 2-bit profile selector during development; production uses solder jumpers.
+//   - 4 profiles are selected by runtime configuration persisted in NVS and changed through WebUI.
+//   - There is no physical profile selector; GPIO4/GPIO5/GPIO6 are fully available to sensor functions.
 //   - Pin map is NOT PHYSICALLY VALIDATED. It is a source-level contract only.
 //   - Buzzer uses the ESP-IDF LEDC peripheral, not blocking tone().
 //
-// This header is the single source of truth for the STEP 1 foundation. Profile
-// sensor definitions live in ProfileSensors (STEP 3..6) and must reference the
+// This header is the single source of truth for the final architecture foundation. Profile
+// sensor definitions live in ProfileSensors and must reference the
 // ID bases declared here.
 
 namespace ProfileConfig {
@@ -26,12 +26,9 @@ enum class Profile : uint8_t {
 
 constexpr uint8_t PROFILE_COUNT = 4;
 
-// --- Production profile selector (3-bit solder-jumper encoding) -------------
-// The selector is sampled once at boot and never hot-switched. GPIO4/GPIO5/
-// GPIO6 are used only after reset has released the strapping inputs.
-constexpr int PROFILE_SEL_BIT0_PIN = 4;
-constexpr int PROFILE_SEL_BIT1_PIN = 5;
-constexpr int PROFILE_SEL_BIT2_PIN = 6;
+// --- Runtime profile configuration -----------------------------------------
+// Profile selection is persisted in NVS namespace "sensor" under key "profile".
+// No physical selector pins are reserved.
 
 // --- Button (long-press 1.5 s toggles Wi-Fi AP) ----------------------------
 // GPIO10 is free, not USB-JTAG, and not used by any profile driver.
@@ -48,18 +45,17 @@ constexpr uint8_t BUZZER_LEDC_CHANNEL = 0;
 constexpr uint8_t BUZZER_LEDC_RESOLUTION_BITS = 10;
 
 // --- MFRC522 RFID (SPI) ----------------------------------------------------
-// CS on GPIO7, SCK on GPIO3, MOSI on GPIO2, MISO on GPIO1, RST on GPIO20.
+// CS on GPIO7, SCK on GPIO6, MOSI on GPIO2, MISO on GPIO1, RST on GPIO20.
 // GPIO2 is a strapping pin and is used as an output only after boot.
 // GPIO1 is used as an input after boot.
 constexpr int RFID_CS_PIN = 7;
-constexpr int RFID_SCK_PIN = 3;
+constexpr int RFID_SCK_PIN = 6;
 constexpr int RFID_MOSI_PIN = 2;
 constexpr int RFID_MISO_PIN = 1;
 constexpr int RFID_RST_PIN = 20;
 
-// RFID polling and callback contract (STEP 2). These are not hardware pins;
-// they are behavioral constants owned by RfidReader. Kept here so that STEP 8
-// integration and any future tests reference the same numbers.
+// RFID polling and callback contract (RFID). These are not hardware pins;
+// they are behavioral constants owned by RfidReader. Kept here so that integration any future tests reference the same numbers.
 constexpr uint32_t RFID_POLL_INTERVAL_MS = 100;
 constexpr uint32_t RFID_UID_FORGET_MS = 1500;
 constexpr uint8_t RFID_MAX_UID_BYTES = 10;
@@ -120,21 +116,24 @@ constexpr int PROFILE2_I2C_SDA_PIN = 8;
 constexpr int PROFILE2_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE2_I2C_HZ = 100000UL;
 constexpr int PROFILE2_H2S_ADC_PIN = 4;
-constexpr int PROFILE2_WIND_VANE_ADC_PIN = 15;
+constexpr int PROFILE2_WIND_VANE_ADC_PIN = 3;
 constexpr int PROFILE2_WIND_PULSE_PIN = 11;
 constexpr int PROFILE2_PMS_UART_NUM = 1;
 constexpr int PROFILE2_PMS_RX_PIN = 18;
 constexpr int PROFILE2_PMS_TX_PIN = 19;
-constexpr int PROFILE2_ADXL355_CS_PIN = 15;
+constexpr int PROFILE2_ADXL355_CS_PIN = 3;
 constexpr uint32_t PROFILE2_ADC_SETTLE_MS = 2;
 
-constexpr uint8_t RAIN_GAUGE_I2C_ADDRESS = 0x28;
+constexpr uint8_t RAIN_GAUGE_I2C_ADDRESS = 0x28;  // PLACEHOLDER; verify HW
+constexpr uint8_t ATLAS_EZO_EC_I2C_ADDR = 0x64;  // PLACEHOLDER; verify HW
+constexpr uint8_t ATLAS_EZO_PH_I2C_ADDR = 0x63;  // PLACEHOLDER; verify HW
+constexpr uint8_t SCD4X_I2C_ADDR = 0x62;         // PLACEHOLDER; verify HW
 
 constexpr int PROFILE3_I2C_SDA_PIN = 8;
 constexpr int PROFILE3_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE3_I2C_HZ = 100000UL;
-constexpr int PROFILE3_ONEWIRE_PIN = 15;
-constexpr int PROFILE3_ADXL355_CS_PIN = 15;
+constexpr int PROFILE3_ONEWIRE_PIN = 3;
+constexpr int PROFILE3_ADXL355_CS_PIN = 3;
 constexpr int PROFILE3_MAX31865_CS_PIN = 11;
 constexpr int PROFILE3_UART_NUM = 1;
 constexpr int PROFILE3_UART_RX_PIN = 18;
@@ -153,19 +152,6 @@ constexpr bool PROFILE3_TIME_SHARE_ENABLED = true;
 constexpr uint32_t PROFILE3_TIME_SHARE_SETTLE_MS = 2;
 constexpr uint32_t PROFILE3_ONEWIRE_PULLUP_OHMS = 4700;
 
-constexpr uint8_t encodeProfileSelectorBit(bool electricalHigh) {
-  return electricalHigh ? 1U : 0U;
-}
-constexpr uint8_t decodeProfileSelectorBits(bool bit0High, bool bit1High,
-                                            bool bit2High) {
-  return static_cast<uint8_t>(encodeProfileSelectorBit(bit0High) |
-                              (encodeProfileSelectorBit(bit1High) << 1) |
-                              (encodeProfileSelectorBit(bit2High) << 2));
-}
-constexpr bool profileSelectorValueInRange(uint8_t selectorValue) {
-  return selectorValue < PROFILE_COUNT;
-}
-
 constexpr size_t expectedSensorCount(Profile profile) {
   switch (profile) {
     case Profile::IslandSea: return 6;
@@ -182,10 +168,10 @@ constexpr uint16_t sensorIdFor(Profile profile, size_t index) {
 }
 
 namespace ProfileSensorsContract {
-constexpr bool gpio15IsTimeSharedInProfile2() { return true; }
-constexpr int gpio15OwnerWhenSamplingAdc() { return PROFILE2_WIND_VANE_ADC_PIN; }
-constexpr int gpio15OwnerWhenSamplingSpi() { return PROFILE2_ADXL355_CS_PIN; }
-constexpr bool gpio15RuntimeSerializationImplemented() { return true; }
+constexpr bool gpio3IsTimeShared() { return true; }
+constexpr int gpio3OwnerWhenSamplingAdc() { return PROFILE2_WIND_VANE_ADC_PIN; }
+constexpr int gpio3OwnerWhenSamplingSpi() { return PROFILE2_ADXL355_CS_PIN; }
+constexpr bool gpio3RuntimeSerializationImplemented() { return true; }
 }
 
 constexpr const char* profileName(Profile profile) {

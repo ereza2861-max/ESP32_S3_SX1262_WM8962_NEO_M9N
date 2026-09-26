@@ -32,6 +32,11 @@ bool ProfileSensors::begin(ProfileConfig::Profile profile,
                            SensorRegistry& registry) {
   registeredCount_ = 0;
   expectedCount_ = ProfileConfig::expectedSensorCount(profile);
+
+  // I2C ownership is centralized here; individual drivers never call Wire.begin().
+  Wire.begin(ProfileConfig::PROFILE0_I2C_SDA_PIN, ProfileConfig::PROFILE0_I2C_SCL_PIN);
+  Wire.setClock(ProfileConfig::PROFILE0_I2C_HZ);
+
   switch (profile) {
     case ProfileConfig::Profile::IslandSea:
       return registerIslandSea(drivers, registry);
@@ -62,9 +67,6 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
   const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
 
   // Wire bus shared by all I2C profile sensors.
-  Wire.begin(ProfileConfig::PROFILE0_I2C_SDA_PIN,
-             ProfileConfig::PROFILE0_I2C_SCL_PIN);
-  Wire.setClock(ProfileConfig::PROFILE0_I2C_HZ);
 
   expectedCount_ = ProfileConfig::expectedSensorCount(ProfileConfig::Profile::IslandSea);
 
@@ -86,7 +88,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
                                 base + 1, period);
     c.pinSda = ProfileConfig::PROFILE0_I2C_SDA_PIN;
     c.pinScl = ProfileConfig::PROFILE0_I2C_SCL_PIN;
-    c.i2cAddr = 0x64;  // Atlas EZO-EC default
+    c.i2cAddr = ProfileConfig::ATLAS_EZO_EC_I2C_ADDR;
     c.registerAddr = 0;  // EC
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
     if (addDriver(drivers, registry, c)) ++registeredCount_;
@@ -99,7 +101,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
                                 base + 2, period);
     c.pinSda = ProfileConfig::PROFILE0_I2C_SDA_PIN;
     c.pinScl = ProfileConfig::PROFILE0_I2C_SCL_PIN;
-    c.i2cAddr = 0x63;  // Atlas EZO-pH default
+    c.i2cAddr = ProfileConfig::ATLAS_EZO_PH_I2C_ADDR;
     c.registerAddr = 1;  // pH
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
     if (addDriver(drivers, registry, c)) ++registeredCount_;
@@ -146,9 +148,6 @@ bool ProfileSensors::registerTropicalForest(
   const uint16_t base = ProfileConfig::SENSOR_ID_BASE_TROPICAL_FOREST;
   const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
 
-  Wire.begin(ProfileConfig::PROFILE1_I2C_SDA_PIN,
-             ProfileConfig::PROFILE1_I2C_SCL_PIN);
-  Wire.setClock(ProfileConfig::PROFILE1_I2C_HZ);
 
   expectedCount_ =
       ProfileConfig::expectedSensorCount(ProfileConfig::Profile::TropicalForest);
@@ -179,7 +178,7 @@ bool ProfileSensors::registerTropicalForest(
         makeConfig(SensorDriverRegistry::DRIVER_ATLAS_EZO, base + 6, period);
     c.pinSda = ProfileConfig::PROFILE1_I2C_SDA_PIN;
     c.pinScl = ProfileConfig::PROFILE1_I2C_SCL_PIN;
-    c.i2cAddr = 0x63;
+    c.i2cAddr = ProfileConfig::ATLAS_EZO_PH_I2C_ADDR;
     c.registerAddr = 1;
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
     if (addDriver(drivers, registry, c)) ++registeredCount_;
@@ -190,7 +189,7 @@ bool ProfileSensors::registerTropicalForest(
         makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 7, period);
     c.pinSda = ProfileConfig::PROFILE1_I2C_SDA_PIN;
     c.pinScl = ProfileConfig::PROFILE1_I2C_SCL_PIN;
-    c.i2cAddr = 0x62;
+    c.i2cAddr = ProfileConfig::SCD4X_I2C_ADDR;
     c.dataWidth = 2;
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
     if (addDriver(drivers, registry, c)) ++registeredCount_;
@@ -247,9 +246,6 @@ bool ProfileSensors::registerVolcanicMountain(
   const uint16_t base = ProfileConfig::SENSOR_ID_BASE_VOLCANIC_MOUNTAIN;
   const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
 
-  Wire.begin(ProfileConfig::PROFILE2_I2C_SDA_PIN,
-             ProfileConfig::PROFILE2_I2C_SCL_PIN);
-  Wire.setClock(ProfileConfig::PROFILE2_I2C_HZ);
 
   expectedCount_ =
       ProfileConfig::expectedSensorCount(ProfileConfig::Profile::VolcanicMountain);
@@ -267,7 +263,7 @@ bool ProfileSensors::registerVolcanicMountain(
         makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 1, period);
     c.pinSda = ProfileConfig::PROFILE2_I2C_SDA_PIN;
     c.pinScl = ProfileConfig::PROFILE2_I2C_SCL_PIN;
-    c.i2cAddr = 0x62;
+    c.i2cAddr = ProfileConfig::SCD4X_I2C_ADDR;
     c.dataWidth = 2;
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
     if (addDriver(drivers, registry, c)) ++registeredCount_;
@@ -343,9 +339,6 @@ bool ProfileSensors::registerSubZeroSnow(
   const uint16_t base = ProfileConfig::SENSOR_ID_BASE_SUB_ZERO_SNOW;
   const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
 
-  Wire.begin(ProfileConfig::PROFILE3_I2C_SDA_PIN,
-             ProfileConfig::PROFILE3_I2C_SCL_PIN);
-  Wire.setClock(ProfileConfig::PROFILE3_I2C_HZ);
 
   expectedCount_ =
       ProfileConfig::expectedSensorCount(ProfileConfig::Profile::SubZeroSnow);

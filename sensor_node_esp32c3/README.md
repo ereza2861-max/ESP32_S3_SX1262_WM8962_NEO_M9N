@@ -3,11 +3,11 @@
 PlatformIO project for the BLE peripheral/counterpart of the gateway `SensorProtocol.h`.
 The canonical wire contract is `../shared/SensorProtocol.h`; do not create a second copy.
 
-## Profile hardware contract
+## Profile runtime configuration
 
-The sensor node has four mutually exclusive profiles selected at boot by a three-bit static selector.
-Production uses solder jumpers; the prototype used a profile selector during development. The selector is
-sampled once at boot and is never hot-switched.
+The sensor node has four mutually exclusive runtime profiles. The active profile is stored in the
+`sensor` NVS namespace under key `profile` and is changed through the WebUI `/profile` endpoint.
+There is no physical DIP switch or solder-jumper profile selector.
 Only one profile's sensor cabling is installed at a time; changing profile means physically
 unplugging the previous profile's sensor cables and installing the new profile's PCB/cabling.
 Pin overlap between different profiles is therefore intentional. The MFRC522 RFID reader is the
@@ -17,16 +17,16 @@ Profile rosters are source-level contracts and are not physical validation evide
 I2C addresses, UART/SDI-12 protocol variants, ADC calibration, and time-shared GPIO behavior still
 require hardware verification where marked as placeholders.
 
-- **Profile 0 — Island/Sea:** six sensors; GPIO3 is the wave ADC input; the legacy GPIO4 turbidity path remains hardware-dependent because GPIO4 is also selector bit0 used by the
-  wave and turbidity inputs. Legacy battery monitoring is not part of this profile.
+- **Profile 0 — Island/Sea:** six sensors; GPIO3 is the wave ADC input and GPIO4 is the turbidity ADC input.
+  Legacy battery monitoring is not part of this profile.
 - **Profile 1 — Tropical Forest:** twelve profile sensors; three DS18B20 channels share
   OneWire GPIO3 and the rain gauge uses the I2C bus at the locked placeholder address
   `RAIN_GAUGE_I2C_ADDRESS = 0x28`.
-- **Profile 2 — Volcanic Mountain:** eight sensors. GPIO15 is time-shared between the wind-vane
+- **Profile 2 — Volcanic Mountain:** eight sensors. GPIO3 is time-shared between the wind-vane
   ADC and the ADXL355 chip-select; GPIO11 is used for the wind-pulse input. The integration layer
-  must serialize the two GPIO15 modes and allow the ADC to settle before sampling.
+  must serialize the two GPIO3 modes and allow the ADC to settle before sampling.
 - **Profile 3 — Sub-Zero Snow:** nine sensors using UART/SDI-12 and I2C substitutions where
-  dedicated ADC/pulse pins are unavailable. GPIO15 is shared by the optional DS18B20 OneWire bus and ADXL355 CS; the estimated pull-up leakage is a **hardware-validation-required** item.
+  dedicated ADC/pulse pins are unavailable. GPIO3 is shared by the optional DS18B20 OneWire bus and ADXL355 CS; the estimated pull-up leakage is a **hardware-validation-required** item.
 
 No profile implementation should fabricate a sensor reading when its hardware-specific parser or
 calibration is not implemented; such drivers report stale quality instead.
@@ -38,22 +38,19 @@ The ESP32-S3 LoRa/gateway node has NO OTA by explicit design.
 
 | Function | Pin |
 |---|---:|
-| Profile selector bit0 | GPIO4 |
-| Profile selector bit1 | GPIO5 |
-| Profile selector bit2 (reserved) | GPIO6 |
 | I2C SDA | GPIO8 |
 | I2C SCL | GPIO9 |
 | Button / long-press | GPIO10 |
 | Wind pulse | GPIO11 |
 | MFRC522 CS | GPIO7 |
-| MFRC522 SCK | GPIO3 |
+| MFRC522 SCK | GPIO6 |
 | MFRC522 MOSI | GPIO2 |
 | MFRC522 MISO | GPIO1 |
 | RFID RST | GPIO20 |
 | Buzzer | GPIO21 |
 | UART1 RX | GPIO18 |
 | UART1 TX | GPIO19 |
-| Profile 2/3 time-share | GPIO15 |
+| Profile 2/3 time-share | GPIO3 |
 
 All assignments are a **source-level contract** and **NOT PHYSICALLY VALIDATED**.
 See `PIN-MAPPING.md` for the hardware-specific caveats and unresolved ESP32-C3
@@ -65,8 +62,8 @@ pin-capability conflicts.
 |---|---:|---|---|
 | Profile 0 — Island/Sea | 6 | 0x0100..0x0105 | Source-level roster; hardware/protocol validation remains required |
 | Profile 1 — Tropical Forest | 12 | 0x0200..0x020B | Twelve profile entries; RFID uses the 13th registry slot |
-| Profile 2 — Volcanic Mountain | 8 | 0x0300..0x0307 | Source-level roster; GPIO15 time-sharing requires hardware validation |
-| Profile 3 — Sub-Zero Snow | 9 | 0x0400..0x0408 | Source-level roster; GPIO15 leakage requires hardware validation |
+| Profile 2 — Volcanic Mountain | 8 | 0x0300..0x0307 | Source-level roster; GPIO3 time-sharing requires hardware validation |
+| Profile 3 — Sub-Zero Snow | 9 | 0x0400..0x0408 | Source-level roster; GPIO3 leakage requires hardware validation |
 
 Profile 1 has 12 profile sensors. The global RFID event descriptor is registered separately, so
 the registry capacity is 13 and must not be reduced below that value.
@@ -81,6 +78,14 @@ polls for the same UID are suppressed by the RFID reader debounce contract.
 
 GPIO10 is the button input. A confirmed 1.5 s long press toggles the OTA
 AP through OtaApManager.
+
+## Runtime profile change
+
+The WebUI exposes `POST /profile` with the body `{"profile":0..3}`. The browser first
+requires confirmation that the old sensor cables have been removed and the new profile's
+cables installed; the server enforces the confirmation header before applying the change.
+The firmware persists the profile in NVS and reboots. Firmware assumes only the selected
+profile's physical sensors are connected after reboot.
 
 ## OTA over Wi-Fi AP
 
@@ -105,8 +110,8 @@ See docs/INTEGRATION_NOTES.md.
 The following remain NOT VERIFIED:
 - pin assignments are NOT PHYSICALLY VALIDATED;
 - I2C addresses;
-- GPIO15 time-share contracts;
-- GPIO15 pull-up leakage;
+- GPIO3 time-share contracts;
+- GPIO3 pull-up leakage;
 - placeholder drivers;
 - rain gauge address 0x28;
 - binary size / partition headroom;
@@ -175,9 +180,9 @@ ota save
 save
 ```
 
-`save` stores only the node name in the `sensor` NVS namespace and reboots.
-The selected profile owns the sensor roster; there is no legacy example-sensor
-fallback and no runtime profile detection/hot-swap path.
+`save` stores the node name in the `sensor` NVS namespace and reboots. The runtime
+profile is stored separately under `sensor/profile` and is changed through the WebUI.
+There is no legacy example-sensor fallback and no runtime sensor mixing between profiles.
 
 ## Pairing
 

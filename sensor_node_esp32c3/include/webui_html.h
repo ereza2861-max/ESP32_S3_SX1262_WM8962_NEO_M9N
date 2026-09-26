@@ -14,7 +14,11 @@ h1{font-size:1.2rem}fieldset{margin:1rem 0;padding:.5rem 1rem}
 label{display:block;margin:.25rem 0}input,button{font-size:1rem;padding:.3rem}
 pre{background:#eee;padding:.5rem;overflow:auto}
 </style></head><body>
-<h1>FieldRadio Sensor OTA</h1>
+<h1>FieldRadio Sensor Node</h1>
+<fieldset><legend>Profile</legend>
+<label>Runtime profile <select id=profile><option value=0>0 — Island / Sea</option><option value=1>1 — Tropical Forest</option><option value=2>2 — Volcanic Mountain</option><option value=3>3 — Sub-Zero Snow</option></select></label>
+<button id=applyProfile type=button>Apply profile</button>
+<pre id=profileResult></pre></fieldset>
 <fieldset><legend>Status</legend><pre id=status>loading...</pre></fieldset>
 <fieldset><legend>Firmware upload</legend>
 <p>Upload requires the OTA password provisioned over serial.</p>
@@ -36,5 +40,13 @@ async function refresh(){
 }
 refresh();setInterval(refresh,5000);
 up.addEventListener('submit',()=>{result.textContent='uploading...';});
+applyProfile.addEventListener('click',async()=>{
+  if(!confirm('Confirm: physical sensor cables have been disconnected from the old profile and connected for the new profile. Continue?')) return;
+  const body=JSON.stringify({profile:Number(profile.value)});
+  try{
+    const r=await fetch('/profile',{method:'POST',headers:{'Content-Type':'application/json','X-Profile-Cables-Changed':'true'},body});
+    profileResult.textContent=await r.text();
+  }catch(e){profileResult.textContent='profile change request failed';}
+});
 </script>
 </body></html>)HTML";

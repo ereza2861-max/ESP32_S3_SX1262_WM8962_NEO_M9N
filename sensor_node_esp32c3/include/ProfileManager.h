@@ -3,21 +3,20 @@
 #include <Arduino.h>
 #include "ProfileConfig.h"
 
-// ProfileManager owns three responsibilities for STEP 1:
-//   1. Read the 3-bit production profile selector once at boot and expose the active profile.
+// ProfileManager owns three responsibilities:
+//   1. Load/save the active profile from the "sensor" NVS namespace.
 //   2. Provide a non-blocking buzzer pulse API.
 //   3. Run a non-blocking button state machine that reports a 1.5 s long press.
 //
 // The manager does NOT start Wi-Fi AP, does NOT touch BLE, and does NOT own
-// sensor drivers. OtaApManager (STEP 7) subscribes to the long-press callback.
+// sensor drivers. OtaApManager (OTA) subscribes to the long-press callback.
 
 class ProfileManager {
 public:
   using LongPressCallback = void (*)();
 
-  // Reads the profile selector, configures buzzer + button GPIOs, and stores the
-  // active profile. Must be called after Serial.begin() and after any
-  // provisioning load that does not touch GPIOs.
+  // Loads the persisted runtime profile, configures buzzer + button GPIOs,
+  // and falls back to profile 0 if the stored value is invalid.
   bool begin();
 
   // Non-blocking cooperative task. Call from loop(). Handles button debounce,
@@ -29,11 +28,17 @@ public:
   // call while a pulse is active extends the pulse rather than overlapping.
   void buzzerPulse();
 
-  // Returns the profile selected by the static profile selector at begin().
+  // Returns the currently active runtime profile.
   ProfileConfig::Profile activeProfile() const { return activeProfile_; }
 
-  // Returns the raw 3-bit profile-selector value before range fallback for diagnostics.
-  uint8_t rawProfileSelectorValue() const { return rawProfileSelectorValue_; }
+  // Loads the runtime profile from NVS namespace "sensor".
+  bool loadProfileFromNvs();
+
+  // Persists the current runtime profile in NVS namespace "sensor".
+  bool saveProfileToNvs();
+
+  // Changes and persists the runtime profile.
+  bool setProfile(ProfileConfig::Profile profile);
 
   // Registers the callback fired once per confirmed 1.5 s button long press.
   // The callback runs from task() context; it must not block.
@@ -51,10 +56,7 @@ private:
     LongFired,
   };
 
-  static uint8_t readProfileSelector(int bit0, int bit1, int bit2);
-
   ProfileConfig::Profile activeProfile_ = ProfileConfig::Profile::IslandSea;
-  uint8_t rawProfileSelectorValue_ = 0;
 
   ButtonState buttonState_ = ButtonState::Idle;
   uint32_t buttonStateSinceMs_ = 0;
