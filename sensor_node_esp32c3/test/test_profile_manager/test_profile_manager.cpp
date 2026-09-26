@@ -105,6 +105,11 @@ void testProfileInterfacesAndPins() {
   assert(ProfileConfig::PROFILE3_VEML6075_I2C_ADDR == 0x10);
   assert(ProfileConfig::PROFILE3_SNOW_I2C_ADDR == 0x70);
   assert(ProfileConfig::PROFILE3_O2_I2C_ADDR == 0x73);
+  assert(ProfileConfig::GPIO3_MUX_COM_PIN == 3);
+  assert(ProfileConfig::GPIO3_MUX_S0_PIN == 0);
+  assert(ProfileConfig::GPIO3_MUX_S1_PIN == 5);
+  assert(ProfileConfig::GPIO3_MUX_S2_PIN == -1);
+  assert(ProfileConfig::GPIO3_MUX_ENABLE_PIN == -1);
 }
 
 void testGpio3Contract() {
@@ -114,6 +119,14 @@ void testGpio3Contract() {
   assert(ProfileConfig::ProfileSensorsContract::gpio3OwnerWhenSamplingSpi() ==
          ProfileConfig::PROFILE2_ADXL355_CS_PIN);
   assert(ProfileConfig::ProfileSensorsContract::gpio3RuntimeSerializationImplemented());
+  assert(ProfileConfig::ProfileSensorsContract::gpio3ExternalMuxEnabled());
+  assert(ProfileConfig::ProfileSensorsContract::gpio3MuxS0Pin() == 0);
+  assert(ProfileConfig::ProfileSensorsContract::gpio3MuxS1Pin() == 5);
+  assert(ProfileConfig::ProfileSensorsContract::gpio3MuxComPin() == 3);
+  assert(static_cast<uint8_t>(ProfileConfig::Gpio3MuxChannel::OneWire) == 0);
+  assert(static_cast<uint8_t>(ProfileConfig::Gpio3MuxChannel::Adc) == 1);
+  assert(static_cast<uint8_t>(ProfileConfig::Gpio3MuxChannel::Adxl355Cs) == 2);
+  assert(static_cast<uint8_t>(ProfileConfig::Gpio3MuxChannel::Reserved) == 3);
 }
 
 }  // namespace

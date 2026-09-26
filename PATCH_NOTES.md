@@ -65,18 +65,16 @@ silently overlapped.
 ### GAP-H — ESP32-C3 runtime sensor-driver registry
 
 - Adds `SensorDriver` abstract interface.
-- Adds `SensorDriverRegistry` with versioned NVS format in `sensor_cfg`.
+- Uses `SensorDriverRegistry` for the immutable source-level profile roster.
 - Uses the requested 15-byte `DriverEntry` layout.
 - Built-in drivers:
   - BME280 temperature/humidity/pressure channels
   - Battery ADC
   - Digital input
-  - Generic I2C register reader
-- Generic I2C supports 1/2/4-byte reads, signed/little-endian flags, and
-  optional 16-bit register addressing.
-- Adds serial commands:
-  `driver add`, `driver remove`, `driver list`, `driver save`.
-- Empty/absent `sensor_cfg` falls back to the existing example sensors.
+  - Generic I2C placeholder
+- Generic I2C validates its configuration but does not perform raw register reads;
+  it returns `QUALITY_STALE` until a sensor-specific measurement protocol exists.
+- Sensor drivers are instantiated only from the selected immutable profile roster.
 - Does not add a Bluetooth Classic/HC-06 bridge.
 - Adds `test_sensor_driver_registry.cpp`.
 - Corrects the repository sensor-node Makefile target to the actual

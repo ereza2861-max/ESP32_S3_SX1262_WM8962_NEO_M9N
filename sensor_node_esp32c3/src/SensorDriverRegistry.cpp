@@ -168,56 +168,11 @@ public:
   uint16_t sensorId() const override { return config_.sensorId; }
 
   bool read(float& value, uint8_t& quality) override {
+    // Placeholder: a generic register transaction is not a validated
+    // measurement protocol. Never expose raw register bytes as telemetry.
     value = 0.0f;
     quality = SensorProtocol::QUALITY_STALE;
-
-    const auto interface =
-        static_cast<ProfileConfig::InterfaceKind>(config_.interfaceType);
-    if (interface != ProfileConfig::InterfaceKind::I2C) return false;
-
-    const uint8_t width = config_.dataWidth;
-    if (width != 1 && width != 2 && width != 4) return false;
-
-    Wire.beginTransmission(config_.i2cAddr);
-    if (config_.flags & SensorDriverRegistry::FLAG_REGISTER_16BIT) {
-      Wire.write(static_cast<uint8_t>(config_.registerAddr >> 8U));
-      Wire.write(static_cast<uint8_t>(config_.registerAddr & 0xFFU));
-    } else {
-      Wire.write(static_cast<uint8_t>(config_.registerAddr & 0xFFU));
-    }
-    if (Wire.endTransmission(false) != 0) return false;
-
-    const uint8_t requested = Wire.requestFrom(
-        static_cast<int>(config_.i2cAddr), static_cast<int>(width), true);
-    if (requested != width || Wire.available() < width) return false;
-
-    uint32_t raw = 0;
-    if (config_.flags & SensorDriverRegistry::FLAG_LITTLE_ENDIAN) {
-      for (uint8_t i = 0; i < width; ++i) {
-        raw |= static_cast<uint32_t>(Wire.read()) << (8U * i);
-      }
-    } else {
-      for (uint8_t i = 0; i < width; ++i) {
-        raw = (raw << 8U) | static_cast<uint32_t>(Wire.read());
-      }
-    }
-
-    if (config_.flags & SensorDriverRegistry::FLAG_SIGNED) {
-      int64_t signedValue = static_cast<int64_t>(raw);
-      if (width < 4) {
-        const uint8_t bits = static_cast<uint8_t>(width * 8U);
-        const uint32_t signBit = 1UL << (bits - 1U);
-        if (raw & signBit) signedValue -= (1LL << bits);
-      } else {
-        signedValue = static_cast<int32_t>(raw);
-      }
-      value = static_cast<float>(signedValue);
-    } else {
-      value = static_cast<float>(raw);
-    }
-
-    quality = SensorProtocol::QUALITY_VALID;
-    return true;
+    return false;
   }
 
   SensorProtocol::SensorDescriptor descriptor() const override {
@@ -541,6 +496,7 @@ constexpr LegacyPulseIsr kLegacyPulseIsrs[SensorDriverRegistry::MAX_DRIVERS] = {
     pulseIsrLegacySlot<3>, pulseIsrLegacySlot<4>, pulseIsrLegacySlot<5>,
     pulseIsrLegacySlot<6>, pulseIsrLegacySlot<7>, pulseIsrLegacySlot<8>,
     pulseIsrLegacySlot<9>, pulseIsrLegacySlot<10>, pulseIsrLegacySlot<11>,
+    pulseIsrLegacySlot<12>,
 };
 #endif
 
@@ -641,12 +597,50 @@ SensorDriver* SensorDriverRegistry::createDriver(const DriverConfig& config) {
   }
 }
 
+namespace {
+
+void configureGpio3MuxPins() {
+  static bool configured = false;
+  if (configured) return;
+  pinMode(ProfileConfig::GPIO3_MUX_S0_PIN, OUTPUT);
+  pinMode(ProfileConfig::GPIO3_MUX_S1_PIN, OUTPUT);
+  configured = true;
+}
+
+bool selectGpio3Mux(ProfileConfig::Gpio3MuxChannel channel) {
+  configureGpio3MuxPins();
+  const uint8_t value = static_cast<uint8_t>(channel);
+  digitalWrite(ProfileConfig::GPIO3_MUX_S0_PIN, value & 0x01);
+  digitalWrite(ProfileConfig::GPIO3_MUX_S1_PIN, (value >> 1) & 0x01);
+  delayMicroseconds(ProfileConfig::GPIO3_MUX_SETTLE_US);
+  return true;
+}
+
+bool selectGpio3MuxForConfig(const DriverConfig& config) {
+  if (config.pinSda != ProfileConfig::GPIO3_MUX_COM_PIN) return true;
+  const auto kind =
+      static_cast<ProfileConfig::InterfaceKind>(config.interfaceType);
+  switch (kind) {
+    case ProfileConfig::InterfaceKind::OneWire:
+      return selectGpio3Mux(ProfileConfig::Gpio3MuxChannel::OneWire);
+    case ProfileConfig::InterfaceKind::Adc:
+      return selectGpio3Mux(ProfileConfig::Gpio3MuxChannel::Adc);
+    case ProfileConfig::InterfaceKind::SPI:
+      return selectGpio3Mux(ProfileConfig::Gpio3MuxChannel::Adxl355Cs);
+    default:
+      return true;
+  }
+}
+
+}  // namespace
+
 bool SensorDriverRegistry::rebuild(SensorRegistry& registry) {
   registry.clear();
   for (size_t i = 0; i < count_; ++i) {
     delete entries_[i].driver;
     entries_[i].driver = createDriver(entries_[i].config);
     if (!entries_[i].driver || !validConfig(entries_[i].config) ||
+        !selectGpio3MuxForConfig(entries_[i].config) ||
         !entries_[i].driver->begin(entries_[i].config) ||
         !registry.registerSensor(entries_[i].driver->descriptor())) {
       clear(registry);
@@ -675,26 +669,6 @@ bool SensorDriverRegistry::add(const DriverConfig& config, SensorRegistry& regis
   // rebuild() owns replacement/destruction of every existing driver. Do not
   // clear this pointer here or an existing driver would be leaked before
   // rebuild() gets a chance to delete it.
-  if (rebuild(registry)) return true;
-
-  count_ = previousCount;
-  for (size_t i = 0; i < count_; ++i) entries_[i].config = previous[i];
-  return rebuild(registry);
-}
-
-bool SensorDriverRegistry::remove(uint16_t sensorId, SensorRegistry& registry) {
-  DriverConfig previous[MAX_DRIVERS]{};
-  const size_t previousCount = count_;
-  for (size_t i = 0; i < count_; ++i) previous[i] = entries_[i].config;
-
-  size_t found = count_;
-  for (size_t i = 0; i < count_; ++i) {
-    if (entries_[i].config.sensorId == sensorId) { found = i; break; }
-  }
-  if (found == count_) return false;
-  for (size_t j = found + 1; j < count_; ++j) entries_[j - 1].config = entries_[j].config;
-  --count_;
-  entries_[count_] = {};
   if (rebuild(registry)) return true;
 
   count_ = previousCount;
@@ -732,7 +706,7 @@ void unlockGpio3() {}
 class Gpio3TransactionGuard {
 public:
   explicit Gpio3TransactionGuard(const DriverConfig& config)
-      : active_(config.pinSda == 3) {
+      : active_(config.pinSda == ProfileConfig::GPIO3_MUX_COM_PIN) {
     if (!active_) return;
     if (!lockGpio3()) {
       active_ = false;
@@ -745,19 +719,23 @@ public:
         static_cast<ProfileConfig::InterfaceKind>(config.interfaceType);
     switch (kind) {
       case ProfileConfig::InterfaceKind::Adc:
-        // Ensure any SPI-CS consumer is deselected before the ADC conversion.
-        pinMode(3, INPUT);
+        // Select the ADC branch before exposing COM to the ADC input.
+        selectGpio3Mux(ProfileConfig::Gpio3MuxChannel::Adc);
+        pinMode(ProfileConfig::GPIO3_MUX_COM_PIN, INPUT);
         delay(ProfileConfig::PROFILE2_ADC_SETTLE_MS);
         break;
       case ProfileConfig::InterfaceKind::OneWire:
-        // Keep the external pull-up as the only defined pull-up source.
-        pinMode(3, INPUT);
-        delay(ProfileConfig::PROFILE3_TIME_SHARE_SETTLE_MS);
+        // Select the OneWire branch; the external 4.7 kOhm pull-up defines the bus.
+        selectGpio3Mux(ProfileConfig::Gpio3MuxChannel::OneWire);
+        pinMode(ProfileConfig::GPIO3_MUX_COM_PIN, INPUT);
+        delay(ProfileConfig::PROFILE3_GPIO3_SETTLE_MS);
         break;
       case ProfileConfig::InterfaceKind::SPI:
+        // Profile 2/3 ADXL355 CS is the only SPI function routed through GPIO3.
+        selectGpio3Mux(ProfileConfig::Gpio3MuxChannel::Adxl355Cs);
         modeWasSpi_ = true;
-        pinMode(3, OUTPUT);
-        digitalWrite(3, HIGH);
+        pinMode(ProfileConfig::GPIO3_MUX_COM_PIN, OUTPUT);
+        digitalWrite(ProfileConfig::GPIO3_MUX_COM_PIN, HIGH);
         break;
       default:
         active_ = false;
@@ -769,8 +747,8 @@ public:
 
   ~Gpio3TransactionGuard() {
     if (!active_) return;
-    if (modeWasSpi_) digitalWrite(3, HIGH);
-    pinMode(3, INPUT);
+    if (modeWasSpi_) digitalWrite(ProfileConfig::GPIO3_MUX_COM_PIN, HIGH);
+    pinMode(ProfileConfig::GPIO3_MUX_COM_PIN, INPUT);
     if (locked_) unlockGpio3();
   }
 
@@ -812,24 +790,3 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
   return ok;
 }
 
-const DriverConfig* SensorDriverRegistry::config(size_t index) const {
-  return index < count_ ? &entries_[index].config : nullptr;
-}
-
-String SensorDriverRegistry::listJson() const {
-  String out = "[";
-  for (size_t i = 0; i < count_; ++i) {
-    if (i) out += ',';
-    const DriverConfig& c = entries_[i].config;
-    out += "{\"type\":" + String(c.driverType) +
-           ",\"sensorId\":" + String(c.sensorId) +
-           ",\"sda\":" + String(c.pinSda) +
-           ",\"scl\":" + String(c.pinScl) +
-           ",\"addr\":" + String(c.i2cAddr) +
-           ",\"register\":" + String(c.registerAddr) +
-           ",\"width\":" + String(c.dataWidth) +
-           ",\"periodMs\":" + String(c.periodMs) +
-           ",\"flags\":" + String(c.flags) + "}";
-  }
-  return out + "]";
-}

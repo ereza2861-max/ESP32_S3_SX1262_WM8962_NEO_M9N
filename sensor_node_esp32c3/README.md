@@ -7,7 +7,6 @@ The canonical wire contract is `../shared/SensorProtocol.h`; do not create a sec
 
 The sensor node has four mutually exclusive runtime profiles. The active profile is stored in the
 `sensor` NVS namespace under key `profile` and is changed through the WebUI `/profile` endpoint.
-There is no physical DIP switch or solder-jumper profile selector.
 Only one profile's sensor cabling is installed at a time; changing profile means physically
 unplugging the previous profile's sensor cables and installing the new profile's PCB/cabling.
 Pin overlap between different profiles is therefore intentional. The MFRC522 RFID reader is the
@@ -18,18 +17,20 @@ I2C addresses, UART/SDI-12 protocol variants, ADC calibration, and time-shared G
 require hardware verification where marked as placeholders.
 
 - **Profile 0 — Island/Sea:** six sensors; GPIO3 is the wave ADC input and GPIO4 is the turbidity ADC input.
-  Legacy battery monitoring is not part of this profile.
+  Battery monitoring is not part of this profile.
 - **Profile 1 — Tropical Forest:** twelve profile sensors; three DS18B20 channels share
   OneWire GPIO3 and the rain gauge uses the I2C bus at the locked placeholder address
   `RAIN_GAUGE_I2C_ADDRESS = 0x28`.
-- **Profile 2 — Volcanic Mountain:** eight sensors. GPIO3 is time-shared between the wind-vane
-  ADC and the ADXL355 chip-select; GPIO11 is used for the wind-pulse input. The integration layer
-  must serialize the two GPIO3 modes and allow the ADC to settle before sampling.
+- **Profile 2 — Volcanic Mountain:** eight sensors. GPIO3 is routed through a CD74HC4051 between the
+  wind-vane ADC and ADXL355 chip-select; GPIO11 is used for the wind-pulse input. The integration
+  layer serializes GPIO3 access and allows the ADC to settle before sampling.
 - **Profile 3 — Sub-Zero Snow:** nine sensors using UART/SDI-12 and I2C substitutions where
-  dedicated ADC/pulse pins are unavailable. GPIO3 is shared by the optional DS18B20 OneWire bus and ADXL355 CS; the estimated pull-up leakage is a **hardware-validation-required** item.
+  dedicated ADC/pulse pins are unavailable. GPIO3 is routed through the CD74HC4051 between the optional
+  DS18B20 OneWire bus and ADXL355 CS.
 
 No profile implementation should fabricate a sensor reading when its hardware-specific parser or
-calibration is not implemented; such drivers report stale quality instead.
+calibration is not implemented; such drivers report stale quality instead. Generic I2C is a placeholder
+and does not expose raw register bytes as measurements.
 ## ESP32-S3 LoRa/gateway OTA design
 
 The ESP32-S3 LoRa/gateway node has NO OTA by explicit design.
@@ -50,7 +51,9 @@ The ESP32-S3 LoRa/gateway node has NO OTA by explicit design.
 | Buzzer | GPIO21 |
 | UART1 RX | GPIO18 |
 | UART1 TX | GPIO19 |
-| Profile 2/3 time-share | GPIO3 |
+| GPIO3 mux COM | GPIO3 |
+| GPIO3 mux S0 | GPIO0 |
+| GPIO3 mux S1 | GPIO5 |
 
 All assignments are a **source-level contract** and **NOT PHYSICALLY VALIDATED**.
 See `PIN-MAPPING.md` for the hardware-specific caveats and unresolved ESP32-C3
@@ -110,8 +113,8 @@ See docs/INTEGRATION_NOTES.md.
 The following remain NOT VERIFIED:
 - pin assignments are NOT PHYSICALLY VALIDATED;
 - I2C addresses;
-- GPIO3 time-share contracts;
-- GPIO3 pull-up leakage;
+- GPIO3 CD74HC4051 electrical validation;
+- OneWire/ADXL355 mux timing and ADC source-impedance validation;
 - placeholder drivers;
 - rain gauge address 0x28;
 - binary size / partition headroom;
@@ -154,7 +157,7 @@ button path or an explicitly persisted AP-enabled state, and is bounded by a har
 provisioning window. Client activity cannot extend that maximum. The open AP itself
 does not grant upload authorization and the WebUI does not accept a new OTA password.
 
-There is no station-mode OTA provisioning path and no Wi-Fi SSID/password compatibility storage.
+The OTA path uses the local AP only; no station-mode provisioning or credential storage is part of the sensor-node design.
 
 Provision the OTA password locally over the serial console:
 
@@ -182,7 +185,7 @@ save
 
 `save` stores the node name in the `sensor` NVS namespace and reboots. The runtime
 profile is stored separately under `sensor/profile` and is changed through the WebUI.
-There is no legacy example-sensor fallback and no runtime sensor mixing between profiles.
+The selected source-level roster is the only sensor set instantiated after boot; there is no runtime sensor mixing between profiles.
 
 ## Pairing
 

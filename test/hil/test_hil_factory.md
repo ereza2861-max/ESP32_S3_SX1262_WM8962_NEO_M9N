@@ -11,6 +11,6 @@
 - No private key/certificate is committed to Git.
 - Secure Boot/Flash Encryption remain manufacturing-only operations.
 - Runtime sensor-driver configuration survives reboot.
-- Legacy example sensors are available when `sensor_cfg` is empty.
+- The selected immutable profile roster is present after provisioning.
 
 TODO(hw): perform eFuse burn and post-provisioning verification on a sacrificial production board.

@@ -4,7 +4,7 @@ The following items remain hardware/integration validation status only:
 - GPIO2 MFRC522 MOSI strapping behavior with the required external 10 kOhm pull-up.
 - GPIO8/GPIO9 I2C strapping behavior with the external I2C pull-ups.
 - GPIO11 VDD_SPI/module-dependent suitability for wind-pulse and MAX31865 CS.
-- GPIO3 ADC/SPI-CS/OneWire electrical arbitration and the accepted OneWire pull-up leakage.
+- GPIO3 CD74HC4051 electrical validation: mux on-resistance, ADC source impedance/accuracy, OneWire timing, and ADXL355 CS timing.
 - Placeholder I2C addresses and hardware-specific driver protocols.
 - Binary size headroom with app0/app1 at 0x190000.
 - Native/target build and HIL validation.

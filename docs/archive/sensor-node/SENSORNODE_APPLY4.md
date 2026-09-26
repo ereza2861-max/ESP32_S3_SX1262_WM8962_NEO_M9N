@@ -125,10 +125,8 @@ Events include:
 The log contains the broker hostname and MQTT return state, but never the
 username or password.
 
-## 7. Backward compatibility
+## 7. Current sensor-node configuration
 
-Non-production builds retain the old compile-time fallback only when NVS
-credentials have not been provisioned. Once provisioning occurs, NVS is the
-authoritative source.
-
-Production builds never use the compile-time fallback.
+The sensor node is green-field. Runtime profile selection uses the `sensor/profile`
+NVS key and the WebUI. Each profile has an immutable source-level roster, and
+only the selected profile is instantiated after reboot.

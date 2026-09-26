@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cmath>
+#include <vector>
 
 #include "SensorRegistry.h"
 
@@ -78,6 +79,52 @@ void testMaxCapacity() {
   assert(reg.count() == SensorRegistry::MAX_SENSORS);
 }
 
+std::vector<uint8_t> serializeDescriptors(const SensorRegistry& reg) {
+  std::vector<uint8_t> bytes;
+  const uint8_t count = static_cast<uint8_t>(reg.count());
+  bytes.push_back(count);
+  for (size_t i = 0; i < reg.count(); ++i) {
+    const auto* d = reg.descriptor(i);
+    assert(d != nullptr);
+    const auto* raw = reinterpret_cast<const uint8_t*>(d);
+    bytes.insert(bytes.end(), raw, raw + sizeof(*d));
+  }
+  return bytes;
+}
+
+bool deserializeDescriptors(const std::vector<uint8_t>& bytes,
+                            SensorRegistry& reg) {
+  if (bytes.empty()) return false;
+  const size_t count = bytes[0];
+  const size_t stride = sizeof(SensorProtocol::SensorDescriptor);
+  if (bytes.size() != 1U + count * stride ||
+      count > SensorRegistry::MAX_SENSORS) return false;
+  for (size_t i = 0; i < count; ++i) {
+    SensorProtocol::SensorDescriptor d{};
+    std::memcpy(&d, bytes.data() + 1U + i * stride, stride);
+    if (!reg.registerSensor(d)) return false;
+  }
+  return true;
+}
+
+void testSerializationRoundTrip() {
+  SensorRegistry source;
+  assert(source.registerSensor(makeDescriptor(0x0100)));
+  assert(source.registerSensor(makeDescriptor(0x0101)));
+  assert(source.updateValue(0x0100, 12.5f, SensorProtocol::QUALITY_VALID));
+
+  const auto bytes = serializeDescriptors(source);
+  SensorRegistry restored;
+  assert(deserializeDescriptors(bytes, restored));
+  assert(restored.count() == source.count());
+  for (size_t i = 0; i < source.count(); ++i) {
+    const auto* a = source.descriptor(i);
+    const auto* b = restored.descriptor(i);
+    assert(a && b);
+    assert(std::memcmp(a, b, sizeof(*a)) == 0);
+  }
+}
+
 void testInvalidValueRejected() {
   SensorRegistry reg;
   assert(reg.registerSensor(makeDescriptor(1)));
@@ -102,5 +149,6 @@ int main() {
   testRemoveSensor();
   testMaxCapacity();
   testInvalidValueRejected();
+  testSerializationRoundTrip();
   return 0;
 }

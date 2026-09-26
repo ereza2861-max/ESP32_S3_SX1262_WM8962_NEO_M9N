@@ -24,12 +24,9 @@ public:
   static constexpr uint16_t FLAG_REGISTER_16BIT = 1U << 2;
 
   bool add(const DriverConfig& config, SensorRegistry& registry);
-  bool remove(uint16_t sensorId, SensorRegistry& registry);
   void clear(SensorRegistry& registry);
   bool sample(SensorRegistry& registry, uint32_t nowMs);
   size_t count() const { return count_; }
-  const DriverConfig* config(size_t index) const;
-  String listJson() const;
 
 private:
   struct Entry {

@@ -39,9 +39,10 @@ Unresolved RPAs are rejected and never become new nodes.
 
 ## GAP H — sensor-node provisioning model — CLOSED
 The supported architecture is ESP32-C3 + BLE GATT without a Bluetooth Classic
-bridge. Runtime drivers are registered from versioned NVS configuration in the
-`sensor_cfg` namespace. Built-ins are BME280, BatteryAdc, DigitalInput and
-GenericI2C; an empty configuration retains the legacy example-sensor fallback.
+bridge. Sensor profiles are immutable source-level rosters selected at runtime
+through the `sensor/profile` NVS key and the WebUI. The selected roster is
+rebuilt at boot; there is no persisted driver-roster override or fallback
+sensor set.
 
 ## GAP I — delivery/test gates — PARTIALLY CLOSED
 Host-only fuzzing, failure-injection, peer-integrity tests, RPA vectors and

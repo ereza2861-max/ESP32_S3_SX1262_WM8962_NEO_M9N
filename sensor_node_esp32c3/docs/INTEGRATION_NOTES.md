@@ -17,13 +17,19 @@ Profile 2 = 8, Profile 3 = 9. Cross-profile pin overlap is intentional because
 only one profile's sensor cabling is installed at a time. MFRC522 is global and
 never overlaps.
 
-### D-03 — GPIO3 time-share
-GPIO3 is shared by ADC, SPI CS, and OneWire according to the active profile.
-`Gpio3TransactionGuard` serializes access with a FreeRTOS mutex and establishes
-the required pin mode/settle interval before the driver read. The OneWire
-pull-up is 4.7 kOhm external; when ADXL355 CS is LOW this implies approximately
-0.70 mA leakage. The trade-off is accepted by design, but the electrical
-behavior remains **NOT VERIFIED**.
+### D-03 — GPIO3 CD74HC4051 mux
+GPIO3 is the COM pin of a CD74HC4051. Y0=OneWire, Y1=ADC, Y2=ADXL355 CS,
+and Y3 is reserved. S0=GPIO0 and S1=GPIO5; S2 and /E are tied to GND on the
+PCB. `Gpio3TransactionGuard` still serializes access with a FreeRTOS mutex,
+selects the required mux branch, and establishes the pin mode/settle interval
+before the driver read. Driver rebuild also selects the branch before `begin()`
+so OneWire discovery occurs through the mux.
+
+The OneWire branch requires an external 4.7 kOhm pull-up on Y0 and the ADXL355
+CS branch should have an external 10 kOhm pull-up on Y2. The mux arrangement
+removes the previous direct OneWire/ADXL355 electrical overlap. CD74HC4051
+on-resistance, ADC accuracy/source impedance, OneWire timing, and ADXL355 CS
+timing remain **NOT VERIFIED** electrically.
 
 ### D-04 — GPIO11 hardware dependency
 GPIO11 remains the Profile 2 wind-pulse pin and Profile 3 MAX31865 CS. Its use as
@@ -54,7 +60,12 @@ in NVS. The WebUI cannot replace that password and there is no STA-mode OTA.
 `MAX_SENSORS = 13` and `MAX_DRIVERS = 13`. The capacity contract covers the
 largest 12-sensor profile and the global RFID descriptor.
 
-### D-10 — Partition and binary size
+### D-10 — Generic I2C placeholder
+Generic I2C is intentionally a placeholder. It does not perform raw register transactions or expose
+raw register bytes as telemetry; reads return `QUALITY_STALE` until a sensor-specific measurement
+protocol is implemented.
+
+### D-11 — Partition and binary size
 `app0 = 0x190000` and `app1 = 0x190000` remain unchanged. Binary size headroom is
 **NOT VERIFIED** until the target build is executed.
 
@@ -72,12 +83,12 @@ largest 12-sensor profile and the global RFID descriptor.
 | Pyranometer | 1/3 | UART | PLACEHOLDER |
 | Wind anemometer | 3 | UART | PLACEHOLDER |
 | Rain gauge | 1/2 | I2C 0x28 | PLACEHOLDER |
-| ADXL355 | 2/3 | SPI, CS GPIO3 | PLACEHOLDER |
+| ADXL355 | 2/3 | SPI, CS via GPIO3 mux | PLACEHOLDER |
 
 ## Validation status
 
 - Source-level profile/NVS/WebUI implementation: **IMPLEMENTED**
-- GPIO3 arbitration: **IMPLEMENTED / NOT VERIFIED electrically**
+- GPIO3 CD74HC4051 mux arbitration: **IMPLEMENTED / NOT VERIFIED electrically**
 - OneWire per-pin pool and shared GPIO3 use: **IMPLEMENTED**
 - RFID global event and buzzer: **IMPLEMENTED**
 - OTA AP-only architecture: **IMPLEMENTED**

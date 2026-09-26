@@ -7,7 +7,8 @@
 //
 // ARCHITECTURAL DECISION:
 //   - 4 profiles are selected by runtime configuration persisted in NVS and changed through WebUI.
-//   - There is no physical profile selector; GPIO4/GPIO5/GPIO6 are fully available to sensor functions.
+//   - There is no physical profile selector. GPIO0 and GPIO5 are reserved for the
+//     CD74HC4051 selector used to route the GPIO3 shared sensor path.
 //   - Pin map is NOT PHYSICALLY VALIDATED. It is a source-level contract only.
 //   - Buzzer uses the ESP-IDF LEDC peripheral, not blocking tone().
 //
@@ -98,14 +99,31 @@ constexpr uint16_t sensorIdBase(Profile profile) {
 constexpr int PROFILE0_I2C_SDA_PIN = 8;
 constexpr int PROFILE0_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE0_I2C_HZ = 100000UL;
-constexpr int PROFILE0_WAVE_ADC_PIN = 3;
+// GPIO3 shared path is routed through an external CD74HC4051. Only S0/S1 are
+// driven by the ESP32-C3; S2 and /E are tied to GND on the PCB, exposing four
+// usable mux states while preserving two GPIOs for selection.
+constexpr int GPIO3_MUX_COM_PIN = 3;
+constexpr int GPIO3_MUX_S0_PIN = 0;
+constexpr int GPIO3_MUX_S1_PIN = 5;
+constexpr int GPIO3_MUX_S2_PIN = -1;  // PCB: tied to GND
+constexpr int GPIO3_MUX_ENABLE_PIN = -1;  // PCB: /E tied to GND
+constexpr uint32_t GPIO3_MUX_SETTLE_US = 10;
+
+enum class Gpio3MuxChannel : uint8_t {
+  OneWire = 0,
+  Adc = 1,
+  Adxl355Cs = 2,
+  Reserved = 3,
+};
+
+constexpr int PROFILE0_WAVE_ADC_PIN = GPIO3_MUX_COM_PIN;
 constexpr int PROFILE0_TURBIDITY_ADC_PIN = 4;
-constexpr int PROFILE0_ONEWIRE_PIN = 3;
+constexpr int PROFILE0_ONEWIRE_PIN = GPIO3_MUX_COM_PIN;
 
 constexpr int PROFILE1_I2C_SDA_PIN = 8;
 constexpr int PROFILE1_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE1_I2C_HZ = 100000UL;
-constexpr int PROFILE1_ONEWIRE_PIN = 3;
+constexpr int PROFILE1_ONEWIRE_PIN = GPIO3_MUX_COM_PIN;
 constexpr int PROFILE1_CH4_ADC_PIN = 4;
 constexpr int PROFILE1_TEROS_UART_RX_PIN = -1;
 constexpr int PROFILE1_TEROS_UART_TX_PIN = -1;
@@ -116,12 +134,12 @@ constexpr int PROFILE2_I2C_SDA_PIN = 8;
 constexpr int PROFILE2_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE2_I2C_HZ = 100000UL;
 constexpr int PROFILE2_H2S_ADC_PIN = 4;
-constexpr int PROFILE2_WIND_VANE_ADC_PIN = 3;
+constexpr int PROFILE2_WIND_VANE_ADC_PIN = GPIO3_MUX_COM_PIN;
 constexpr int PROFILE2_WIND_PULSE_PIN = 11;
 constexpr int PROFILE2_PMS_UART_NUM = 1;
 constexpr int PROFILE2_PMS_RX_PIN = 18;
 constexpr int PROFILE2_PMS_TX_PIN = 19;
-constexpr int PROFILE2_ADXL355_CS_PIN = 3;
+constexpr int PROFILE2_ADXL355_CS_PIN = GPIO3_MUX_COM_PIN;
 constexpr uint32_t PROFILE2_ADC_SETTLE_MS = 2;
 
 constexpr uint8_t RAIN_GAUGE_I2C_ADDRESS = 0x28;  // PLACEHOLDER; verify HW
@@ -132,8 +150,8 @@ constexpr uint8_t SCD4X_I2C_ADDR = 0x62;         // PLACEHOLDER; verify HW
 constexpr int PROFILE3_I2C_SDA_PIN = 8;
 constexpr int PROFILE3_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE3_I2C_HZ = 100000UL;
-constexpr int PROFILE3_ONEWIRE_PIN = 3;
-constexpr int PROFILE3_ADXL355_CS_PIN = 3;
+constexpr int PROFILE3_ONEWIRE_PIN = GPIO3_MUX_COM_PIN;
+constexpr int PROFILE3_ADXL355_CS_PIN = GPIO3_MUX_COM_PIN;
 constexpr int PROFILE3_MAX31865_CS_PIN = 11;
 constexpr int PROFILE3_UART_NUM = 1;
 constexpr int PROFILE3_UART_RX_PIN = 18;
@@ -145,12 +163,13 @@ constexpr uint8_t PROFILE3_BME280_I2C_ADDR = 0x76;
 constexpr uint16_t PROFILE3_VEML6075_REG_UVA = 0;
 constexpr uint16_t PROFILE3_VEML6075_REG_UVB = 1;
 constexpr uint16_t PROFILE3_VEML6075_REG_UVI = 2;
-// ARCHITECTURAL DECISION: the Profile 3 OneWire bus and ADXL355 CS share
-// the time-share pin. OneWire requires an external 4.7 kOhm pull-up.
-// HARDWARE VALIDATION REQUIRED — source-level contract only.
+// GPIO3 is a physical COM pin on the mux. OneWire requires an external
+// 4.7 kOhm pull-up on its Y0 branch. The ADXL355 CS branch should have an
+// external pull-up so CS remains deasserted while its mux channel is open.
 constexpr bool PROFILE3_TIME_SHARE_ENABLED = true;
-constexpr uint32_t PROFILE3_TIME_SHARE_SETTLE_MS = 2;
+constexpr uint32_t PROFILE3_GPIO3_SETTLE_MS = 2;
 constexpr uint32_t PROFILE3_ONEWIRE_PULLUP_OHMS = 4700;
+constexpr uint32_t PROFILE3_ADXL355_CS_PULLUP_OHMS = 10000;
 
 constexpr size_t expectedSensorCount(Profile profile) {
   switch (profile) {
@@ -172,6 +191,10 @@ constexpr bool gpio3IsTimeShared() { return true; }
 constexpr int gpio3OwnerWhenSamplingAdc() { return PROFILE2_WIND_VANE_ADC_PIN; }
 constexpr int gpio3OwnerWhenSamplingSpi() { return PROFILE2_ADXL355_CS_PIN; }
 constexpr bool gpio3RuntimeSerializationImplemented() { return true; }
+constexpr bool gpio3ExternalMuxEnabled() { return true; }
+constexpr int gpio3MuxS0Pin() { return GPIO3_MUX_S0_PIN; }
+constexpr int gpio3MuxS1Pin() { return GPIO3_MUX_S1_PIN; }
+constexpr int gpio3MuxComPin() { return GPIO3_MUX_COM_PIN; }
 }
 
 constexpr const char* profileName(Profile profile) {
