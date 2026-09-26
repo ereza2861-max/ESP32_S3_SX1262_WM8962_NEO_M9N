@@ -4,7 +4,7 @@
 #include "ProfileConfig.h"
 
 // ProfileManager owns three responsibilities for STEP 1:
-//   1. Read the 2-bit production profile selector once at boot and expose the active profile.
+//   1. Read the 3-bit production profile selector once at boot and expose the active profile.
 //   2. Provide a non-blocking buzzer pulse API.
 //   3. Run a non-blocking button state machine that reports a 1.5 s long press.
 //
@@ -32,8 +32,8 @@ public:
   // Returns the profile selected by the static profile selector at begin().
   ProfileConfig::Profile activeProfile() const { return activeProfile_; }
 
-  // Returns the raw 2-bit profile-selector value in [0, 3] for diagnostics.
-  uint8_t rawDipValue() const { return rawDipValue_; }
+  // Returns the raw 3-bit profile-selector value before range fallback for diagnostics.
+  uint8_t rawProfileSelectorValue() const { return rawProfileSelectorValue_; }
 
   // Registers the callback fired once per confirmed 1.5 s button long press.
   // The callback runs from task() context; it must not block.
@@ -51,10 +51,10 @@ private:
     LongFired,
   };
 
-  static uint8_t readProfileSelector(int bit0, int bit1);
+  static uint8_t readProfileSelector(int bit0, int bit1, int bit2);
 
   ProfileConfig::Profile activeProfile_ = ProfileConfig::Profile::IslandSea;
-  uint8_t rawDipValue_ = 0;
+  uint8_t rawProfileSelectorValue_ = 0;
 
   ButtonState buttonState_ = ButtonState::Idle;
   uint32_t buttonStateSinceMs_ = 0;

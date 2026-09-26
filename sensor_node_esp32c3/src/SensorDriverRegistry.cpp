@@ -2,45 +2,19 @@
 #include "Config.h"
 #include "ProfileConfig.h"
 #include <Adafruit_BME280.h>
-#include <Preferences.h>
 #include <Wire.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <cmath>
+#if __has_include(<freertos/FreeRTOS.h>)
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
 #include <cfloat>
 #include <cstring>
 #include <algorithm>
 
 namespace {
-constexpr uint32_t CONFIG_MAGIC = 0x47464353UL; // "SCFG"
-constexpr uint8_t CONFIG_VERSION = 1;
-
-#pragma pack(push, 1)
-struct DiskEntry {
-  uint8_t driverType;
-  uint16_t sensorId;
-  uint8_t pinSda;
-  uint8_t pinScl;
-  uint8_t i2cAddr;
-  uint8_t reserved[3]; // register address (LE16) + generic data width
-  uint32_t periodMs;
-  uint16_t flags;
-};
-
-struct DiskConfig {
-  uint32_t magic = CONFIG_MAGIC;
-  uint8_t version = CONFIG_VERSION;
-  uint8_t count = 0;
-  uint16_t reserved = 0;
-  DiskEntry entries[SensorDriverRegistry::MAX_DRIVERS]{};
-  uint32_t crc32 = 0;
-};
-#pragma pack(pop)
-
-static_assert(sizeof(DiskEntry) == 15, "DriverEntry wire layout changed");
-static_assert(sizeof(DiskConfig) == 4 + 1 + 1 + 2 + 15 * SensorDriverRegistry::MAX_DRIVERS + 4,
-              "sensor config layout changed");
-
 uint16_t registerAddress(const DriverConfig& config) {
   return static_cast<uint16_t>(config.registerAddr);
 }
@@ -49,7 +23,6 @@ class Bme280Driver final : public SensorDriver {
 public:
   bool begin(const DriverConfig& config) override {
     config_ = config;
-    Wire.begin(config.pinSda, config.pinScl);
     ready_ = sensor_.begin(config.i2cAddr, &Wire);
     return ready_;
   }
@@ -65,7 +38,6 @@ public:
   uint16_t sensorId() const override { return config_.sensorId; }
 
   bool read(float& value, uint8_t& quality) override {
-    Wire.begin(config_.pinSda, config_.pinScl);
     if (!ready_) ready_ = sensor_.begin(config_.i2cAddr, &Wire);
     if (!ready_) { value = 0.0f; quality = SensorProtocol::QUALITY_STALE; return false; }
     switch (registerAddress(config_)) {
@@ -189,7 +161,6 @@ class GenericI2cDriver final : public SensorDriver {
 public:
   bool begin(const DriverConfig& config) override {
     config_ = config;
-    Wire.begin(config_.pinSda, config_.pinScl);
     return true;
   }
 
@@ -197,11 +168,56 @@ public:
   uint16_t sensorId() const override { return config_.sensorId; }
 
   bool read(float& value, uint8_t& quality) override {
-    // GenericI2C is a registration/descriptor placeholder, not a protocol
-    // implementation. A raw register value is not a valid sensor measurement.
     value = 0.0f;
     quality = SensorProtocol::QUALITY_STALE;
-    return false;
+
+    const auto interface =
+        static_cast<ProfileConfig::InterfaceKind>(config_.interfaceType);
+    if (interface != ProfileConfig::InterfaceKind::I2C) return false;
+
+    const uint8_t width = config_.dataWidth;
+    if (width != 1 && width != 2 && width != 4) return false;
+
+    Wire.beginTransmission(config_.i2cAddr);
+    if (config_.flags & SensorDriverRegistry::FLAG_REGISTER_16BIT) {
+      Wire.write(static_cast<uint8_t>(config_.registerAddr >> 8U));
+      Wire.write(static_cast<uint8_t>(config_.registerAddr & 0xFFU));
+    } else {
+      Wire.write(static_cast<uint8_t>(config_.registerAddr & 0xFFU));
+    }
+    if (Wire.endTransmission(false) != 0) return false;
+
+    const uint8_t requested = Wire.requestFrom(
+        static_cast<int>(config_.i2cAddr), static_cast<int>(width), true);
+    if (requested != width || Wire.available() < width) return false;
+
+    uint32_t raw = 0;
+    if (config_.flags & SensorDriverRegistry::FLAG_LITTLE_ENDIAN) {
+      for (uint8_t i = 0; i < width; ++i) {
+        raw |= static_cast<uint32_t>(Wire.read()) << (8U * i);
+      }
+    } else {
+      for (uint8_t i = 0; i < width; ++i) {
+        raw = (raw << 8U) | static_cast<uint32_t>(Wire.read());
+      }
+    }
+
+    if (config_.flags & SensorDriverRegistry::FLAG_SIGNED) {
+      int64_t signedValue = static_cast<int64_t>(raw);
+      if (width < 4) {
+        const uint8_t bits = static_cast<uint8_t>(width * 8U);
+        const uint32_t signBit = 1UL << (bits - 1U);
+        if (raw & signBit) signedValue -= (1LL << bits);
+      } else {
+        signedValue = static_cast<int32_t>(raw);
+      }
+      value = static_cast<float>(signedValue);
+    } else {
+      value = static_cast<float>(raw);
+    }
+
+    quality = SensorProtocol::QUALITY_VALID;
+    return true;
   }
 
   SensorProtocol::SensorDescriptor descriptor() const override {
@@ -323,8 +339,6 @@ class AtlasEzoDriver final : public SensorDriver {
 public:
   bool begin(const DriverConfig& config) override {
     config_ = config;
-    Wire.begin(config_.pinSda, config_.pinScl);
-    Wire.setClock(ProfileConfig::PROFILE0_I2C_HZ);
     ready_ = probe();
     return ready_;
   }
@@ -497,13 +511,38 @@ struct PulseSlot {
   int pin = -1;
 };
 PulseSlot gPulseSlots[SensorDriverRegistry::MAX_DRIVERS];
+
 void IRAM_ATTR pulseIsrHandler(void* arg) {
   auto* slot = static_cast<PulseSlot*>(arg);
   if (!slot) return;
   const uint32_t nowUs = micros();
   if (slot->lastEdgeUs && static_cast<uint32_t>(nowUs-slot->lastEdgeUs) < slot->debounceUs) return;
-  slot->lastEdgeUs = nowUs; ++slot->count;
+  slot->lastEdgeUs = nowUs;
+  ++slot->count;
 }
+
+#if !defined(ESP_ARDUINO_VERSION_MAJOR) || ESP_ARDUINO_VERSION_MAJOR < 3
+template <size_t Index>
+void IRAM_ATTR pulseIsrLegacySlot() {
+  auto& slot = gPulseSlots[Index];
+  if (!slot.attached) return;
+  const uint32_t nowUs = micros();
+  if (slot.lastEdgeUs &&
+      static_cast<uint32_t>(nowUs - slot.lastEdgeUs) < slot.debounceUs) {
+    return;
+  }
+  slot.lastEdgeUs = nowUs;
+  ++slot.count;
+}
+
+using LegacyPulseIsr = void (*)();
+constexpr LegacyPulseIsr kLegacyPulseIsrs[SensorDriverRegistry::MAX_DRIVERS] = {
+    pulseIsrLegacySlot<0>, pulseIsrLegacySlot<1>, pulseIsrLegacySlot<2>,
+    pulseIsrLegacySlot<3>, pulseIsrLegacySlot<4>, pulseIsrLegacySlot<5>,
+    pulseIsrLegacySlot<6>, pulseIsrLegacySlot<7>, pulseIsrLegacySlot<8>,
+    pulseIsrLegacySlot<9>, pulseIsrLegacySlot<10>, pulseIsrLegacySlot<11>,
+};
+#endif
 
 class PulseCounterDriver final : public SensorDriver {
 public:
@@ -514,7 +553,21 @@ public:
     if (!slot_) return false;
     slot_->pin=config_.pinSda; slot_->count=0; slot_->lastEdgeUs=0; slot_->attached=true;
     pinMode(slot_->pin, INPUT_PULLUP);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
     attachInterruptArg(digitalPinToInterrupt(slot_->pin), pulseIsrHandler, slot_, FALLING);
+#else
+    // Arduino-ESP32 2.x has no attachInterruptArg(). Use a fixed ISR table
+    // so each interrupt remains bound to its own PulseSlot.
+    const size_t slotIndex = static_cast<size_t>(slot_ - gPulseSlots);
+    if (slotIndex >= SensorDriverRegistry::MAX_DRIVERS) {
+      slot_->attached = false;
+      slot_->pin = -1;
+      slot_ = nullptr;
+      return false;
+    }
+    attachInterrupt(digitalPinToInterrupt(slot_->pin),
+                    kLegacyPulseIsrs[slotIndex], FALLING);
+#endif
     return true;
   }
   ~PulseCounterDriver() override {
@@ -539,16 +592,6 @@ private: DriverConfig config_{}; PulseSlot* slot_=nullptr;
 
 }  // namespace
 
-uint32_t SensorDriverRegistry::crc32(const uint8_t* data, size_t len) {
-  uint32_t crc = 0xFFFFFFFFU;
-  for (size_t i = 0; i < len; ++i) {
-    crc ^= data[i];
-    for (uint8_t bit = 0; bit < 8; ++bit)
-      crc = (crc >> 1U) ^ (0xEDB88320U & static_cast<uint32_t>(-(static_cast<int32_t>(crc & 1U))));
-  }
-  return crc ^ 0xFFFFFFFFU;
-}
-
 bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
   if (config.sensorId == 0 || config.periodMs == 0 || config.periodMs > 86400000UL) return false;
   if (config.driverType < DRIVER_BME280 || config.driverType > DRIVER_PULSE_COUNTER) return false;
@@ -564,8 +607,9 @@ bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
         (config.dataWidth != 1 && config.dataWidth != 2 && config.dataWidth != 4))
       return false;
   } else if (config.driverType == DRIVER_GENERIC_ADC) {
-    // ADC1 on ESP32-C3 is GPIO0..4. GPIO2 is a strapping pin and is excluded.
-    if (config.pinSda > 4 || config.pinSda == 2) return false;
+    // Profile time-share contract uses GPIO15 for the wind-vane ADC path.
+    // Hardware capability remains a board-level validation item.
+    if ((config.pinSda > 4 && config.pinSda != 15) || config.pinSda == 2) return false;
   } else if (config.driverType == DRIVER_GENERIC_UART) {
     // UART pins are not validated here; the profile owns the SerialX mapping.
     if (config.dataWidth == 0) return false;
@@ -667,114 +711,75 @@ void SensorDriverRegistry::clear(SensorRegistry& registry) {
   registry.clear();
 }
 
-bool SensorDriverRegistry::load(SensorRegistry& registry) {
-  Preferences prefs;
-  if (!prefs.begin("sensor_cfg", true)) return false;
-  const size_t got = prefs.getBytesLength("cfg");
-  if (got == 0) { prefs.end(); return false; }
-  if (got != sizeof(DiskConfig)) { prefs.end(); return false; }
-  DiskConfig disk{};
-  if (prefs.getBytes("cfg", &disk, sizeof(disk)) != sizeof(disk)) {
-    prefs.end();
-    return false;
-  }
-  prefs.end();
-  if (disk.magic != CONFIG_MAGIC || disk.version != CONFIG_VERSION ||
-      disk.count == 0 || disk.count > MAX_DRIVERS ||
-      disk.crc32 != crc32(reinterpret_cast<const uint8_t*>(&disk),
-                          offsetof(DiskConfig, crc32))) return false;
-
-  clear(registry);
-  for (size_t i = 0; i < disk.count; ++i) {
-    DriverConfig config{};
-    const DiskEntry& entry = disk.entries[i];
-    config.driverType = entry.driverType;
-    config.sensorId = entry.sensorId;
-    config.pinSda = entry.pinSda;
-    config.pinScl = entry.pinScl;
-    config.i2cAddr = entry.i2cAddr;
-    config.registerAddr = static_cast<uint16_t>(entry.reserved[0]) |
-                          (static_cast<uint16_t>(entry.reserved[1]) << 8U);
-    config.dataWidth = entry.reserved[2];
-    config.periodMs = entry.periodMs;
-    config.flags = entry.flags;
-    if (!validConfig(config)) {
-      clear(registry);
-      return false;
-    }
-    entries_[count_++].config = config;
-  }
-  return rebuild(registry);
-}
-
-bool SensorDriverRegistry::save() const {
-  DiskConfig disk{};
-  disk.count = static_cast<uint8_t>(count_);
-  for (size_t i = 0; i < count_; ++i) {
-    const DriverConfig& config = entries_[i].config;
-    DiskEntry& entry = disk.entries[i];
-    entry.driverType = config.driverType;
-    entry.sensorId = config.sensorId;
-    entry.pinSda = config.pinSda;
-    entry.pinScl = config.pinScl;
-    entry.i2cAddr = config.i2cAddr;
-    entry.reserved[0] = static_cast<uint8_t>(config.registerAddr);
-    entry.reserved[1] = static_cast<uint8_t>(config.registerAddr >> 8U);
-    entry.reserved[2] = config.dataWidth;
-    entry.periodMs = config.periodMs;
-    entry.flags = config.flags;
-  }
-  disk.crc32 = crc32(reinterpret_cast<const uint8_t*>(&disk),
-                      offsetof(DiskConfig, crc32));
-  Preferences prefs;
-  if (!prefs.begin("sensor_cfg", false)) return false;
-  const bool ok = prefs.putBytes("cfg", &disk, sizeof(disk)) == sizeof(disk);
-  prefs.end();
-  return ok;
-}
-
 namespace {
 
-class Gpio3TransactionGuard {
+#if __has_include(<freertos/FreeRTOS.h>)
+SemaphoreHandle_t gGpio15Mutex = nullptr;
+
+bool lockGpio15() {
+  if (!gGpio15Mutex) gGpio15Mutex = xSemaphoreCreateMutex();
+  return gGpio15Mutex && xSemaphoreTake(gGpio15Mutex, portMAX_DELAY) == pdTRUE;
+}
+
+void unlockGpio15() {
+  if (gGpio15Mutex) xSemaphoreGive(gGpio15Mutex);
+}
+#else
+bool lockGpio15() { return true; }
+void unlockGpio15() {}
+#endif
+
+class Gpio15TransactionGuard {
 public:
-  explicit Gpio3TransactionGuard(const DriverConfig& config)
-      : active_(config.pinSda == 3) {
+  explicit Gpio15TransactionGuard(const DriverConfig& config)
+      : active_(config.pinSda == 15) {
     if (!active_) return;
+    if (!lockGpio15()) {
+      active_ = false;
+      Serial.println("ERROR: GPIO15 mutex unavailable");
+      return;
+    }
+    locked_ = true;
 
     const auto kind =
         static_cast<ProfileConfig::InterfaceKind>(config.interfaceType);
     switch (kind) {
       case ProfileConfig::InterfaceKind::Adc:
-        pinMode(3, INPUT);
+        // Ensure any SPI-CS consumer is deselected before the ADC conversion.
+        pinMode(15, INPUT);
         delay(ProfileConfig::PROFILE2_ADC_SETTLE_MS);
         break;
       case ProfileConfig::InterfaceKind::OneWire:
         // Keep the external pull-up as the only defined pull-up source.
-        pinMode(3, INPUT);
-        delay(ProfileConfig::PROFILE3_GPIO3_SETTLE_MS);
+        pinMode(15, INPUT);
+        delay(ProfileConfig::PROFILE3_TIME_SHARE_SETTLE_MS);
         break;
       case ProfileConfig::InterfaceKind::SPI:
         modeWasSpi_ = true;
-        pinMode(3, OUTPUT);
-        digitalWrite(3, HIGH);
+        pinMode(15, OUTPUT);
+        digitalWrite(15, HIGH);
         break;
       default:
         active_ = false;
+        unlockGpio15();
+        locked_ = false;
         break;
     }
   }
 
-  ~Gpio3TransactionGuard() {
+  ~Gpio15TransactionGuard() {
     if (!active_) return;
-    if (modeWasSpi_) digitalWrite(3, HIGH);
-    pinMode(3, INPUT);
+    if (modeWasSpi_) digitalWrite(15, HIGH);
+    pinMode(15, INPUT);
+    if (locked_) unlockGpio15();
   }
 
-  Gpio3TransactionGuard(const Gpio3TransactionGuard&) = delete;
-  Gpio3TransactionGuard& operator=(const Gpio3TransactionGuard&) = delete;
+  Gpio15TransactionGuard(const Gpio15TransactionGuard&) = delete;
+  Gpio15TransactionGuard& operator=(const Gpio15TransactionGuard&) = delete;
 
 private:
   bool active_ = false;
+  bool locked_ = false;
   bool modeWasSpi_ = false;
 };
 
@@ -789,10 +794,20 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
     entry.lastSampleMs = nowMs;
     float value = 0.0f;
     uint8_t quality = SensorProtocol::QUALITY_STALE;
-    Gpio3TransactionGuard gpio3Guard(entry.config);
+    Gpio15TransactionGuard gpio15Guard(entry.config);
     const bool readOk = entry.driver->read(value, quality);
-    if (!readOk && !std::isfinite(value)) value = 0.0f;
-    ok &= registry.updateValue(entry.config.sensorId, value, quality);
+    if (!readOk) {
+      Serial.printf("SENSOR: read failed id=0x%04X driver=%u quality=%u\n",
+                    static_cast<unsigned>(entry.config.sensorId),
+                    static_cast<unsigned>(entry.config.driverType),
+                    static_cast<unsigned>(quality));
+      if (!std::isfinite(value)) value = 0.0f;
+    }
+    if (!registry.updateValue(entry.config.sensorId, value, quality)) {
+      Serial.printf("SENSOR: registry update failed id=0x%04X\n",
+                    static_cast<unsigned>(entry.config.sensorId));
+      ok = false;
+    }
   }
   return ok;
 }

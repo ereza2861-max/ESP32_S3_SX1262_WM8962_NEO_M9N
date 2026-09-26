@@ -7,8 +7,9 @@
 #include "ProfileSensors.h"
 #include "SensorRegistry.h"
 #include "BleSensorServer.h"
-#include "sensors_example.h"
 #include "SensorDriverRegistry.h"
+#include "RfidReader.h"
+#include "SensorProtocol.h"
 
 namespace {
 SensorRegistry registry;
@@ -17,17 +18,25 @@ BleSensorServer bleServer;
 ProfileManager profileManager;
 ProfileSensors profileSensors;
 OtaApManager otaApManager;
+RfidReader rfidReader;
 Preferences prefs;
 String nodeName;
-size_t configuredSensorCount = SensorNodeConfig::EXAMPLE_SENSOR_COUNT;
 // OTA is served only through the local AP managed by OtaApManager.
 // Green-field provisioning persists only the local OTA password.
 String otaPassword;
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
 
-bool validSecretLength(const String& value) {
-  return value.length() >= OTA_PASSWORD_MIN_LEN && value.length() <= OTA_PASSWORD_MAX_LEN;
+bool validOtaPassword(const String& value) {
+  if (value.length() < OTA_PASSWORD_MIN_LEN ||
+      value.length() > OTA_PASSWORD_MAX_LEN) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(value[i]);
+    if (c < 0x21 || c > 0x7E) return false;
+  }
+  return true;
 }
 
 bool saveOtaProvisioning(const String& otaPass) {
@@ -43,31 +52,6 @@ void onLongPressToggleAp() {
   otaApManager.toggleAp();
 }
 
-
-bool validBatteryPin(int pin) {
-  // ESP32-C3 ADC1 is GPIO0..4. GPIO2 is a strapping pin and is excluded.
-  return pin >= 0 && pin <= 4 && pin != 2;
-}
-
-bool validDigitalPin(int pin) {
-  // Keep the interactive provisioning command away from boot straps, VDD_SPI,
-  // flash pins and USB-JTAG. BME280 already owns GPIO8/9.
-  switch (pin) {
-    case 0:
-    case 1:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
-    case 7:
-    case 10:
-    case 20:
-    case 21:
-      return true;
-    default:
-      return false;
-  }
-}
 
 bool validNodeNameLength(const String& value, size_t maxBytes) {
   return value.length() > 0 && value.length() <= maxBytes;
@@ -100,7 +84,6 @@ bool parseStrictInt(const String& text, int& out) {
 void printHelp() {
   Serial.println("Commands:");
   Serial.println("  name <node-name>        set node name (max 24 bytes)");
-  Serial.println("  sensors <0..5>          set legacy example sensor count");
   Serial.println("  driver add <type> <sensorId> [args...]");
   Serial.println("    bme280 <sda> <scl> <addr> <channel 0..2> <periodMs>");
   Serial.println("    battery <pin> <periodMs>");
@@ -109,9 +92,6 @@ void printHelp() {
   Serial.println("    flags: bit0=signed bit1=little-endian bit2=16-bit-register");
   Serial.println("  driver remove <sensorId>");
   Serial.println("  driver list");
-  Serial.println("  driver save");
-  Serial.println("  pin battery <gpio>      set legacy ADC1 battery GPIO (0,1,3,4)");
-  Serial.println("  pin digital <gpio>      set legacy safe digital GPIO");
   Serial.println("  ota password <secret>    stage OTA password (min 12 chars)");
   Serial.println("  ota save                 save OTA provisioning and reboot");
   Serial.println("  show                    show current provisioning");
@@ -125,22 +105,6 @@ void loadProvisioning() {
     return;
   }
   nodeName = prefs.getString("name", SensorNodeConfig::DEFAULT_NODE_NAME);
-  configuredSensorCount = std::min<size_t>(
-      prefs.getUChar("count", static_cast<uint8_t>(SensorNodeConfig::EXAMPLE_SENSOR_COUNT)),
-      SensorNodeConfig::EXAMPLE_SENSOR_COUNT);
-  const int batteryPin =
-      prefs.getInt("batpin", SensorNodeConfig::BATTERY_ADC_PIN);
-  const int digitalPin =
-      prefs.getInt("digpin", SensorNodeConfig::DIGITAL_SENSOR_PIN);
-  if (!validBatteryPin(batteryPin) || !validDigitalPin(digitalPin) ||
-      batteryPin == digitalPin) {
-    Serial.println("WARN: invalid persisted pin map; restoring safe defaults");
-    SensorsExample::setBatteryAdcPin(SensorNodeConfig::BATTERY_ADC_PIN);
-    SensorsExample::setDigitalPin(SensorNodeConfig::DIGITAL_SENSOR_PIN);
-  } else {
-    SensorsExample::setBatteryAdcPin(batteryPin);
-    SensorsExample::setDigitalPin(digitalPin);
-  }
   prefs.end();
 }
 
@@ -149,16 +113,12 @@ void saveProvisioning() {
     Serial.println("ERROR: NVS open failed");
     return;
   }
-  if (nodeName.length() > SensorProtocol::MAX_NODE_NAME_BYTES - 1) {
-    Serial.println("ERROR: node name too long");
+  if (!validNodeNameLength(nodeName, SensorProtocol::MAX_NODE_NAME_BYTES - 1)) {
+    Serial.println("ERROR: invalid node name length");
     prefs.end();
     return;
   }
-  const bool ok =
-      prefs.putString("name", nodeName) > 0 &&
-      prefs.putUChar("count", static_cast<uint8_t>(configuredSensorCount)) == sizeof(uint8_t) &&
-      prefs.putInt("batpin", SensorsExample::batteryAdcPin()) == sizeof(int32_t) &&
-      prefs.putInt("digpin", SensorsExample::digitalPin()) == sizeof(int32_t);
+  const bool ok = prefs.putString("name", nodeName) > 0;
   prefs.end();
   if (!ok) {
     Serial.println("ERROR: NVS write failed; provisioning not committed");
@@ -170,11 +130,40 @@ void saveProvisioning() {
 }
 
 void showProvisioning() {
-  Serial.printf("name=%s sensors=%u battery_gpio=%d digital_gpio=%d drivers=%u\n",
-                nodeName.c_str(), static_cast<unsigned>(configuredSensorCount),
-                SensorsExample::batteryAdcPin(), SensorsExample::digitalPin(),
-                static_cast<unsigned>(driverRegistry.count()));
+  Serial.printf("name=%s profile=%u drivers=%u sensors=%u rfid=%s\n",
+                nodeName.c_str(),
+                static_cast<unsigned>(profileManager.rawProfileSelectorValue()),
+                static_cast<unsigned>(driverRegistry.count()),
+                static_cast<unsigned>(registry.count()),
+                rfidReader.isReady() ? "ready" : "unavailable");
   Serial.println("ota=managed-by-OtaApManager");
+}
+
+void onRfidTagDetected(const uint8_t*, uint8_t) {
+  if (!registry.updateValue(ProfileConfig::SENSOR_ID_RFID_EVENT, 1.0f,
+                            SensorProtocol::QUALITY_VALID)) {
+    Serial.println("RFID: registry update failed");
+  }
+  profileManager.buzzerPulse();
+}
+
+bool registerRfidDescriptor() {
+  SensorProtocol::SensorDescriptor descriptor{};
+  descriptor.id = ProfileConfig::SENSOR_ID_RFID_EVENT;
+  descriptor.type = static_cast<uint8_t>(SensorProtocol::SensorType::GENERIC);
+  std::strncpy(descriptor.name, "rfid_tag", sizeof(descriptor.name) - 1);
+  std::strncpy(descriptor.unit, "event", sizeof(descriptor.unit) - 1);
+  descriptor.datatype =
+      static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+  descriptor.scale = 1.0f;
+  descriptor.offset = 0.0f;
+  descriptor.min = 0.0f;
+  descriptor.max = 1.0f;
+  descriptor.periodMs = ProfileConfig::RFID_POLL_INTERVAL_MS;
+  descriptor.flags = SensorProtocol::FLAG_ENABLED |
+                    SensorProtocol::FLAG_EVENT_DRIVEN |
+                    SensorProtocol::FLAG_READ_ONLY;
+  return registry.registerSensor(descriptor);
 }
 
 void handleCommand(String line) {
@@ -184,8 +173,8 @@ void handleCommand(String line) {
   if (line == "show") { showProvisioning(); return; }
   if (line == "save") { saveProvisioning(); return; }
   if (line == "ota save") {
-    if (!validSecretLength(otaPassword)) {
-      Serial.println("ERROR: provision an OTA password (>=12 chars) first");
+    if (!validOtaPassword(otaPassword)) {
+      Serial.println("ERROR: provision an OTA password (12..64 printable ASCII characters) first");
       return;
     }
     const bool saved = saveOtaProvisioning(otaPassword);
@@ -199,8 +188,8 @@ void handleCommand(String line) {
   }
   if (line.startsWith("ota password ")) {
     otaPassword = line.substring(13);
-    if (!validSecretLength(otaPassword)) {
-      Serial.println("ERROR: OTA password must be 12..64 bytes");
+    if (!validOtaPassword(otaPassword)) {
+      Serial.println("ERROR: OTA password must be 12..64 printable ASCII characters");
       return;
     }
     Serial.println("OK: OTA password staged");
@@ -218,10 +207,6 @@ void handleCommand(String line) {
   }
   if (line == "driver list") {
     Serial.println(driverRegistry.listJson());
-    return;
-  }
-  if (line == "driver save") {
-    Serial.println(driverRegistry.save() ? "OK: driver configuration saved" : "ERROR: driver configuration save failed");
     return;
   }
   if (line.startsWith("driver remove ")) {
@@ -323,46 +308,6 @@ void handleCommand(String line) {
     Serial.println("OK: driver staged");
     return;
   }
-  if (line.startsWith("sensors ")) {
-    int value = 0;
-    if (!parseStrictInt(line.substring(8), value) ||
-        value < 0 || value > static_cast<int>(SensorNodeConfig::EXAMPLE_SENSOR_COUNT)) {
-      Serial.println("ERROR: sensors must be 0..5");
-      return;
-    }
-    configuredSensorCount = static_cast<size_t>(value);
-    SensorsExample::registerSensors(registry, configuredSensorCount);
-    Serial.println("OK: sensor count staged");
-    return;
-  }
-  if (line.startsWith("pin battery ")) {
-    int pin = 0;
-    if (!parseStrictInt(line.substring(12), pin) || !validBatteryPin(pin)) {
-      Serial.println("ERROR: battery GPIO must be ADC1 GPIO0,1,3,4");
-      return;
-    }
-    if (pin == SensorsExample::digitalPin()) {
-      Serial.println("ERROR: battery GPIO conflicts with digital GPIO");
-      return;
-    }
-    SensorsExample::setBatteryAdcPin(pin);
-    Serial.println("OK: battery GPIO staged");
-    return;
-  }
-  if (line.startsWith("pin digital ")) {
-    int pin = 0;
-    if (!parseStrictInt(line.substring(12), pin) || !validDigitalPin(pin)) {
-      Serial.println("ERROR: digital GPIO is reserved, strapping, USB-JTAG, or unavailable");
-      return;
-    }
-    if (pin == SensorsExample::batteryAdcPin()) {
-      Serial.println("ERROR: digital GPIO conflicts with battery GPIO");
-      return;
-    }
-    SensorsExample::setDigitalPin(pin);
-    Serial.println("OK: digital GPIO staged");
-    return;
-  }
   Serial.println("ERROR: unknown command; use help");
 }
 }  // namespace
@@ -372,17 +317,24 @@ void setup() {
   delay(200);
   Serial.println("FieldRadio ESP32-C3 BLE Sensor Node");
   loadProvisioning();
-  SensorsExample::begin({SensorsExample::batteryAdcPin(), SensorsExample::digitalPin()});
   profileManager.begin();
   profileManager.setLongPressCallback(onLongPressToggleAp);
-  (void)profileSensors.begin(profileManager.activeProfile(), driverRegistry, registry);
-  otaApManager.begin();
-  if (!driverRegistry.load(registry)) {
-    SensorsExample::registerSensors(registry, configuredSensorCount);
-    Serial.println("INFO: sensor_cfg empty/unavailable; using legacy example sensor fallback");
-  } else {
-    Serial.println("INFO: runtime sensor driver registry loaded");
+
+  const bool rosterOk =
+      profileSensors.begin(profileManager.activeProfile(), driverRegistry, registry);
+  if (!rosterOk) {
+    Serial.println("WARN: active profile roster is incomplete");
   }
+
+  if (!registerRfidDescriptor()) {
+    Serial.println("ERROR: RFID descriptor registration failed");
+  }
+  rfidReader.setTagCallback(onRfidTagDetected);
+  if (!rfidReader.begin()) {
+    Serial.println("WARN: RFID unavailable; continuing without RFID events");
+  }
+
+  otaApManager.begin();
   showProvisioning();
   Serial.printf("drivers=%s\n", driverRegistry.listJson().c_str());
   printHelp();
@@ -397,12 +349,12 @@ void loop() {
   const uint32_t now = millis();
   if (now - lastSampleMs >= SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS) {
     lastSampleMs = now;
-    if (driverRegistry.count() > 0) (void)driverRegistry.sample(registry, now);
-    else SensorsExample::sample(registry);
+    (void)driverRegistry.sample(registry, now);
   }
   profileManager.task();
   otaApManager.task();
   bleServer.task();
+  rfidReader.task();
 
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');

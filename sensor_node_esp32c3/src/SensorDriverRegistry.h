@@ -23,8 +23,6 @@ public:
   static constexpr uint16_t FLAG_LITTLE_ENDIAN = 1U << 1;
   static constexpr uint16_t FLAG_REGISTER_16BIT = 1U << 2;
 
-  bool load(SensorRegistry& registry);
-  bool save() const;
   bool add(const DriverConfig& config, SensorRegistry& registry);
   bool remove(uint16_t sensorId, SensorRegistry& registry);
   void clear(SensorRegistry& registry);
@@ -43,7 +41,6 @@ private:
   Entry entries_[MAX_DRIVERS]{};
   size_t count_ = 0;
 
-  static uint32_t crc32(const uint8_t* data, size_t len);
   static SensorDriver* createDriver(const DriverConfig& config);
   static bool validConfig(const DriverConfig& config);
   bool rebuild(SensorRegistry& registry);

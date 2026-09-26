@@ -1,4 +1,4 @@
-// Native test for ProfileConfig pure DIP decoding helpers.
+// Native test for ProfileConfig pure profile selector decoding helpers.
 //
 // This test does NOT depend on Arduino.h, Preferences.h, Wire.h, SPI.h, or
 // any ESP-IDF headers. It only exercises constexpr logic that is compiled
@@ -9,35 +9,41 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 #include "ProfileConfig.h"
+#include "SensorRegistry.h"
 
 namespace {
 
 void testDipBitEncoding() {
   // Electrical LOW  => logical 0 (switch closed, pulled to GND)
   // Electrical HIGH => logical 1 (switch open, pulled to VCC)
-  static_assert(ProfileConfig::encodeDipBit(false) == 0, "LOW must map to 0");
-  static_assert(ProfileConfig::encodeDipBit(true) == 1, "HIGH must map to 1");
+  static_assert(ProfileConfig::encodeProfileSelectorBit(false) == 0, "LOW must map to 0");
+  static_assert(ProfileConfig::encodeProfileSelectorBit(true) == 1, "HIGH must map to 1");
 }
 
 void testDecodeAllCombinations() {
   // bit0 is LSB, bit1 is MSB.
   // (b0High, b1High) -> profile index
-  assert(ProfileConfig::decodeDipBits(false, false) == 0);  // both closed
-  assert(ProfileConfig::decodeDipBits(true,  false) == 1);  // bit0 open
-  assert(ProfileConfig::decodeDipBits(false, true)  == 2);  // bit1 open
-  assert(ProfileConfig::decodeDipBits(true,  true)  == 3);  // both open
+  assert(ProfileConfig::decodeProfileSelectorBits(false, false, false) == 0);
+  assert(ProfileConfig::decodeProfileSelectorBits(true,  false, false) == 1);
+  assert(ProfileConfig::decodeProfileSelectorBits(false, true,  false) == 2);
+  assert(ProfileConfig::decodeProfileSelectorBits(true,  true,  false)  == 3);
+  assert(ProfileConfig::decodeProfileSelectorBits(false, false, true) == 4);
+  assert(ProfileConfig::decodeProfileSelectorBits(true,  false, true) == 5);
+  assert(ProfileConfig::decodeProfileSelectorBits(false, true,  true)  == 6);
+  assert(ProfileConfig::decodeProfileSelectorBits(true,  true,  true)  == 7);
 }
 
 void testDipRange() {
-  assert(ProfileConfig::dipValueInRange(0));
-  assert(ProfileConfig::dipValueInRange(1));
-  assert(ProfileConfig::dipValueInRange(2));
-  assert(ProfileConfig::dipValueInRange(3));
-  // Values 4..255 are out of range for a 2-bit DIP.
-  assert(!ProfileConfig::dipValueInRange(4));
-  assert(!ProfileConfig::dipValueInRange(255));
+  assert(ProfileConfig::profileSelectorValueInRange(0));
+  assert(ProfileConfig::profileSelectorValueInRange(1));
+  assert(ProfileConfig::profileSelectorValueInRange(2));
+  assert(ProfileConfig::profileSelectorValueInRange(3));
+  // Values 4..7 are reserved selector encodings; 8..255 are invalid.
+  assert(!ProfileConfig::profileSelectorValueInRange(4));
+  assert(!ProfileConfig::profileSelectorValueInRange(255));
 }
 
 void testProfileNamesDistinct() {
@@ -63,6 +69,69 @@ void testSensorIdBasesDistinct() {
   assert(ProfileConfig::SENSOR_ID_BASE_BATTERY == 0x00F2);
 }
 
+void testProfileRosterContracts() {
+  using Profile = ProfileConfig::Profile;
+  assert(ProfileConfig::expectedSensorCount(Profile::IslandSea) == 6);
+  assert(ProfileConfig::expectedSensorCount(Profile::TropicalForest) == 12);
+  assert(ProfileConfig::expectedSensorCount(Profile::VolcanicMountain) == 8);
+  assert(ProfileConfig::expectedSensorCount(Profile::SubZeroSnow) == 9);
+
+  for (Profile profile : {Profile::IslandSea, Profile::TropicalForest,
+                          Profile::VolcanicMountain, Profile::SubZeroSnow}) {
+    const size_t count = ProfileConfig::expectedSensorCount(profile);
+    for (size_t i = 0; i < count; ++i) {
+      const uint16_t id = ProfileConfig::sensorIdFor(profile, i);
+      assert(id != 0);
+      assert(id == static_cast<uint16_t>(ProfileConfig::sensorIdBase(profile) + i));
+      for (size_t j = i + 1; j < count; ++j) {
+        assert(id != ProfileConfig::sensorIdFor(profile, j));
+      }
+    }
+    assert(count <= SensorRegistry::MAX_SENSORS);
+  }
+}
+
+void testDriverTypes() {
+  using Driver = ProfileConfig::DriverType;
+  assert(static_cast<uint8_t>(Driver::Bme280) == 1);
+  assert(static_cast<uint8_t>(Driver::BatteryAdc) == 2);
+  assert(static_cast<uint8_t>(Driver::DigitalInput) == 3);
+  assert(static_cast<uint8_t>(Driver::GenericI2c) == 4);
+  assert(static_cast<uint8_t>(Driver::GenericAdc) == 5);
+  assert(static_cast<uint8_t>(Driver::GenericUart) == 6);
+  assert(static_cast<uint8_t>(Driver::AtlasEzo) == 7);
+  assert(static_cast<uint8_t>(Driver::OneWireTemp) == 8);
+  assert(static_cast<uint8_t>(Driver::PulseCounter) == 9);
+}
+
+void testProfileInterfacesAndPins() {
+  using Interface = ProfileConfig::InterfaceKind;
+  assert(static_cast<uint8_t>(Interface::I2C) == 0);
+  assert(static_cast<uint8_t>(Interface::SPI) == 1);
+  assert(static_cast<uint8_t>(Interface::UART) == 2);
+  assert(static_cast<uint8_t>(Interface::OneWire) == 3);
+  assert(static_cast<uint8_t>(Interface::Adc) == 4);
+  assert(static_cast<uint8_t>(Interface::Pulse) == 5);
+  assert(ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN == 15);
+  assert(ProfileConfig::PROFILE2_ADXL355_CS_PIN == 15);
+  assert(ProfileConfig::PROFILE2_WIND_PULSE_PIN == 11);
+  assert(ProfileConfig::PROFILE3_ONEWIRE_PIN == 15);
+  assert(ProfileConfig::PROFILE3_ADXL355_CS_PIN == 15);
+  assert(ProfileConfig::PROFILE3_MAX31865_CS_PIN == 11);
+  assert(ProfileConfig::PROFILE3_VEML6075_I2C_ADDR == 0x10);
+  assert(ProfileConfig::PROFILE3_SNOW_I2C_ADDR == 0x70);
+  assert(ProfileConfig::PROFILE3_O2_I2C_ADDR == 0x73);
+}
+
+void testGpio15Contract() {
+  assert(ProfileConfig::ProfileSensorsContract::gpio15IsTimeSharedInProfile2());
+  assert(ProfileConfig::ProfileSensorsContract::gpio15OwnerWhenSamplingAdc() ==
+         ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN);
+  assert(ProfileConfig::ProfileSensorsContract::gpio15OwnerWhenSamplingSpi() ==
+         ProfileConfig::PROFILE2_ADXL355_CS_PIN);
+  assert(ProfileConfig::ProfileSensorsContract::gpio15RuntimeSerializationImplemented());
+}
+
 }  // namespace
 
 int main() {
@@ -71,5 +140,9 @@ int main() {
   testDipRange();
   testProfileNamesDistinct();
   testSensorIdBasesDistinct();
+  testProfileRosterContracts();
+  testProfileInterfacesAndPins();
+  testDriverTypes();
+  testGpio15Contract();
   return 0;
 }

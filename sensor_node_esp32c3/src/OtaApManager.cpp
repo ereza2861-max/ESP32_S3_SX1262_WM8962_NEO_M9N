@@ -16,18 +16,26 @@ constexpr char NVS_NAMESPACE[] = "ota";
 constexpr char NVS_KEY_AP_ENABLED[] = "ap_enabled";
 constexpr uint16_t AP_PORT = 80;
 constexpr const char* AP_SSID_PREFIX = "FieldRadio-Sensor-";
+constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
+constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
+
+bool validOtaPassword(const String& value) {
+  if (value.length() < OTA_PASSWORD_MIN_LEN ||
+      value.length() > OTA_PASSWORD_MAX_LEN) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(value[i]);
+    if (c < 0x21 || c > 0x7E) return false;
+  }
+  return true;
+}
 
 WebServer* gServer = nullptr;
-OtaApManager* gManager = nullptr;
 
-// ArduinoOTA event handlers forward to a global manager pointer so the
-// callbacks stay in OtaApManager while the ArduinoOTA API uses free functions.
+// ArduinoOTA callbacks are free functions required by the ArduinoOTA API.
 void onOtaStart() {
   Serial.println("OTA: ArduinoOTA update started");
-  if (gManager) {
-    // Keep the AP alive during the transfer regardless of the timer.
-    // (The timer is checked in task(); a client-connected state extends it.)
-  }
 }
 void onOtaEnd() { Serial.println("OTA: ArduinoOTA update complete"); }
 void onOtaProgress(unsigned int p, unsigned int t) {
@@ -40,11 +48,10 @@ void onOtaError(ota_error_t e) {
 }  // namespace
 
 bool OtaApManager::begin() {
-  gManager = this;
   loadState();
 
-  if (!otaPassword_.isEmpty() && otaPassword_.length() < 12) {
-    Serial.println("WARN: OTA password too short; AP stays disabled");
+  if (!otaPassword_.isEmpty() && !validOtaPassword(otaPassword_)) {
+    Serial.println("WARN: invalid OTA password in NVS; AP stays disabled");
     otaPassword_ = "";
   }
 
@@ -97,7 +104,6 @@ bool OtaApManager::startAp() {
 
   gServer->on("/", HTTP_GET, [this]() { handleRoot(); });
   gServer->on("/status", HTTP_GET, [this]() { handleStatus(); });
-  gServer->on("/config", HTTP_POST, [this]() { handleConfig(); });
   gServer->on("/update", HTTP_POST,
               [this]() { handleUploadDone(); },
               [this]() { handleUpload(); });
@@ -113,7 +119,6 @@ bool OtaApManager::startAp() {
 
   apEnabled_ = true;
   apStartedAtMs_ = millis();
-  lastClientSeenMs_ = apStartedAtMs_;
   Serial.printf("OTA: AP up ssid=%s ip=%s window=%lus\n",
                 ssid.c_str(),
                 WiFi.softAPIP().toString().c_str(),
@@ -153,19 +158,13 @@ void OtaApManager::task() {
   if (gServer) gServer->handleClient();
   ArduinoOTA.handle();
 
-  // Track the most recent client to extend the auto-shutdown window.
   const int stationCount = WiFi.softAPgetStationNum();
   clientConnected_ = stationCount > 0;
-  if (clientConnected_) lastClientSeenMs_ = now;
 
-  // Auto-shutdown: window from apStartedAtMs_, extended while a client is
-  // connected. Only shuts down when BOTH the base window and the client
-  // grace window have expired.
-  const bool baseWindowExpired =
-      (now - apStartedAtMs_) >= OTA_AP_WINDOW_MS;
-  const bool clientGraceExpired =
-      (now - lastClientSeenMs_) >= OTA_AP_WINDOW_MS;
-  if (baseWindowExpired && !clientConnected_ && clientGraceExpired) {
+  // The provisioning window is a hard upper bound. A connected client may
+  // be observed for diagnostics, but it cannot keep the open AP alive
+  // indefinitely.
+  if (static_cast<uint32_t>(now - apStartedAtMs_) >= OTA_AP_WINDOW_MS) {
     Serial.println("OTA: provisioning window expired; stopping AP");
     stopAp();
   }
@@ -196,14 +195,6 @@ void OtaApManager::handleStatus() {
   j += ",\"otaReady\":" + String(otaPassword_.isEmpty() ? "false" : "true");
   j += "}";
   gServer->send(200, "application/json", j);
-}
-
-void OtaApManager::handleConfig() {
-  if (!gServer) return;
-  // SECURITY: the open AP never accepts a new OTA password. The OTA password
-  // is set only by serial provisioning (existing main.cpp flow).
-  gServer->send(403, "text/plain",
-                "OTA password must be set over the serial provisioning console");
 }
 
 void OtaApManager::handleUpload() {

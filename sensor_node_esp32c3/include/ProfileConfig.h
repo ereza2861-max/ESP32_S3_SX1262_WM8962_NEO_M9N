@@ -6,12 +6,9 @@
 // FieldRadio ESP32-C3 Sensor Node — profile configuration.
 //
 // ARCHITECTURAL DECISION:
-//   - 4 profiles selected by a 2-bit production solder-jumper configuration at boot.
-//   - Prototype hardware used a 2-bit DIP switch during development.
+//   - 4 profiles selected by a 3-bit production solder-jumper configuration at boot.
+//   - Prototype hardware used a 2-bit profile selector during development; production uses solder jumpers.
 //   - Pin map is NOT PHYSICALLY VALIDATED. It is a source-level contract only.
-//   - Legacy battery ADC is reassigned to GPIO3 to free GPIO4 for MFRC522 MISO.
-//   - Legacy digital sensor is disabled (DIGITAL_SENSOR_PIN = -1) to free GPIO10
-//     for the button long-press handler; profile drivers own their own GPIOs.
 //   - Buzzer uses the ESP-IDF LEDC peripheral, not blocking tone().
 //
 // This header is the single source of truth for the STEP 1 foundation. Profile
@@ -29,11 +26,12 @@ enum class Profile : uint8_t {
 
 constexpr uint8_t PROFILE_COUNT = 4;
 
-// --- Production profile selector (2-bit solder-jumper encoding) -------------
-// Prototype hardware used a DIP switch; production uses a static solder-jumper
-// configuration. The selector is sampled once at boot and never hot-switched.
-constexpr int PROFILE_SEL_BIT0_PIN = 0;
-constexpr int PROFILE_SEL_BIT1_PIN = 1;
+// --- Production profile selector (3-bit solder-jumper encoding) -------------
+// The selector is sampled once at boot and never hot-switched. GPIO4/GPIO5/
+// GPIO6 are used only after reset has released the strapping inputs.
+constexpr int PROFILE_SEL_BIT0_PIN = 4;
+constexpr int PROFILE_SEL_BIT1_PIN = 5;
+constexpr int PROFILE_SEL_BIT2_PIN = 6;
 
 // --- Button (long-press 1.5 s toggles Wi-Fi AP) ----------------------------
 // GPIO10 is free, not USB-JTAG, and not used by any profile driver.
@@ -50,13 +48,13 @@ constexpr uint8_t BUZZER_LEDC_CHANNEL = 0;
 constexpr uint8_t BUZZER_LEDC_RESOLUTION_BITS = 10;
 
 // --- MFRC522 RFID (SPI) ----------------------------------------------------
-// CS on GPIO7, SCK on GPIO6, MOSI on GPIO5, MISO on GPIO4, RST on GPIO20.
-// GPIO4 was the legacy battery ADC pin; it is reassigned to MFRC522 MISO.
-// GPIO2 is a strapping pin and MUST NOT be used for RST.
+// CS on GPIO7, SCK on GPIO3, MOSI on GPIO2, MISO on GPIO1, RST on GPIO20.
+// GPIO2 is a strapping pin and is used as an output only after boot.
+// GPIO1 is used as an input after boot.
 constexpr int RFID_CS_PIN = 7;
-constexpr int RFID_SCK_PIN = 6;
-constexpr int RFID_MOSI_PIN = 5;
-constexpr int RFID_MISO_PIN = 4;
+constexpr int RFID_SCK_PIN = 3;
+constexpr int RFID_MOSI_PIN = 2;
+constexpr int RFID_MISO_PIN = 1;
 constexpr int RFID_RST_PIN = 20;
 
 // RFID polling and callback contract (STEP 2). These are not hardware pins;
@@ -65,12 +63,6 @@ constexpr int RFID_RST_PIN = 20;
 constexpr uint32_t RFID_POLL_INTERVAL_MS = 100;
 constexpr uint32_t RFID_UID_FORGET_MS = 1500;
 constexpr uint8_t RFID_MAX_UID_BYTES = 10;
-
-// --- Legacy sensor pins ----------------------------------------------------
-// Battery ADC moves from GPIO4 to GPIO3 (ADC1_CH3), freeing GPIO4 for RFID.
-// Digital legacy sensor is disabled; profile drivers own their own pins.
-constexpr int LEGACY_BATTERY_ADC_PIN = 3;
-constexpr int LEGACY_DIGITAL_SENSOR_PIN = -1;
 
 // --- Stable sensor ID bases per profile ------------------------------------
 // Each profile owns a 256-ID window so IDs are unique, stable across reboots,
@@ -128,12 +120,12 @@ constexpr int PROFILE2_I2C_SDA_PIN = 8;
 constexpr int PROFILE2_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE2_I2C_HZ = 100000UL;
 constexpr int PROFILE2_H2S_ADC_PIN = 4;
-constexpr int PROFILE2_WIND_VANE_ADC_PIN = 3;
+constexpr int PROFILE2_WIND_VANE_ADC_PIN = 15;
 constexpr int PROFILE2_WIND_PULSE_PIN = 11;
 constexpr int PROFILE2_PMS_UART_NUM = 1;
 constexpr int PROFILE2_PMS_RX_PIN = 18;
 constexpr int PROFILE2_PMS_TX_PIN = 19;
-constexpr int PROFILE2_ADXL355_CS_PIN = 3;
+constexpr int PROFILE2_ADXL355_CS_PIN = 15;
 constexpr uint32_t PROFILE2_ADC_SETTLE_MS = 2;
 
 constexpr uint8_t RAIN_GAUGE_I2C_ADDRESS = 0x28;
@@ -141,8 +133,8 @@ constexpr uint8_t RAIN_GAUGE_I2C_ADDRESS = 0x28;
 constexpr int PROFILE3_I2C_SDA_PIN = 8;
 constexpr int PROFILE3_I2C_SCL_PIN = 9;
 constexpr uint32_t PROFILE3_I2C_HZ = 100000UL;
-constexpr int PROFILE3_ONEWIRE_PIN = 3;
-constexpr int PROFILE3_ADXL355_CS_PIN = 3;
+constexpr int PROFILE3_ONEWIRE_PIN = 15;
+constexpr int PROFILE3_ADXL355_CS_PIN = 15;
 constexpr int PROFILE3_MAX31865_CS_PIN = 11;
 constexpr int PROFILE3_UART_NUM = 1;
 constexpr int PROFILE3_UART_RX_PIN = 18;
@@ -154,24 +146,47 @@ constexpr uint8_t PROFILE3_BME280_I2C_ADDR = 0x76;
 constexpr uint16_t PROFILE3_VEML6075_REG_UVA = 0;
 constexpr uint16_t PROFILE3_VEML6075_REG_UVB = 1;
 constexpr uint16_t PROFILE3_VEML6075_REG_UVI = 2;
-// ARCHITECTURAL DECISION (locked by user P3-Accept-Leakage):
-// GPIO3 is shared between optional DS18B20 OneWire bus and ADXL355 CS in
-// Profile 3. OneWire requires external 4.7 kOhm pull-up to 3.3 V on same pin.
-// When ADXL355 CS driven LOW, pull-up remains connected and leaks:
-// I_leak ~= (3.3 V - V_CS_low) / R_pullup
-// ~= 3.3 V / 4.7 kOhm ~= 0.70 mA
-// Raises V_CS_low above ideal 0 V. ADXL355 CS V_IL must be verified against
-// actual pull-up and datasheet. HARDWARE VALIDATION REQUIRED — NOT claimed
-// as working.
-constexpr bool PROFILE3_GPIO3_TIME_SHARED = true;
-constexpr uint32_t PROFILE3_GPIO3_SETTLE_MS = 2;
+// ARCHITECTURAL DECISION: the Profile 3 OneWire bus and ADXL355 CS share
+// the time-share pin. OneWire requires an external 4.7 kOhm pull-up.
+// HARDWARE VALIDATION REQUIRED — source-level contract only.
+constexpr bool PROFILE3_TIME_SHARE_ENABLED = true;
+constexpr uint32_t PROFILE3_TIME_SHARE_SETTLE_MS = 2;
 constexpr uint32_t PROFILE3_ONEWIRE_PULLUP_OHMS = 4700;
 
-constexpr uint8_t encodeDipBit(bool electricalHigh) { return electricalHigh ? 1U : 0U; }
-constexpr uint8_t decodeDipBits(bool bit0High, bool bit1High) {
-  return static_cast<uint8_t>(encodeDipBit(bit0High) | (encodeDipBit(bit1High) << 1));
+constexpr uint8_t encodeProfileSelectorBit(bool electricalHigh) {
+  return electricalHigh ? 1U : 0U;
 }
-constexpr bool dipValueInRange(uint8_t dipValue) { return dipValue < PROFILE_COUNT; }
+constexpr uint8_t decodeProfileSelectorBits(bool bit0High, bool bit1High,
+                                            bool bit2High) {
+  return static_cast<uint8_t>(encodeProfileSelectorBit(bit0High) |
+                              (encodeProfileSelectorBit(bit1High) << 1) |
+                              (encodeProfileSelectorBit(bit2High) << 2));
+}
+constexpr bool profileSelectorValueInRange(uint8_t selectorValue) {
+  return selectorValue < PROFILE_COUNT;
+}
+
+constexpr size_t expectedSensorCount(Profile profile) {
+  switch (profile) {
+    case Profile::IslandSea: return 6;
+    case Profile::TropicalForest: return 12;
+    case Profile::VolcanicMountain: return 8;
+    case Profile::SubZeroSnow: return 9;
+  }
+  return 0;
+}
+
+constexpr uint16_t sensorIdFor(Profile profile, size_t index) {
+  const uint16_t base = sensorIdBase(profile);
+  return (index < expectedSensorCount(profile)) ? static_cast<uint16_t>(base + index) : 0;
+}
+
+namespace ProfileSensorsContract {
+constexpr bool gpio15IsTimeSharedInProfile2() { return true; }
+constexpr int gpio15OwnerWhenSamplingAdc() { return PROFILE2_WIND_VANE_ADC_PIN; }
+constexpr int gpio15OwnerWhenSamplingSpi() { return PROFILE2_ADXL355_CS_PIN; }
+constexpr bool gpio15RuntimeSerializationImplemented() { return true; }
+}
 
 constexpr const char* profileName(Profile profile) {
   switch (profile) {

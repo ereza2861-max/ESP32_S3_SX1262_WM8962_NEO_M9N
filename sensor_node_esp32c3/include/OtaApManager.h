@@ -15,17 +15,17 @@
 
 // OtaApManager owns:
 //   1. Wi-Fi AP bring-up and shutdown with a bounded provisioning window.
-//   2. A WebUI served over the AP for firmware OTA and AP config.
+//   2. A WebUI served over the AP for firmware OTA and status.
 //   3. ArduinoOTA handler on the same AP.
 //   4. NVS-backed state so a reboot preserves the last user intent
-//      (AP enabled/disabled), but the AP is NEVER auto-enabled on boot
+//      (AP enabled/disabled), while the runtime AP window remains hard-bounded.
 //      without an explicit NVS flag.
 //
 // SECURITY MODEL (locked by user C3 + mitigations):
 //   - The AP is OPEN (no Wi-Fi password) to allow recovery when the stored
 //     credential is lost. This is a deliberate trade-off for provisioning.
 //   - The AP is time-bounded: the AP automatically shuts down after
-//     OTA_AP_WINDOW_MS unless it is explicitly kept alive via WebUI.
+//     OTA_AP_WINDOW_MS from AP start. Client activity never extends it.
 //   - Firmware upload (both ArduinoOTA and WebUI POST) requires the OTA
 //     password already stored in NVS by the existing serial provisioning
 //     flow. An open AP does NOT grant upload rights.
@@ -41,7 +41,7 @@ public:
   OtaApManager() = default;
 
   // Reads NVS state and, if the previous run left ap_enabled=true, brings the
-  // AP up once. Otherwise the AP stays off until toggleAp() is called.
+  // AP up once. The AP is still bounded by OTA_AP_WINDOW_MS.
   // Returns true if the manager initialized (regardless of AP state).
   bool begin();
 
@@ -57,8 +57,8 @@ public:
   // True while the AP is up (regardless of whether a client is connected).
   bool apEnabled() const { return apEnabled_; }
 
-  // True while a WebUI client is connected. Used to keep the AP alive past
-  // the auto-shutdown window.
+  // True while a WebUI client is connected. Diagnostic only; the hard
+  // provisioning window is never extended by client activity.
   bool clientConnected() const { return clientConnected_; }
 
 private:
@@ -69,17 +69,14 @@ private:
   void handleRoot();
   void handleUpload();
   void handleUploadDone();
-  void handleConfig();
   void handleStatus();
   bool checkOtaPassword(const String& supplied);
 
   bool apEnabled_ = false;
   bool clientConnected_ = false;
   uint32_t apStartedAtMs_ = 0;
-  uint32_t lastClientSeenMs_ = 0;
 
   // Loaded by loadState() from the "ota" NVS namespace.
   // Green-field OTA has no station-mode credential path.
   String otaPassword_;
-  String lastClientIp_;
 };

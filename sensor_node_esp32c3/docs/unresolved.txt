@@ -1,5 +1,9 @@
 Unresolved decisions / blockers
 Ada tiga hal yang tidak boleh saya tebak pada patch berikutnya:
-GPIO mapping untuk DIP switch, buzzer, button, dan MFRC522 belum ditetapkan oleh current C3 hardware evidence. Ini ARCHITECTURAL/HARDWARE DECISION REQUIRED bila implementasi membutuhkan pin konkret.
-Physical validation sensor belum tersedia. Driver/interface dapat dibuat berdasarkan model sensor yang sudah ditetapkan prompt, tetapi kompatibilitas listrik, ADC range, calibration, dan environmental rating harus tetap NOT VERIFIED.
-Kapasitas registry multi-instance membutuhkan desain yang menjaga BLE wire contract dan persistence semantics. Ini bukan perubahan MAX_SENSORS satu baris.
+Pin assignments are defined as a source-level contract in `ProfileConfig.h`, including
+the profile selector, buzzer, button, MFRC522, GPIO15 time-share, and shared I2C/UART pins.
+The PCB has not been produced, so all electrical pin validation remains NOT VERIFIED.
+Physical sensor validation is still pending. Driver/interface choices may follow the locked
+profile roster, but electrical compatibility, ADC range, calibration, device addresses, and
+environmental ratings remain NOT VERIFIED.
+Registry capacity is fixed at 13: up to 12 profile sensors plus the global RFID event descriptor.

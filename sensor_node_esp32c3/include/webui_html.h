@@ -25,7 +25,7 @@ pre{background:#eee;padding:.5rem;overflow:auto}
 </form>
 <pre id=result></pre></fieldset>
 <fieldset><legend>AP</legend>
-<p>AP auto-shuts down 10 minutes after last client activity.
+<p>AP auto-shuts down 10 minutes after AP start; client activity does not extend the window.
 Toggling the AP is only possible with the physical button long-press.</p>
 </fieldset>
 <script>

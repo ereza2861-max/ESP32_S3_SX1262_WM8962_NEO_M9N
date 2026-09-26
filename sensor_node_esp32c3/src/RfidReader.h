@@ -8,12 +8,12 @@
 //
 // STEP 2 scope:
 //   - MFRC522 over SPI on the pins locked in ProfileConfig.h.
-//   - Non-blocking task() called from loop(); polls at RFID_POLL_INTERVAL_MS.
+//   - Non-blocking task() called from loop(); polls at ProfileConfig::RFID_POLL_INTERVAL_MS.
 //   - Debounces repeated detection of the same UID so the buzzer does not
 //     retrigger on every poll while a tag remains in the field.
 //   - Fires a single "tag detected" callback per unique UID appearance.
-//   - Does NOT register a SensorRegistry descriptor here; that happens in
-//     STEP 8 integration via SENSOR_ID_BASE_RFID (0x00F0).
+//   - main.cpp registers the global SensorRegistry descriptor at
+//     SENSOR_ID_BASE_RFID (0x00F0) and routes tag events to it.
 //   - begin() returning false is NON-FATAL: the node keeps running BLE + sensors.
 //
 // This class deliberately does NOT include ProfileManager.h to avoid a
@@ -35,8 +35,8 @@ public:
   bool begin();
 
   // Non-blocking cooperative task. Call from loop(). Polls at
-  // RFID_POLL_INTERVAL_MS and invokes the tag callback exactly once per new
-  // UID. A UID is considered "gone" after RFID_UID_FORGET_MS of absence.
+  // ProfileConfig::RFID_POLL_INTERVAL_MS and invokes the tag callback exactly once per new
+  // UID. A UID is considered "gone" after ProfileConfig::RFID_UID_FORGET_MS of absence.
   void task();
 
   bool isReady() const { return ready_; }
@@ -54,7 +54,7 @@ private:
   bool ready_ = false;
   uint32_t lastPollMs_ = 0;
 
-  uint8_t lastUid_[RFID_MAX_UID_BYTES] = {};
+  uint8_t lastUid_[ProfileConfig::RFID_MAX_UID_BYTES] = {};
   uint8_t lastUidLength_ = 0;
   uint32_t lastUidSeenMs_ = 0;
   bool uidPresent_ = false;

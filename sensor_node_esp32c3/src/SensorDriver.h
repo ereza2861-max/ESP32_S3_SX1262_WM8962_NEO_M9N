@@ -15,9 +15,8 @@ struct DriverConfig {
   uint32_t periodMs = 1000;
   uint16_t flags = 0;
 
-  // STEP 3 additions. These are used by multi-instance profile drivers to
-  // distinguish instances that share a bus (e.g. 3× DS18B20 on one OneWire,
-  // 3× TEROS 12 on one RS-485). Defaults keep legacy on-disk layout valid.
+  // Multi-instance profile fields distinguish devices that share a bus
+  // (e.g. 3× DS18B20 on one OneWire, 3× TEROS 12 on one RS-485).
   uint8_t interfaceType = 0;  // ProfileConfig::InterfaceKind
   uint8_t busIndex = 0;       // bus instance on the same interface kind
   uint8_t channel = 0;        // depth index, probe index, or device index

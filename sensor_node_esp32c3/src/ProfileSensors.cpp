@@ -1,4 +1,5 @@
 #include "ProfileSensors.h"
+#include "Config.h"
 
 #include <Wire.h>
 
@@ -15,13 +16,22 @@ DriverConfig makeConfig(uint8_t driverType, uint16_t sensorId,
   return c;
 }
 
+bool addDriver(SensorDriverRegistry& drivers, SensorRegistry& registry,
+               const DriverConfig& config) {
+  if (drivers.add(config, registry)) return true;
+  Serial.printf("PROFILE: sensor 0x%04X registration failed (driver=%u)\n",
+                static_cast<unsigned>(config.sensorId),
+                static_cast<unsigned>(config.driverType));
+  return false;
+}
+
 }  // namespace
 
 bool ProfileSensors::begin(ProfileConfig::Profile profile,
                            SensorDriverRegistry& drivers,
                            SensorRegistry& registry) {
   registeredCount_ = 0;
-  expectedCount_ = 0;
+  expectedCount_ = ProfileConfig::expectedSensorCount(profile);
   switch (profile) {
     case ProfileConfig::Profile::IslandSea:
       return registerIslandSea(drivers, registry);
@@ -56,7 +66,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
              ProfileConfig::PROFILE0_I2C_SCL_PIN);
   Wire.setClock(ProfileConfig::PROFILE0_I2C_HZ);
 
-  expectedCount_ = 6;
+  expectedCount_ = ProfileConfig::expectedSensorCount(ProfileConfig::Profile::IslandSea);
 
   // 0x0100 — DS18B20 water temperature.
   {
@@ -66,7 +76,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
     c.registerAddr = 0;  // water temperature
     c.channel = 0;
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::OneWire);
-    if (drivers.add(c, registry)) ++registeredCount_;
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
     else Serial.printf("PROFILE: island_sea sensor 0x%04X unavailable\n", c.sensorId);
   }
 
@@ -79,7 +89,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
     c.i2cAddr = 0x64;  // Atlas EZO-EC default
     c.registerAddr = 0;  // EC
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
-    if (drivers.add(c, registry)) ++registeredCount_;
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
     else Serial.printf("PROFILE: island_sea sensor 0x%04X unavailable\n", c.sensorId);
   }
 
@@ -92,7 +102,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
     c.i2cAddr = 0x63;  // Atlas EZO-pH default
     c.registerAddr = 1;  // pH
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
-    if (drivers.add(c, registry)) ++registeredCount_;
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
     else Serial.printf("PROFILE: island_sea sensor 0x%04X unavailable\n", c.sensorId);
   }
 
@@ -102,7 +112,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
                                 base + 3, period);
     c.dataWidth = 4;
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);
-    if (drivers.add(c, registry)) ++registeredCount_;
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
     else Serial.printf("PROFILE: island_sea sensor 0x%04X unavailable\n", c.sensorId);
   }
 
@@ -112,7 +122,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
                                 base + 4, period);
     c.pinSda = ProfileConfig::PROFILE0_WAVE_ADC_PIN;  // GPIO3 (ADC1_CH3)
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::Adc);
-    if (drivers.add(c, registry)) ++registeredCount_;
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
     else Serial.printf("PROFILE: island_sea sensor 0x%04X unavailable\n", c.sensorId);
   }
 
@@ -122,7 +132,7 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
                                 base + 5, period);
     c.pinSda = ProfileConfig::PROFILE0_TURBIDITY_ADC_PIN;  // GPIO4 (ADC1_CH4)
     c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::Adc);
-    if (drivers.add(c, registry)) ++registeredCount_;
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
     else Serial.printf("PROFILE: island_sea sensor 0x%04X unavailable\n", c.sensorId);
   }
 
@@ -131,49 +141,317 @@ bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegi
                 static_cast<unsigned>(expectedCount_));
   return registeredCount_ == expectedCount_;
 }
-bool ProfileSensors::registerTropicalForest(SensorDriverRegistry& drivers, SensorRegistry& registry) {
+bool ProfileSensors::registerTropicalForest(
+    SensorDriverRegistry& drivers, SensorRegistry& registry) {
   const uint16_t base = ProfileConfig::SENSOR_ID_BASE_TROPICAL_FOREST;
   const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
-  Wire.begin(ProfileConfig::PROFILE1_I2C_SDA_PIN, ProfileConfig::PROFILE1_I2C_SCL_PIN);
+
+  Wire.begin(ProfileConfig::PROFILE1_I2C_SDA_PIN,
+             ProfileConfig::PROFILE1_I2C_SCL_PIN);
   Wire.setClock(ProfileConfig::PROFILE1_I2C_HZ);
-  expectedCount_ = 12;
-  for (uint8_t depth=0; depth<3; ++depth) { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,base+depth,period); c.dataWidth=4; c.channel=depth; c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART); if(drivers.add(c,registry)) ++registeredCount_; }
-  for (uint8_t depth=0; depth<3; ++depth) { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_ONEWIRE_TEMP,base+3+depth,period); c.pinSda=ProfileConfig::PROFILE1_ONEWIRE_PIN; c.registerAddr=1; c.channel=depth; c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::OneWire); if(drivers.add(c,registry)) ++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_ATLAS_EZO,base+6,period); c.pinSda=ProfileConfig::PROFILE1_I2C_SDA_PIN;c.pinScl=ProfileConfig::PROFILE1_I2C_SCL_PIN;c.i2cAddr=0x63;c.registerAddr=1;c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+7,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x62;c.dataWidth=2;c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC,base+8,period);c.pinSda=ProfileConfig::PROFILE1_CH4_ADC_PIN;c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::Adc);if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_BME280,base+9,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x76;c.registerAddr=0;c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+10,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=ProfileConfig::RAIN_GAUGE_I2C_ADDRESS;c.registerAddr=0;c.dataWidth=2;c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,base+11,period);c.dataWidth=4;c.registerAddr=1;c.interfaceType=static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);if(drivers.add(c,registry))++registeredCount_; }
-  Serial.printf("PROFILE: tropical_forest roster %u/%u sensors\\n",(unsigned)registeredCount_,(unsigned)expectedCount_); return registeredCount_==expectedCount_;
+
+  expectedCount_ =
+      ProfileConfig::expectedSensorCount(ProfileConfig::Profile::TropicalForest);
+
+  for (uint8_t depth = 0; depth < 3; ++depth) {
+    DriverConfig c = makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,
+                                base + depth, period);
+    c.dataWidth = 4;
+    c.channel = depth;
+    c.interfaceType =
+        static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  for (uint8_t depth = 0; depth < 3; ++depth) {
+    DriverConfig c = makeConfig(SensorDriverRegistry::DRIVER_ONEWIRE_TEMP,
+                                base + 3 + depth, period);
+    c.pinSda = ProfileConfig::PROFILE1_ONEWIRE_PIN;
+    c.registerAddr = 1;
+    c.channel = depth;
+    c.interfaceType =
+        static_cast<uint8_t>(ProfileConfig::InterfaceKind::OneWire);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_ATLAS_EZO, base + 6, period);
+    c.pinSda = ProfileConfig::PROFILE1_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE1_I2C_SCL_PIN;
+    c.i2cAddr = 0x63;
+    c.registerAddr = 1;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 7, period);
+    c.pinSda = ProfileConfig::PROFILE1_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE1_I2C_SCL_PIN;
+    c.i2cAddr = 0x62;
+    c.dataWidth = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC, base + 8, period);
+    c.pinSda = ProfileConfig::PROFILE1_CH4_ADC_PIN;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::Adc);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_BME280, base + 9, period);
+    c.pinSda = ProfileConfig::PROFILE1_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE1_I2C_SCL_PIN;
+    c.i2cAddr = 0x76;
+    c.registerAddr = 0;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 10, period);
+    c.pinSda = ProfileConfig::PROFILE1_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE1_I2C_SCL_PIN;
+    c.i2cAddr = ProfileConfig::RAIN_GAUGE_I2C_ADDRESS;
+    c.registerAddr = 0;
+    c.dataWidth = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART, base + 11, period);
+    c.dataWidth = 4;
+    c.registerAddr = 1;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  Serial.printf("PROFILE: tropical_forest roster %u/%u sensors\n",
+                static_cast<unsigned>(registeredCount_),
+                static_cast<unsigned>(expectedCount_));
+  return registeredCount_ == expectedCount_;
 }
 
-bool ProfileSensors::registerVolcanicMountain(SensorDriverRegistry& drivers, SensorRegistry& registry) {
-  const uint16_t base=ProfileConfig::SENSOR_ID_BASE_VOLCANIC_MOUNTAIN; const uint32_t period=SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
-  Wire.begin(8,9); Wire.setClock(ProfileConfig::PROFILE2_I2C_HZ); expectedCount_=8;
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC,base+0,period);c.pinSda=4;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::Adc;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+1,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x62;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,base+2,period);c.dataWidth=4;c.registerAddr=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::UART;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_BME280,base+3,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x76;c.registerAddr=0;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+4,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=ProfileConfig::RAIN_GAUGE_I2C_ADDRESS;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC,base+5,period);c.pinSda=3;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::Adc;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_PULSE_COUNTER,base+6,period);c.pinSda=11;c.registerAddr=1;c.dataWidth=1;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::Pulse;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+7,period);c.pinSda=ProfileConfig::PROFILE2_ADXL355_CS_PIN;c.pinScl=ProfileConfig::RFID_SCK_PIN;c.i2cAddr=0x1D;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;if(drivers.add(c,registry))++registeredCount_; }
-  return registeredCount_==expectedCount_;
+bool ProfileSensors::registerVolcanicMountain(
+    SensorDriverRegistry& drivers, SensorRegistry& registry) {
+  const uint16_t base = ProfileConfig::SENSOR_ID_BASE_VOLCANIC_MOUNTAIN;
+  const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
+
+  Wire.begin(ProfileConfig::PROFILE2_I2C_SDA_PIN,
+             ProfileConfig::PROFILE2_I2C_SCL_PIN);
+  Wire.setClock(ProfileConfig::PROFILE2_I2C_HZ);
+
+  expectedCount_ =
+      ProfileConfig::expectedSensorCount(ProfileConfig::Profile::VolcanicMountain);
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC, base + 0, period);
+    c.pinSda = ProfileConfig::PROFILE2_H2S_ADC_PIN;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::Adc);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 1, period);
+    c.pinSda = ProfileConfig::PROFILE2_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE2_I2C_SCL_PIN;
+    c.i2cAddr = 0x62;
+    c.dataWidth = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART, base + 2, period);
+    c.dataWidth = 4;
+    c.registerAddr = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_BME280, base + 3, period);
+    c.pinSda = ProfileConfig::PROFILE2_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE2_I2C_SCL_PIN;
+    c.i2cAddr = 0x76;
+    c.registerAddr = 0;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 4, period);
+    c.pinSda = ProfileConfig::PROFILE2_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE2_I2C_SCL_PIN;
+    c.i2cAddr = ProfileConfig::RAIN_GAUGE_I2C_ADDRESS;
+    c.dataWidth = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC, base + 5, period);
+    c.pinSda = ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::Adc);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_PULSE_COUNTER, base + 6, period);
+    c.pinSda = ProfileConfig::PROFILE2_WIND_PULSE_PIN;
+    c.registerAddr = 1;
+    c.dataWidth = 1;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::Pulse);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 7, period);
+    c.pinSda = ProfileConfig::PROFILE2_ADXL355_CS_PIN;
+    c.pinScl = ProfileConfig::RFID_SCK_PIN;
+    c.i2cAddr = 0x1D;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::SPI);
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  }
+
+  Serial.printf("PROFILE: volcanic_mountain roster %u/%u sensors\n",
+                static_cast<unsigned>(registeredCount_),
+                static_cast<unsigned>(expectedCount_));
+  return registeredCount_ == expectedCount_;
 }
 
-bool ProfileSensors::registerSubZeroSnow(SensorDriverRegistry& drivers, SensorRegistry& registry) {
-  const uint16_t base=ProfileConfig::SENSOR_ID_BASE_SUB_ZERO_SNOW; const uint32_t period=SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
-  Wire.begin(8,9); Wire.setClock(ProfileConfig::PROFILE3_I2C_HZ); expectedCount_=9;
-  auto add=[&](DriverConfig c){if(drivers.add(c,registry))++registeredCount_;};
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+0,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x20;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_ONEWIRE_TEMP,base+1,period);c.pinSda=3;c.registerAddr=1;c.channel=0;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::OneWire;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,base+2,period);c.dataWidth=4;c.registerAddr=3;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::UART;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_BME280,base+3,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x76;c.registerAddr=0;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+4,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x10;c.dataWidth=2;c.registerAddr=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,base+5,period);c.dataWidth=4;c.registerAddr=1;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::UART;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+6,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x70;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+7,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x73;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+8,period);c.pinSda=ProfileConfig::PROFILE3_ADXL355_CS_PIN;c.pinScl=ProfileConfig::RFID_SCK_PIN;c.i2cAddr=0x1D;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;add(c); }
-  return registeredCount_==expectedCount_;
+bool ProfileSensors::registerSubZeroSnow(
+    SensorDriverRegistry& drivers, SensorRegistry& registry) {
+  const uint16_t base = ProfileConfig::SENSOR_ID_BASE_SUB_ZERO_SNOW;
+  const uint32_t period = SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS;
+
+  Wire.begin(ProfileConfig::PROFILE3_I2C_SDA_PIN,
+             ProfileConfig::PROFILE3_I2C_SCL_PIN);
+  Wire.setClock(ProfileConfig::PROFILE3_I2C_HZ);
+
+  expectedCount_ =
+      ProfileConfig::expectedSensorCount(ProfileConfig::Profile::SubZeroSnow);
+
+  auto add = [&](const DriverConfig& c) {
+    if (addDriver(drivers, registry, c)) ++registeredCount_;
+  };
+
+  // MAX31865 remains a placeholder because the repository has no generic SPI
+  // register driver. Keep the stable descriptor but do not fabricate data.
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 0, period);
+    c.pinSda = ProfileConfig::PROFILE3_MAX31865_CS_PIN;
+    c.pinScl = ProfileConfig::RFID_SCK_PIN;
+    c.i2cAddr = 0x20;  // placeholder retained by the source-level roster
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::SPI);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_ONEWIRE_TEMP, base + 1, period);
+    c.pinSda = ProfileConfig::PROFILE3_ONEWIRE_PIN;
+    c.registerAddr = 1;
+    c.channel = 0;
+    c.interfaceType =
+        static_cast<uint8_t>(ProfileConfig::InterfaceKind::OneWire);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART, base + 2, period);
+    c.dataWidth = 4;
+    c.registerAddr = 3;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_BME280, base + 3, period);
+    c.pinSda = ProfileConfig::PROFILE3_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE3_I2C_SCL_PIN;
+    c.i2cAddr = ProfileConfig::PROFILE3_BME280_I2C_ADDR;
+    c.registerAddr = 0;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 4, period);
+    c.pinSda = ProfileConfig::PROFILE3_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE3_I2C_SCL_PIN;
+    c.i2cAddr = ProfileConfig::PROFILE3_VEML6075_I2C_ADDR;
+    c.dataWidth = 2;
+    c.registerAddr = ProfileConfig::PROFILE3_VEML6075_REG_UVA;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART, base + 5, period);
+    c.dataWidth = 4;
+    c.registerAddr = 1;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::UART);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 6, period);
+    c.pinSda = ProfileConfig::PROFILE3_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE3_I2C_SCL_PIN;
+    c.i2cAddr = ProfileConfig::PROFILE3_SNOW_I2C_ADDR;
+    c.dataWidth = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 7, period);
+    c.pinSda = ProfileConfig::PROFILE3_I2C_SDA_PIN;
+    c.pinScl = ProfileConfig::PROFILE3_I2C_SCL_PIN;
+    c.i2cAddr = ProfileConfig::PROFILE3_O2_I2C_ADDR;
+    c.dataWidth = 2;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::I2C);
+    add(c);
+  }
+
+  {
+    DriverConfig c =
+        makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C, base + 8, period);
+    c.pinSda = ProfileConfig::PROFILE3_ADXL355_CS_PIN;
+    c.pinScl = ProfileConfig::RFID_SCK_PIN;
+    c.i2cAddr = 0x1D;
+    c.interfaceType = static_cast<uint8_t>(ProfileConfig::InterfaceKind::SPI);
+    add(c);
+  }
+
+  Serial.printf("PROFILE: sub_zero_snow roster %u/%u sensors\n",
+                static_cast<unsigned>(registeredCount_),
+                static_cast<unsigned>(expectedCount_));
+  return registeredCount_ == expectedCount_;
 }

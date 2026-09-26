@@ -42,29 +42,31 @@ void buzzerHardwareSilence() {
 
 }  // namespace
 
-uint8_t ProfileManager::readProfileSelector(int bit0, int bit1) {
+uint8_t ProfileManager::readProfileSelector(int bit0, int bit1, int bit2) {
   // The selector inputs use INPUT_PULLUP: closed/open electrical levels are
   // normalized by the canonical pure helper in ProfileConfig.
   const bool b0High = digitalRead(bit0) == HIGH;
   const bool b1High = digitalRead(bit1) == HIGH;
-  return ProfileConfig::decodeDipBits(b0High, b1High);
+  const bool b2High = digitalRead(bit2) == HIGH;
+  return ProfileConfig::decodeProfileSelectorBits(b0High, b1High, b2High);
 }
 
 bool ProfileManager::begin() {
   pinMode(ProfileConfig::PROFILE_SEL_BIT0_PIN, INPUT_PULLUP);
   pinMode(ProfileConfig::PROFILE_SEL_BIT1_PIN, INPUT_PULLUP);
+  pinMode(ProfileConfig::PROFILE_SEL_BIT2_PIN, INPUT_PULLDOWN);
 
-  rawDipValue_ = readProfileSelector(ProfileConfig::PROFILE_SEL_BIT0_PIN,
-                                      ProfileConfig::PROFILE_SEL_BIT1_PIN);
-  if (!ProfileConfig::dipValueInRange(rawDipValue_)) {
-    // The two physical selector inputs can only encode 0..3. Keep the
-    // canonical range check here for defensive robustness if the selector
-    // representation is extended later.
+  rawProfileSelectorValue_ = readProfileSelector(ProfileConfig::PROFILE_SEL_BIT0_PIN,
+                                      ProfileConfig::PROFILE_SEL_BIT1_PIN,
+                                      ProfileConfig::PROFILE_SEL_BIT2_PIN);
+  if (!ProfileConfig::profileSelectorValueInRange(rawProfileSelectorValue_)) {
+    // Three selector bits encode 0..7; only 0..3 are currently assigned.
+    // Reserved values fail closed to the default profile.
     Serial.printf("WARN: profile selector value %u out of range; using island_sea\n",
-                  static_cast<unsigned>(rawDipValue_));
-    rawDipValue_ = 0;
+                  static_cast<unsigned>(rawProfileSelectorValue_));
+    rawProfileSelectorValue_ = 0;
   }
-  activeProfile_ = static_cast<ProfileConfig::Profile>(rawDipValue_);
+  activeProfile_ = static_cast<ProfileConfig::Profile>(rawProfileSelectorValue_);
 
   pinMode(ProfileConfig::BUTTON_PIN, INPUT_PULLUP);
   lastRawButtonLevel_ = digitalRead(ProfileConfig::BUTTON_PIN) == HIGH;
@@ -77,7 +79,7 @@ bool ProfileManager::begin() {
 
   Serial.printf("PROFILE: %s (selector=%u)\n",
                 ProfileConfig::profileName(activeProfile_),
-                static_cast<unsigned>(rawDipValue_));
+                static_cast<unsigned>(rawProfileSelectorValue_));
   return true;
 }
 
