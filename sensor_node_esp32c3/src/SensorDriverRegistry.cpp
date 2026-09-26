@@ -51,7 +51,7 @@ public:
     config_ = config;
     Wire.begin(config.pinSda, config.pinScl);
     ready_ = sensor_.begin(config.i2cAddr, &Wire);
-    return true;
+    return ready_;
   }
 
   SensorProtocol::SensorType type() const override {
@@ -197,41 +197,11 @@ public:
   uint16_t sensorId() const override { return config_.sensorId; }
 
   bool read(float& value, uint8_t& quality) override {
-    Wire.begin(config_.pinSda, config_.pinScl);
-    Wire.beginTransmission(config_.i2cAddr);
-    if (config_.flags & SensorDriverRegistry::FLAG_REGISTER_16BIT)
-      Wire.write(static_cast<uint8_t>(config_.registerAddr >> 8));
-    Wire.write(static_cast<uint8_t>(config_.registerAddr));
-    if (Wire.endTransmission(false) != 0) {
-      value = 0.0f;
-      quality = SensorProtocol::QUALITY_STALE;
-      return false;
-    }
-    if (Wire.requestFrom(static_cast<int>(config_.i2cAddr),
-                         static_cast<int>(config_.dataWidth), true) != config_.dataWidth) {
-      value = 0.0f;
-      quality = SensorProtocol::QUALITY_STALE;
-      return false;
-    }
-
-    uint32_t raw = 0;
-    if (config_.flags & SensorDriverRegistry::FLAG_LITTLE_ENDIAN) {
-      for (uint8_t i = 0; i < config_.dataWidth; ++i)
-        raw |= static_cast<uint32_t>(Wire.read()) << (8U * i);
-    } else {
-      for (uint8_t i = 0; i < config_.dataWidth; ++i)
-        raw = (raw << 8U) | static_cast<uint32_t>(Wire.read());
-    }
-
-    if (config_.flags & SensorDriverRegistry::FLAG_SIGNED) {
-      if (config_.dataWidth == 1) value = static_cast<float>(static_cast<int8_t>(raw));
-      else if (config_.dataWidth == 2) value = static_cast<float>(static_cast<int16_t>(raw));
-      else value = static_cast<float>(static_cast<int32_t>(raw));
-    } else {
-      value = static_cast<float>(raw);
-    }
-    quality = SensorProtocol::QUALITY_VALID;
-    return true;
+    // GenericI2C is a registration/descriptor placeholder, not a protocol
+    // implementation. A raw register value is not a valid sensor measurement.
+    value = 0.0f;
+    quality = SensorProtocol::QUALITY_STALE;
+    return false;
   }
 
   SensorProtocol::SensorDescriptor descriptor() const override {
@@ -658,7 +628,9 @@ bool SensorDriverRegistry::add(const DriverConfig& config, SensorRegistry& regis
     ++count_;
   }
   entries_[index].config = config;
-  entries_[index].driver = nullptr;
+  // rebuild() owns replacement/destruction of every existing driver. Do not
+  // clear this pointer here or an existing driver would be leaked before
+  // rebuild() gets a chance to delete it.
   if (rebuild(registry)) return true;
 
   count_ = previousCount;
@@ -761,6 +733,53 @@ bool SensorDriverRegistry::save() const {
   return ok;
 }
 
+namespace {
+
+class Gpio3TransactionGuard {
+public:
+  explicit Gpio3TransactionGuard(const DriverConfig& config)
+      : active_(config.pinSda == 3) {
+    if (!active_) return;
+
+    const auto kind =
+        static_cast<ProfileConfig::InterfaceKind>(config.interfaceType);
+    switch (kind) {
+      case ProfileConfig::InterfaceKind::Adc:
+        pinMode(3, INPUT);
+        delay(ProfileConfig::PROFILE2_ADC_SETTLE_MS);
+        break;
+      case ProfileConfig::InterfaceKind::OneWire:
+        // Keep the external pull-up as the only defined pull-up source.
+        pinMode(3, INPUT);
+        delay(ProfileConfig::PROFILE3_GPIO3_SETTLE_MS);
+        break;
+      case ProfileConfig::InterfaceKind::SPI:
+        modeWasSpi_ = true;
+        pinMode(3, OUTPUT);
+        digitalWrite(3, HIGH);
+        break;
+      default:
+        active_ = false;
+        break;
+    }
+  }
+
+  ~Gpio3TransactionGuard() {
+    if (!active_) return;
+    if (modeWasSpi_) digitalWrite(3, HIGH);
+    pinMode(3, INPUT);
+  }
+
+  Gpio3TransactionGuard(const Gpio3TransactionGuard&) = delete;
+  Gpio3TransactionGuard& operator=(const Gpio3TransactionGuard&) = delete;
+
+private:
+  bool active_ = false;
+  bool modeWasSpi_ = false;
+};
+
+}  // namespace
+
 bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
   bool ok = true;
   for (auto& entry : entries_) {
@@ -770,6 +789,7 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
     entry.lastSampleMs = nowMs;
     float value = 0.0f;
     uint8_t quality = SensorProtocol::QUALITY_STALE;
+    Gpio3TransactionGuard gpio3Guard(entry.config);
     const bool readOk = entry.driver->read(value, quality);
     if (!readOk && !std::isfinite(value)) value = 0.0f;
     ok &= registry.updateValue(entry.config.sensorId, value, quality);

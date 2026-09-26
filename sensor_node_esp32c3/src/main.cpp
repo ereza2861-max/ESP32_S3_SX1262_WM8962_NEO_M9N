@@ -20,13 +20,8 @@ OtaApManager otaApManager;
 Preferences prefs;
 String nodeName;
 size_t configuredSensorCount = SensorNodeConfig::EXAMPLE_SENSOR_COUNT;
-// ARCHITECTURAL CHANGE (STEP 7a, locked): sensor node no longer connects to
-// an external Wi-Fi router for OTA. OTA is served only through the local AP
-// managed by OtaApManager. NVS namespace 'ota' keys (ssid, wpass, opass)
-// preserved for backward compat with serial provisioning, but SSID/password
-// are not used for STA.
-String otaProvisioningSsid;
-String otaProvisioningPassword;
+// OTA is served only through the local AP managed by OtaApManager.
+// Green-field provisioning persists only the local OTA password.
 String otaPassword;
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
@@ -35,12 +30,10 @@ bool validSecretLength(const String& value) {
   return value.length() >= OTA_PASSWORD_MIN_LEN && value.length() <= OTA_PASSWORD_MAX_LEN;
 }
 
-bool saveOtaProvisioning(const String& ssid, const String& wifiPass, const String& otaPass) {
+bool saveOtaProvisioning(const String& otaPass) {
   Preferences otaPrefs;
   if (!otaPrefs.begin("ota", false)) return false;
-  const bool ok = otaPrefs.putString("ssid", ssid) > 0 &&
-                  otaPrefs.putString("wpass", wifiPass) > 0 &&
-                  otaPrefs.putString("opass", otaPass) > 0;
+  const bool ok = otaPrefs.putString("opass", otaPass) > 0;
   otaPrefs.end();
   return ok;
 }
@@ -119,8 +112,6 @@ void printHelp() {
   Serial.println("  driver save");
   Serial.println("  pin battery <gpio>      set legacy ADC1 battery GPIO (0,1,3,4)");
   Serial.println("  pin digital <gpio>      set legacy safe digital GPIO");
-  Serial.println("  wifi ssid <ssid>         stage Wi-Fi SSID (NVS compat only)");
-  Serial.println("  wifi pass <password>     stage Wi-Fi password (NVS compat only)");
   Serial.println("  ota password <secret>    stage OTA password (min 12 chars)");
   Serial.println("  ota save                 save OTA provisioning and reboot");
   Serial.println("  show                    show current provisioning");
@@ -183,8 +174,7 @@ void showProvisioning() {
                 nodeName.c_str(), static_cast<unsigned>(configuredSensorCount),
                 SensorsExample::batteryAdcPin(), SensorsExample::digitalPin(),
                 static_cast<unsigned>(driverRegistry.count()));
-  Serial.printf("ota=managed-by-OtaApManager staged_wifi=%s\n",
-                otaProvisioningSsid.length() ? "configured" : "not-configured");
+  Serial.println("ota=managed-by-OtaApManager");
 }
 
 void handleCommand(String line) {
@@ -198,32 +188,13 @@ void handleCommand(String line) {
       Serial.println("ERROR: provision an OTA password (>=12 chars) first");
       return;
     }
-    const bool saved = saveOtaProvisioning(otaProvisioningSsid, otaProvisioningPassword, otaPassword);
+    const bool saved = saveOtaProvisioning(otaPassword);
     Serial.println(saved ? "OK: OTA provisioning saved; rebooting" :
                            "ERROR: OTA provisioning save failed");
     if (saved) {
       delay(100);
       ESP.restart();
     }
-    return;
-  }
-  if (line.startsWith("wifi ssid ")) {
-    otaProvisioningSsid = line.substring(10);
-    otaProvisioningSsid.trim();
-    if (otaProvisioningSsid.isEmpty() || otaProvisioningSsid.length() > 32) {
-      Serial.println("ERROR: invalid Wi-Fi SSID");
-      return;
-    }
-    Serial.println("OK: Wi-Fi SSID staged (retained for NVS compatibility; not used for STA)");
-    return;
-  }
-  if (line.startsWith("wifi pass ")) {
-    otaProvisioningPassword = line.substring(10);
-    if (otaProvisioningPassword.length() > 63) {
-      Serial.println("ERROR: Wi-Fi password too long");
-      return;
-    }
-    Serial.println("OK: Wi-Fi password staged (retained for NVS compatibility; not used for STA)");
     return;
   }
   if (line.startsWith("ota password ")) {

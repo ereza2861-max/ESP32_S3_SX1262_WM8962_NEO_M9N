@@ -4,7 +4,7 @@
 #include "ProfileConfig.h"
 
 // ProfileManager owns three responsibilities for STEP 1:
-//   1. Read the 2-bit DIP switch once at boot and expose the active profile.
+//   1. Read the 2-bit production profile selector once at boot and expose the active profile.
 //   2. Provide a non-blocking buzzer pulse API.
 //   3. Run a non-blocking button state machine that reports a 1.5 s long press.
 //
@@ -15,7 +15,7 @@ class ProfileManager {
 public:
   using LongPressCallback = void (*)();
 
-  // Reads the DIP switch, configures buzzer + button GPIOs, and stores the
+  // Reads the profile selector, configures buzzer + button GPIOs, and stores the
   // active profile. Must be called after Serial.begin() and after any
   // provisioning load that does not touch GPIOs.
   bool begin();
@@ -29,10 +29,10 @@ public:
   // call while a pulse is active extends the pulse rather than overlapping.
   void buzzerPulse();
 
-  // Returns the profile selected by the DIP switch at begin().
+  // Returns the profile selected by the static profile selector at begin().
   ProfileConfig::Profile activeProfile() const { return activeProfile_; }
 
-  // Returns the raw 2-bit DIP value in [0, 3] for diagnostics.
+  // Returns the raw 2-bit profile-selector value in [0, 3] for diagnostics.
   uint8_t rawDipValue() const { return rawDipValue_; }
 
   // Registers the callback fired once per confirmed 1.5 s button long press.
@@ -51,7 +51,7 @@ private:
     LongFired,
   };
 
-  static uint8_t decodeDip(int bit0, int bit1);
+  static uint8_t readProfileSelector(int bit0, int bit1);
 
   ProfileConfig::Profile activeProfile_ = ProfileConfig::Profile::IslandSea;
   uint8_t rawDipValue_ = 0;

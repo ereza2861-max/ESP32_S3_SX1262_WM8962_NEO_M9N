@@ -42,25 +42,25 @@ void buzzerHardwareSilence() {
 
 }  // namespace
 
-uint8_t ProfileManager::decodeDip(int bit0, int bit1) {
-  // bit0 is the least-significant profile bit. DIP switches pull to GND when
-  // closed (INPUT_PULLUP => closed = LOW = 0). Open = HIGH = 1.
-  const uint8_t b0 = (digitalRead(bit0) == LOW) ? 0U : 1U;
-  const uint8_t b1 = (digitalRead(bit1) == LOW) ? 0U : 1U;
-  return static_cast<uint8_t>(b0 | (b1 << 1));
+uint8_t ProfileManager::readProfileSelector(int bit0, int bit1) {
+  // The selector inputs use INPUT_PULLUP: closed/open electrical levels are
+  // normalized by the canonical pure helper in ProfileConfig.
+  const bool b0High = digitalRead(bit0) == HIGH;
+  const bool b1High = digitalRead(bit1) == HIGH;
+  return ProfileConfig::decodeDipBits(b0High, b1High);
 }
 
 bool ProfileManager::begin() {
-  pinMode(ProfileConfig::DIP_BIT0_PIN, INPUT_PULLUP);
-  pinMode(ProfileConfig::DIP_BIT1_PIN, INPUT_PULLUP);
+  pinMode(ProfileConfig::PROFILE_SEL_BIT0_PIN, INPUT_PULLUP);
+  pinMode(ProfileConfig::PROFILE_SEL_BIT1_PIN, INPUT_PULLUP);
 
-  rawDipValue_ = decodeDip(ProfileConfig::DIP_BIT0_PIN,
-                           ProfileConfig::DIP_BIT1_PIN);
-  if (rawDipValue_ >= ProfileConfig::PROFILE_COUNT) {
-    // Out-of-range DIP value (e.g. 4..7 from a partially seated switch):
-    // clamp to profile 0 and report it. Do NOT reboot; the node must stay
-    // available for serial provisioning.
-    Serial.printf("WARN: DIP value %u out of range; using island_sea\n",
+  rawDipValue_ = readProfileSelector(ProfileConfig::PROFILE_SEL_BIT0_PIN,
+                                      ProfileConfig::PROFILE_SEL_BIT1_PIN);
+  if (!ProfileConfig::dipValueInRange(rawDipValue_)) {
+    // The two physical selector inputs can only encode 0..3. Keep the
+    // canonical range check here for defensive robustness if the selector
+    // representation is extended later.
+    Serial.printf("WARN: profile selector value %u out of range; using island_sea\n",
                   static_cast<unsigned>(rawDipValue_));
     rawDipValue_ = 0;
   }
@@ -75,7 +75,7 @@ bool ProfileManager::begin() {
   buzzerActive_ = false;
   buzzerOffAtMs_ = 0;
 
-  Serial.printf("PROFILE: %s (dip=%u)\n",
+  Serial.printf("PROFILE: %s (selector=%u)\n",
                 ProfileConfig::profileName(activeProfile_),
                 static_cast<unsigned>(rawDipValue_));
   return true;

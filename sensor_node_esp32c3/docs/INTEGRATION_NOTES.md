@@ -30,9 +30,7 @@ dedicated pulse pin. `RAIN_GAUGE_I2C_ADDRESS = 0x28` is a placeholder.
 
 GPIO3 is shared between the wind vane ADC input and the ADXL355 chip select.
 The ESP32-C3 GPIO matrix cannot make one pin simultaneously an ADC input and
-a digital output. The contract in `ProfileSensorsContract` (in
-`ProfileSensors.h`) is a statement, not a scheduler; the STEP 8 integration
-owns the actual serialization.
+a digital output. `SensorDriverRegistry::sample()` now owns the actual serialization boundary.
 
 ### D-05 — Profile 3 GPIO3 time-share (OneWire + SPI CS), leakage accepted
 
@@ -83,7 +81,7 @@ accept a new OTA password. The ESP32-S3 has no OTA by design.
 
 1. All GPIO assignments in `ProfileConfig.h`. No PCB exists yet.
 2. All I2C addresses for non-BME280 devices.
-3. Profile 2 GPIO3 time-share scheduler.
+3. Profile 2 GPIO3 electrical behavior and ADXL355 CS validation by HIL.
 4. Profile 3 GPIO3 leakage tolerance by ADXL355 CS.
 5. Binary size headroom under `app0 = 0x190000`.
 6. `attachInterruptArg` availability on the actual Arduino-ESP32 core (3.x

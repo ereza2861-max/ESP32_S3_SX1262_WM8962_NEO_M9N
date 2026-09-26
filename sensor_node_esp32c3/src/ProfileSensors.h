@@ -55,6 +55,7 @@ private:
 
 namespace ProfileSensorsContract {
 constexpr bool gpio3IsTimeSharedInProfile2() { return true; }
-constexpr int gpio3OwnerWhenSamplingAdc() { return -1; }
+constexpr int gpio3OwnerWhenSamplingAdc() { return ProfileConfig::PROFILE2_WIND_VANE_ADC_PIN; }
 constexpr int gpio3OwnerWhenSamplingSpi() { return ProfileConfig::PROFILE2_ADXL355_CS_PIN; }
+constexpr bool gpio3RuntimeSerializationImplemented() { return true; }
 }

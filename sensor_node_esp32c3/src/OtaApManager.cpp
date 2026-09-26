@@ -48,15 +48,19 @@ bool OtaApManager::begin() {
     otaPassword_ = "";
   }
 
-  if (apEnabled_ && !otaPassword_.isEmpty()) {
+  const bool requestedApAtBoot = apEnabled_;
+  // loadState() stores the desired state, while startAp() uses apEnabled_
+  // as the runtime "AP is actually up" guard. Clear the runtime flag before
+  // starting so a persisted enabled state does not make startAp() return
+  // without bringing the AP up.
+  apEnabled_ = false;
+
+  if (requestedApAtBoot && !otaPassword_.isEmpty()) {
     if (!startAp()) {
       Serial.println("WARN: AP start failed at boot; staying disabled");
       apEnabled_ = false;
       saveState();
     }
-  } else {
-    // Explicitly ensure the AP is NOT on unless NVS says so.
-    apEnabled_ = false;
   }
   return true;
 }
@@ -65,8 +69,6 @@ void OtaApManager::loadState() {
   Preferences prefs;
   if (!prefs.begin(NVS_NAMESPACE, true)) return;
   apEnabled_ = prefs.getBool(NVS_KEY_AP_ENABLED, false);
-  wifiSsid_ = prefs.getString("ssid", "");
-  wifiPassword_ = prefs.getString("wpass", "");
   otaPassword_ = prefs.getString("opass", "");
   prefs.end();
 }

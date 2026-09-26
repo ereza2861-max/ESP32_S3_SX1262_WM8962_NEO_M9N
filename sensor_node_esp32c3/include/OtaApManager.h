@@ -78,10 +78,8 @@ private:
   uint32_t apStartedAtMs_ = 0;
   uint32_t lastClientSeenMs_ = 0;
 
-  // Loaded by loadState() from the "ota" NVS namespace. The legacy SSID and
-  // Wi-Fi password are retained for compatibility but are not used for STA OTA.
-  String wifiSsid_;
-  String wifiPassword_;
+  // Loaded by loadState() from the "ota" NVS namespace.
+  // Green-field OTA has no station-mode credential path.
   String otaPassword_;
   String lastClientIp_;
 };

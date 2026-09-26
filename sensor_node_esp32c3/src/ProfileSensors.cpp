@@ -158,7 +158,7 @@ bool ProfileSensors::registerVolcanicMountain(SensorDriverRegistry& drivers, Sen
   { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+4,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=ProfileConfig::RAIN_GAUGE_I2C_ADDRESS;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;if(drivers.add(c,registry))++registeredCount_; }
   { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_ADC,base+5,period);c.pinSda=3;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::Adc;if(drivers.add(c,registry))++registeredCount_; }
   { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_PULSE_COUNTER,base+6,period);c.pinSda=11;c.registerAddr=1;c.dataWidth=1;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::Pulse;if(drivers.add(c,registry))++registeredCount_; }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+7,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x1D;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;if(drivers.add(c,registry))++registeredCount_; }
+  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+7,period);c.pinSda=ProfileConfig::PROFILE2_ADXL355_CS_PIN;c.pinScl=ProfileConfig::RFID_SCK_PIN;c.i2cAddr=0x1D;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;if(drivers.add(c,registry))++registeredCount_; }
   return registeredCount_==expectedCount_;
 }
 
@@ -174,6 +174,6 @@ bool ProfileSensors::registerSubZeroSnow(SensorDriverRegistry& drivers, SensorRe
   { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_UART,base+5,period);c.dataWidth=4;c.registerAddr=1;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::UART;add(c); }
   { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+6,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x70;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;add(c); }
   { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+7,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x73;c.dataWidth=2;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::I2C;add(c); }
-  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+8,period);c.pinSda=8;c.pinScl=9;c.i2cAddr=0x1D;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;add(c); }
+  { DriverConfig c=makeConfig(SensorDriverRegistry::DRIVER_GENERIC_I2C,base+8,period);c.pinSda=ProfileConfig::PROFILE3_ADXL355_CS_PIN;c.pinScl=ProfileConfig::RFID_SCK_PIN;c.i2cAddr=0x1D;c.interfaceType=(uint8_t)ProfileConfig::InterfaceKind::SPI;add(c); }
   return registeredCount_==expectedCount_;
 }

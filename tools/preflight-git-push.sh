@@ -21,6 +21,15 @@ if ! git diff --check || ! git diff --cached --check; then
 fi
 
 echo
+echo "== Merge-conflict marker check: tracked worktree =="
+if git grep -lI -E '^(<<<<<<<|=======|>>>>>>>)($|[[:space:]])' -- . >/dev/null 2>&1; then
+  echo "ERROR: merge-conflict marker detected in tracked text (matching content suppressed)."
+  fail=1
+else
+  echo "PASS"
+fi
+
+echo
 echo "== Credential-like tracked paths =="
 tracked_bad="$(git ls-files | grep -E "$CREDENTIAL_PATHS" || true)"
 if [ -n "$tracked_bad" ]; then
@@ -61,6 +70,10 @@ if [ -n "$untracked" ]; then
     [ -f "$file" ] || continue
     if grep -lI -E "$PATTERN" "$file" >/dev/null 2>&1; then
       echo "ERROR: possible secret detected in untracked file (content intentionally suppressed): $file"
+      fail=1
+    fi
+    if grep -lE '^(<<<<<<<|=======|>>>>>>>)($|[[:space:]])' "$file" >/dev/null 2>&1; then
+      echo "ERROR: merge-conflict marker detected in untracked text (matching content suppressed): $file"
       fail=1
     fi
   done <<EOF

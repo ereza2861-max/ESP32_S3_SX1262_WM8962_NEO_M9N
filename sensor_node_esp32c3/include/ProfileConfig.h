@@ -5,8 +5,9 @@
 
 // FieldRadio ESP32-C3 Sensor Node — profile configuration.
 //
-// ARCHITECTURAL DECISION (locked by userdecisions.txt STEP 0):
-//   - 4 profiles selected by a 2-bit DIP switch at boot.
+// ARCHITECTURAL DECISION:
+//   - 4 profiles selected by a 2-bit production solder-jumper configuration at boot.
+//   - Prototype hardware used a 2-bit DIP switch during development.
 //   - Pin map is NOT PHYSICALLY VALIDATED. It is a source-level contract only.
 //   - Legacy battery ADC is reassigned to GPIO3 to free GPIO4 for MFRC522 MISO.
 //   - Legacy digital sensor is disabled (DIGITAL_SENSOR_PIN = -1) to free GPIO10
@@ -28,12 +29,11 @@ enum class Profile : uint8_t {
 
 constexpr uint8_t PROFILE_COUNT = 4;
 
-// --- DIP switch (2-bit) -----------------------------------------------------
-// GPIO0: ADC2, safe as input after boot. GPIO1: ADC1, not a strapping pin.
-// The DIP switch is read once during ProfileManager::begin(). No debounce is
-// required because DIP switches are static during operation.
-constexpr int DIP_BIT0_PIN = 0;
-constexpr int DIP_BIT1_PIN = 1;
+// --- Production profile selector (2-bit solder-jumper encoding) -------------
+// Prototype hardware used a DIP switch; production uses a static solder-jumper
+// configuration. The selector is sampled once at boot and never hot-switched.
+constexpr int PROFILE_SEL_BIT0_PIN = 0;
+constexpr int PROFILE_SEL_BIT1_PIN = 1;
 
 // --- Button (long-press 1.5 s toggles Wi-Fi AP) ----------------------------
 // GPIO10 is free, not USB-JTAG, and not used by any profile driver.

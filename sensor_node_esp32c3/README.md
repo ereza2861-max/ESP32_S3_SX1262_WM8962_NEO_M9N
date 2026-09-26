@@ -5,8 +5,8 @@ The canonical wire contract is `../shared/SensorProtocol.h`; do not create a sec
 
 ## Profile hardware contract
 
-The sensor node has four mutually exclusive profiles selected by the two-bit DIP switch during
-prototype operation. In production, the DIP switch is replaced by a solder-jumper configuration.
+The sensor node has four mutually exclusive profiles selected at boot by a two-bit static selector.
+Prototype hardware used a DIP switch; production uses a solder-jumper configuration.
 Only one profile's sensor cabling is installed at a time; changing profile means physically
 unplugging the previous profile's sensor cables and installing the new profile's PCB/cabling.
 Pin overlap between different profiles is therefore intentional. The MFRC522 RFID reader is the
@@ -38,8 +38,8 @@ The ESP32-S3 LoRa/gateway node has NO OTA by explicit design.
 
 | Function | Pin |
 |---|---:|
-| DIP bit0 | GPIO0 |
-| DIP bit1 | GPIO1 |
+| Prototype DIP bit0 / production selector bit0 | GPIO0 |
+| Prototype DIP bit1 / production selector bit1 | GPIO1 |
 | MFRC522 CS | GPIO7 |
 | MFRC522 SCK | GPIO6 |
 | MFRC522 MOSI | GPIO5 |
@@ -138,8 +138,7 @@ button path (or an explicitly persisted AP-enabled state), is bounded by a 10-mi
 window, and requires the already-provisioned OTA password for firmware upload. The open AP itself
 does not grant upload authorization and the WebUI does not accept a new OTA password.
 
-The historical `wifi ssid` / `wifi pass` serial fields are retained only as NVS data for compatibility
-with the existing provisioning namespace; they are not used to create a station-mode OTA connection.
+There is no station-mode OTA provisioning path and no Wi-Fi SSID/password compatibility storage.
 
 Provision the OTA password locally over the serial console:
 
