@@ -25,6 +25,9 @@ public:
   String clientCertificatePem() const { return clientCertificatePem_; }
   String clientPrivateKeyPem() const { return clientPrivateKeyPem_; }
   bool reloadCertificateMaterial();
+  // Atomically replace the active MQTT credential and defer old-credential retirement
+  // until the first successful connection using the new certificate.
+  bool replaceConnectionCredentials(const String& previousSerial);
   void setEnabled(bool enabled);
   bool applyConfig();
   bool applyConfig(const RuntimeConfig& config);
@@ -128,4 +131,7 @@ private:
   bool waitForPubAck(uint16_t packetId, uint32_t timeoutMs);
   static size_t encodeMqttRemainingLength(uint8_t* out, size_t length);
   uint16_t nextPacketId_ = 1;
+  String rotationPreviousSerial_;
+  bool rotationRetirementPending_ = false;
+  bool retirePreviousCredential();
 };

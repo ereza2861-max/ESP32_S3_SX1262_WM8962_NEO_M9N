@@ -110,6 +110,8 @@ struct RuntimeConfig {
   bool setRadio(float freqMHz, float bwKHz, uint8_t sf, uint8_t cr,
                 uint8_t syncWord, int8_t powerDbm);
   bool validRadio() const;
+  // Single semantic validator used by persistence, API/WebUI and restore paths.
+  bool validSemantics() const;
   bool validLoRaWAN() const;
   bool webPasswordConfigured() const;
   bool verifyWebPassword(const String& password) const;

@@ -142,7 +142,7 @@ pytest -v -m hil test/hil
 ### LoRa
 
 - A text sent through gateway A arrives at B.
-- With `FIELDRADIO_LORA_ECDH_REKEY_ENABLED=1`, both gateways report active ECDH
+- With ECDH always compiled and `ecdhRekeyPolicy=1`, both gateways report active ECDH
   state, a text round-trip is observed as wire V5, and the peer survives reboot
   with a freshly regenerated ephemeral key.
 - The deep-sleep test arms SX1262 duty-cycle RX, loses an intentionally
@@ -154,7 +154,7 @@ pytest -v -m hil test/hil
 - SOS reaches the peer and gateway A reports `acked=true`.
 
 For ECDH bring-up, build **both** gateway fixtures with
-`-DFIELDRADIO_LORA_ECDH_REKEY_ENABLED=1`. The test suite uses the authenticated
+The test suite uses the authenticated
 `/api/ecdh/status` endpoint and `/api/deep-sleep` control endpoint; both are
 protected by the normal web authentication and CSRF checks.
 

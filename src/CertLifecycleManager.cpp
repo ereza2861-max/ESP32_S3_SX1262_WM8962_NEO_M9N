@@ -275,11 +275,13 @@ bool CertLifecycleManager::verifyAndInstall(const String& certChainPem, const St
       break;
     }
     mbedtls_pk_free(&privateKey);
+    audit("ROTATION_BROKER_CREDENTIAL_UPDATE_ACCEPTED");
     if (!atomicStore(selectedCertPem, newKeyPem)) {
       mbedtls_x509_crt_free(&selected);
       break;
     }
-    if (!mqtt_.reloadCertificateMaterial()) {
+    audit("ROTATION_SECURE_PERSISTENCE_COMMITTED");
+    if (!mqtt_.replaceConnectionCredentials(mqtt_.getCertSerial())) {
       mbedtls_x509_crt_free(&selected);
       break;
     }
@@ -309,6 +311,7 @@ bool CertLifecycleManager::renewCertificate(bool manual) {
     }
     if (manual) lastManualMs = millis();
 
+    audit("ROTATION_DEADLINE_CHECK");
     String oldCert = mqtt_.clientCertificatePem();
     String oldKey = mqtt_.clientPrivateKeyPem();
     if (cfg.estAuthMode == 0 && (oldCert.isEmpty() || oldKey.isEmpty())) {
@@ -328,6 +331,7 @@ bool CertLifecycleManager::renewCertificate(bool manual) {
     String chainPem, newKey;
     String subject = "CN=";
     subject += Config::DEVICE_ID;
+    audit("ROTATION_CREDENTIAL_GENERATION_START");
     if (!est.enroll(cfg.estServerUrl, cfg.estLabel, cfg.estAuthMode,
                     cfg.estUsername, cfg.estPassword, cfg.estBootstrapToken,
                     oldCert, oldKey, subject, enrolled_, chainPem, newKey)) {

@@ -127,6 +127,7 @@ bool configCommitInternal(const RuntimeConfig& candidate, uint32_t expectedGener
 bool configCommit(const RuntimeConfig& candidate) { return configCommit(candidate, configGeneration()); }
 
 bool configCommit(const RuntimeConfig& candidate, uint32_t expectedGeneration) {
+  if (!candidate.validSemantics()) return false;
   if (gConfigTransactionMutex &&
       xSemaphoreTake(gConfigTransactionMutex, pdMS_TO_TICKS(5000)) != pdTRUE)
     return false;
@@ -149,6 +150,7 @@ bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGen
 
   RuntimeConfig previous;
   uint32_t previousGeneration = 0;
+  if (!candidate.validSemantics()) { unlock(); return false; }
   if (!configSnapshot(previous, previousGeneration) || previousGeneration != expectedGeneration) { unlock(); return false; }
 
   const uint32_t candidateGeneration =
@@ -482,7 +484,7 @@ bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation,bool* legacySchema
     }
   }
   RuntimeConfig candidate=out;
-  if(!decodePayload(chosen->payload,candidate)||!validRuntimeConfig(candidate)){p.end();return false;}
+  if(!decodePayload(chosen->payload,candidate)||!candidate.validSemantics()){p.end();return false;}
   out=candidate;generation=chosen->generation;p.end();return true;
 }
 
@@ -519,6 +521,10 @@ bool validCallsign(const String& value) {
   }
   return true;
 }
+}
+
+bool RuntimeConfig::validSemantics() const {
+  return validRuntimeConfig(*this);
 }
 
 bool RuntimeConfig::validRadio() const {

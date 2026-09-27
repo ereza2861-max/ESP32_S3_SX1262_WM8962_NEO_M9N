@@ -206,17 +206,14 @@ constexpr uint16_t CERT_RENEWAL_THRESHOLD_DAYS_MAX = 3650;
 constexpr uint32_t WEB_POST_CSRF_TOKEN_BYTES = 16;
 constexpr uint32_t LORA_REKEY_PERIOD_SEC = 86400UL;
 constexpr uint32_t LORA_REPLAY_TIME_WINDOW_SEC = 300UL;
-// ECDH support is compiled in so the rekey feature can be selected at
-// runtime. RuntimeConfig::ecdhRekeyPolicy remains the protocol switch:
- // 0 = legacy AES-GCM framing, 1 = ECDH rekey framing.
-#ifndef FIELDRADIO_LORA_ECDH_REKEY_ENABLED
-#define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 1
+// ECDH support is always compiled. RuntimeConfig::ecdhRekeyPolicy is the
+// only activation switch: 0 = legacy AES-GCM framing, 1 = ECDH rekey framing.
+// A build flag cannot disable compilation of the ECDH implementation.
+#ifdef FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+#undef FIELDRADIO_LORA_ECDH_REKEY_ENABLED
 #endif
-constexpr bool LORA_ECDH_REKEY_ENABLED =
-    FIELDRADIO_LORA_ECDH_REKEY_ENABLED != 0;
-static_assert(FIELDRADIO_LORA_ECDH_REKEY_ENABLED == 0 ||
-              FIELDRADIO_LORA_ECDH_REKEY_ENABLED == 1,
-              "FIELDRADIO_LORA_ECDH_REKEY_ENABLED must be 0 or 1");
+#define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 1
+constexpr bool LORA_ECDH_REKEY_ENABLED = true;
 constexpr uint32_t LORA_ECDH_KEY_RETENTION_SEC =
     2UL * LORA_REKEY_PERIOD_SEC;
 constexpr uint8_t LORA_ECDH_PROTOCOL_VERSION = 1;

@@ -510,59 +510,59 @@ async function refresh(){
   try{const x=JSON.parse(raw);
      const ra=x.runtimeAdvanced||{};
      deepSleepEnabled.checked=!!ra.deepSleepEnabled;
-     deepSleepIdleSec.value=Math.round((ra.deepSleepIdleMs||300000)/1000);
-     deepSleepWakeGraceMs.value=ra.deepSleepWakeGraceMs||5000;
-     criticalShutdownDelayMs.value=ra.criticalShutdownDelayMs||1500;
-     batteryLowThreshold.value=ra.batteryLowThreshold??3.4;
-     batteryCriticalThreshold.value=ra.batteryCriticalThreshold??3.2;
+     deepSleepIdleSec.value=Math.round(ra.deepSleepIdleMs/1000);
+     deepSleepWakeGraceMs.value=ra.deepSleepWakeGraceMs;
+     criticalShutdownDelayMs.value=ra.criticalShutdownDelayMs;
+     batteryLowThreshold.value=ra.batteryLowThreshold;
+     batteryCriticalThreshold.value=ra.batteryCriticalThreshold;
      mqttEnabled.checked=!!ra.mqttEnabled;
-     wakePeriodSec.value=String(ra.wakePeriodSec||43200);
-     staSsid.value=ra.staSsid||'';
-     staPassword.value='';
-     mqttHost.value=ra.mqttHost||'';
-     mqttPort.value=ra.mqttPort||1883;
+     wakePeriodSec.value=String(ra.wakePeriodSec);
+     staSsid.value=ra.staSsid;
+     staPassword.value=''; // write-only credential; never populated from a literal fallback
+     mqttHost.value=ra.mqttHost;
+     mqttPort.value=ra.mqttPort;
      mqttTls.checked=!!ra.mqttTlsRequired;
-     mqttRetryMin.value=ra.mqttReconnectMinMs||5000;
-     mqttRetryMax.value=ra.mqttReconnectMaxMs||300000;
-     mqttTelemetry.value=ra.mqttTelemetryPeriodMs||30000;
-     mqttHealth.value=ra.mqttHealthPeriodMs||60000;
+     mqttRetryMin.value=ra.mqttReconnectMinMs;
+     mqttRetryMax.value=ra.mqttReconnectMaxMs;
+     mqttTelemetry.value=ra.mqttTelemetryPeriodMs;
+     mqttHealth.value=ra.mqttHealthPeriodMs;
      mqttRetainTelemetry.checked=!!ra.mqttRetainTelemetry;
      mqttRetainAvailability.checked=!!ra.mqttRetainAvailability;
-     estServerUrl.value=ra.estServerUrl||'';
-     estLabel.value=ra.estLabel||'/.well-known/est';
-     certRenewalThresholdDays.value=ra.certRenewalThresholdDays||30;
-     certCheckPeriodMs.value=ra.certCheckPeriodMs||86400000;
-     estAuthMode.value=ra.estAuthMode??0;
+     estServerUrl.value=ra.estServerUrl;
+     estLabel.value=ra.estLabel;
+     certRenewalThresholdDays.value=ra.certRenewalThresholdDays;
+     certCheckPeriodMs.value=ra.certCheckPeriodMs;
+     estAuthMode.value=ra.estAuthMode;
      certLifecycleEnabled.checked=!!ra.certLifecycleEnabled;
      vox.checked=!!ra.voxEnabled;
-     voxThreshold.value=ra.voxThreshold||0.08;
-     voxHang.value=ra.voxHangMs||700;
+     voxThreshold.value=ra.voxThreshold;
+     voxHang.value=ra.voxHangMs;
      aec.checked=!!ra.aecEnabled;
      usbmon.checked=!!ra.usbMonitor;
      usbtransport.checked=!!ra.usbPlaybackTransport;
      loop.checked=!!ra.audioLoopback;
      adr.checked=!!ra.loraAdrEnabled;
      hop.checked=!!ra.loraHopEnabled;
-     hopProfile.value=ra.loraHopChannelProfile||8;
+     hopProfile.value=ra.loraHopChannelProfile;
      rangeMode.checked=!!ra.loraRangeTestMode;
      bleEnabled.checked=!!ra.sensorReaderEnabled;
-     bleScanInterval.value=ra.sensorScanIntervalMs||5000;
-     bleScanWindow.value=ra.sensorScanWindowMs||80;
-     bleScanDuration.value=ra.sensorScanDurationMs||1500;
-     bleConnectTimeout.value=ra.sensorConnectTimeoutMs||5000;
-     bleEviction.value=ra.sensorNodeEvictionMs||600000;
-     bleMaxNodes.value=ra.sensorMaxNodes||2;
+     bleScanInterval.value=ra.sensorScanIntervalMs;
+     bleScanWindow.value=ra.sensorScanWindowMs;
+     bleScanDuration.value=ra.sensorScanDurationMs;
+     bleConnectTimeout.value=ra.sensorConnectTimeoutMs;
+     bleEviction.value=ra.sensorNodeEvictionMs;
+     bleMaxNodes.value=ra.sensorMaxNodes;
      bleEncryption.checked=!!ra.sensorRequireEncryption;
      blePairing.checked=!!ra.blePairingEnabled;
-     bleFailureThreshold.value=ra.blePairingFailureThreshold||3;
-     bleBlockMs.value=ra.blePairingBlockMs||60000;
+     bleFailureThreshold.value=ra.blePairingFailureThreshold;
+     bleBlockMs.value=ra.blePairingBlockMs;
      bleKeepAwake.checked=!!ra.sensorKeepAwake;
-     webSessionTimeout.value=ra.webSessionTimeoutMs||900000;
-     webRateLimit.value=ra.webAuthRateLimitMs||500;
-     csrfPolicy.value=ra.csrfPolicy??0;
-     blePairingPolicy.value=ra.blePairingPolicy??0;
-     ecdhPolicy.value=ra.ecdhRekeyPolicy??0;
-     replayWindow.value=ra.replayWindowBits||32;
+     webSessionTimeout.value=ra.webSessionTimeoutMs;
+     webRateLimit.value=ra.webAuthRateLimitMs;
+     csrfPolicy.value=ra.csrfPolicy;
+     blePairingPolicy.value=ra.blePairingPolicy;
+     ecdhPolicy.value=ra.ecdhRekeyPolicy;
+     replayWindow.value=ra.replayWindowBits;
      document.getElementById('unreadBadge').textContent=(x.messageUnread||0)+' unread';document.getElementById('sosBadge').textContent=x.sosEscalated?'SOS ESCALATED':(x.sos?'SOS ACTIVE':'');document.body.classList.toggle('battery-low',!!x.battery?.low);document.body.classList.toggle('battery-critical',!!x.battery?.critical);
     document.getElementById('diagnostics').textContent =
       `Antenna OK: ${x.diagnostics?.antennaOk ? 'YES':'NO'} | TX RSSI: ${x.diagnostics?.txRssi} dBm | Baseline: ${x.diagnostics?.antennaBaselineRssi} dBm | CPU: ${x.cpuTempC} C | Battery calibration drift: ${x.batteryCalibrationDrift ? 'YES':'NO'}`;
@@ -702,11 +702,11 @@ async function syncSource(){
       mqttEnabled.checked=!!x.runtimeAdvanced.mqttEnabled;
       wakePeriodSec.value=String(x.runtimeAdvanced.wakePeriodSec);
       deepSleepEnabled.checked=!!x.runtimeAdvanced.deepSleepEnabled;
-      deepSleepIdleSec.value=String(Math.round((x.runtimeAdvanced.deepSleepIdleMs||300000)/1000));
-      deepSleepWakeGraceMs.value=String(x.runtimeAdvanced.deepSleepWakeGraceMs||5000);
-      criticalShutdownDelayMs.value=String(x.runtimeAdvanced.criticalShutdownDelayMs||1500);
-      batteryLowThreshold.value=String(x.runtimeAdvanced.batteryLowThreshold??3.4);
-      batteryCriticalThreshold.value=String(x.runtimeAdvanced.batteryCriticalThreshold??3.2);
+      deepSleepIdleSec.value=String(Math.round(x.runtimeAdvanced.deepSleepIdleMs/1000));
+      deepSleepWakeGraceMs.value=String(x.runtimeAdvanced.deepSleepWakeGraceMs);
+      criticalShutdownDelayMs.value=String(x.runtimeAdvanced.criticalShutdownDelayMs);
+      batteryLowThreshold.value=String(x.runtimeAdvanced.batteryLowThreshold);
+      batteryCriticalThreshold.value=String(x.runtimeAdvanced.batteryCriticalThreshold);
       classDEnabled.disabled=!x.runtimeAdvanced.classDHardwareEnabled;
       classDEnabled.checked=!!x.runtimeAdvanced.classDEnabled;
       classDBoost.disabled=!x.runtimeAdvanced.classDHardwareEnabled;
@@ -3738,7 +3738,7 @@ void WebUi::handleConfig() {
       server_.send(400, "text/plain", "replay window must be 8..32 bits"); return;
     } else candidate.replayWindowBits = static_cast<uint8_t>(value);
 
-  if (!candidate.validRadio() || candidate.volume > 100 ||
+  if (!candidate.validSemantics() || candidate.volume > 100 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
       candidate.wakePeriodSec < Config::WAKE_PERIOD_SEC_MIN || candidate.wakePeriodSec > Config::WAKE_PERIOD_SEC_MAX ||
       candidate.deepSleepIdleMs < 60000UL ||
@@ -3973,7 +3973,7 @@ void WebUi::handleConfigRestore() {
     if (nl < 0) break;
     pos = nl + 1;
   }
-  if (!seenFreq || !seenBw || !seenSf || !seenCr || !candidate.validRadio() ||
+  if (!seenFreq || !seenBw || !seenSf || !seenCr || !candidate.validSemantics() ||
       candidate.volume > 100 || candidate.audioRecordQuality > 2 ||
       candidate.audioRecordSource > Config::AUDIO_SOURCE_USB ||
       candidate.wakePeriodSec < Config::WAKE_PERIOD_SEC_MIN || candidate.wakePeriodSec > Config::WAKE_PERIOD_SEC_MAX ||

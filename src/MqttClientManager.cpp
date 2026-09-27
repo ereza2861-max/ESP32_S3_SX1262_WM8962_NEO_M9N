@@ -711,6 +711,72 @@ bool MqttClientManager::reloadCertificateMaterial() {
   return true;
 }
 
+bool MqttClientManager::replaceConnectionCredentials(const String& previousSerial) {
+  if (previousSerial.isEmpty()) return false;
+  RuntimeConfig config{};
+  if (!configSnapshot(config) || !config.mqttTlsRequired) return false;
+  if (!loadCredentials() || !pkiProvisioned_) return false;
+  plain_.stop();
+  secure_.stop();
+  client_.disconnect();
+  secure_.setCACert(MQTT_BROKER_ROOT_CA);
+  secure_.setCertificate(clientCertificatePem_.c_str());
+  secure_.setPrivateKey(clientPrivateKeyPem_.c_str());
+  secure_.setHandshakeTimeout(10);
+  client_.setClient(secure_);
+  client_.setServer(host_.c_str(), port_);
+  connected_ = false;
+  nextRetryMs_ = 0;
+  retryDelayMs_ = config.mqttReconnectMinMs;
+  rotationPreviousSerial_ = previousSerial;
+  rotationRetirementPending_ = true;
+  auditEvent("ROTATION_CONNECTION_REPLACEMENT");
+  return true;
+}
+
+bool MqttClientManager::retirePreviousCredential() {
+  if (!rotationRetirementPending_ || rotationPreviousSerial_.isEmpty()) return true;
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, false)) return false;
+  bool removed = false;
+  for (const char* suffix : {"a", "b"}) {
+    const String certKey = String("cert_") + suffix;
+    const String keyKey = String("key_") + suffix;
+    const String commitKey = String("cert_commit_") + suffix;
+    const String cert = prefs.getString(certKey.c_str(), "");
+    const String key = prefs.getString(keyKey.c_str(), "");
+    const bool committed = prefs.getUChar(commitKey.c_str(), 0) == CERT_SLOT_COMMIT;
+    if (!committed || cert.isEmpty() || key.isEmpty()) continue;
+    uint64_t expiry = 0;
+    String subject, issuer, serial;
+    if (!parseMqttCertificateMetadata(cert, expiry, subject, issuer, serial)) continue;
+    if (!serial.equalsIgnoreCase(rotationPreviousSerial_)) continue;
+    const bool slotRemoved =
+        prefs.remove(certKey.c_str()) &&
+        prefs.remove(keyKey.c_str()) &&
+        prefs.remove(commitKey.c_str()) &&
+        prefs.remove((String("cert_gen_") + suffix).c_str());
+    if (!slotRemoved) {
+      prefs.end();
+      auditEvent("ROTATION_OLD_CREDENTIAL_RETIRE_FAIL");
+      return false;
+    }
+    removed = true;
+  }
+  // Legacy single-slot material is no longer a recovery credential once a
+  // replacement has connected successfully.
+  const bool legacyRemoved = prefs.remove("cert") && prefs.remove("key");
+  prefs.end();
+  if (!legacyRemoved) {
+    auditEvent("ROTATION_OLD_CREDENTIAL_RETIRE_FAIL");
+    return false;
+  }
+  rotationPreviousSerial_.clear();
+  rotationRetirementPending_ = false;
+  auditEvent(removed ? "ROTATION_OLD_CREDENTIAL_RETIRED" : "ROTATION_OLD_CREDENTIAL_ALREADY_RETIRED");
+  return true;
+}
+
 void MqttClientManager::auditEvent(const char* event, int mqttState) {
   if (!storage.ready() || !event) return;
   SpiLock lock(pdMS_TO_TICKS(50));
@@ -1117,6 +1183,9 @@ void MqttClientManager::task() {
       auditEvent("CONNECT_OK", client_.state());
       retryDelayMs_ = config.mqttReconnectMinMs;
       publish(willTopic, "online", config.mqttRetainAvailability);
+      if (rotationRetirementPending_ && !retirePreviousCredential()) {
+        auditEvent("ROTATION_OLD_CREDENTIAL_RETIRE_FAIL");
+      }
     } else {
       if (client_.state() == MQTT_CONNECT_BAD_CREDENTIALS) auditEvent("AUTH_FAIL", client_.state());
       else auditEvent("CONNECT_FAIL", client_.state());
