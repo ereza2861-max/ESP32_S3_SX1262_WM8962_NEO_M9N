@@ -1,0 +1,2 @@
+Q: Apakah conflict pin sensor diperbolehkan untuk cross-profile?
+A: Ya, diperbolehkan. Pin yang sama dapat digunakan oleh sensor pada profile berbeda karena sensor/cabling antar-profile bersifat eksklusif. Saat profile diganti, sensor/cabling profile sebelumnya harus dicabut/diganti terlebih dahulu, sehingga tidak terjadi konflik fisik antar-profile yang aktif secara bersamaan. Overlap pin tersebut merupakan desain yang disengaja, bukan bug, dan GPIO3 memang menggunakan external CD74HC4051 mux untuk menangani shared sensor path.

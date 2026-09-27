@@ -27,16 +27,57 @@ public:
   bool reloadCertificateMaterial();
   void setEnabled(bool enabled);
   bool applyConfig();
+  bool applyConfig(const RuntimeConfig& config);
   bool enabled() const { return enabled_; }
   bool publish(const String& topic, const String& payload, bool retained = false);
   bool publishSensorData(uint32_t nodeId, const char* nodeName,
                          uint16_t sensorId, const char* sensorName,
                          const char* unit, float value, uint8_t quality,
                          int16_t rssi, uint64_t timestampMs);
+  // F1-TODO-3: Service certificate rotation readiness without contacting a backend.
+  void serviceRotation();
+  // F1-TODO-6: Verify a candidate certificate/CA pair without persisting it.
+  bool verifyNewCertificate(const String& certPem,
+                            const String& caPem,
+                            const String& expectedSerial,
+                            uint64_t expectedExpiresAt);
   void task();
   bool isConnected() const { return connected_ && client_.connected(); }
 
 private:
+  // F1-TODO-4: Phase model reserved for the firmware-side rotation state machine.
+  enum class RotationPhase : uint8_t {
+    Idle = 0,
+    Requesting = 1,
+    Verifying = 2,
+    Installing = 3,
+    Reconnecting = 4,
+    Failed = 5,
+  };
+
+  // F1-TODO-2: RAM-only rotation state; no persisted-config fields are added.
+  struct RotationState {
+    String currentSerial;
+    uint64_t expiresAt = 0;
+    bool rotationPending = false;
+    String pendingSerial;
+    uint32_t lastCheckMs = 0;
+    uint32_t lastAttemptMs = 0;
+    uint8_t retryCount = 0;
+    uint8_t phase = 0;
+  };
+  RotationState rotation_{};
+  static constexpr uint32_t ROTATION_CHECK_INTERVAL_MS = 3600000UL;
+  static constexpr uint8_t ROTATION_MAX_RETRY = 3;
+  static const char* rotationPhaseName(uint8_t phase);
+
+  // F1-TODO-7/9: Journaled certificate installation helpers; used only synchronously.
+  bool installPendingCertificate(const String& certPem,
+                                 const String& keyPem,
+                                 const String& caPem,
+                                 const String& serial);
+  bool rollbackPendingInstall();
+
   struct SensorSample {
     uint32_t nodeId = 0;
     uint16_t sensorId = 0;

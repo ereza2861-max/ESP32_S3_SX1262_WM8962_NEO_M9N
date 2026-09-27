@@ -14,7 +14,6 @@ private:
   bool auth();
   bool sameOrigin();
   uint32_t authFailureWindowStartMs_ = 0;
-  uint32_t sessionIssuedMs_ = 0;
   uint8_t authFailures_ = 0;
   uint32_t authFailureWindowCount_ = 0;
   uint32_t authBlockedUntilMs_ = 0;
@@ -28,10 +27,17 @@ private:
   static constexpr size_t AUTH_THROTTLE_ENTRIES = 16;
   AuthThrottleEntry authThrottle_[AUTH_THROTTLE_ENTRIES]{};
   uint32_t csrfFailures_ = 0;
-  uint8_t sessionSecret_[32] = {};
-  uint8_t csrfToken_[16] = {};
-  String csrfTokenHex_;
-  bool sessionSecretReady_ = false;
+  // ENH-1: Up to four independent browser sessions are retained in RAM.
+  struct SessionSlot {
+    uint8_t secret[32] = {};
+    uint8_t csrf[16] = {};
+    uint32_t issuedMs = 0;
+    uint32_t clientIp = 0;
+    bool inUse = false;
+  };
+  static constexpr size_t MAX_SESSIONS = 4;
+  SessionSlot sessions_[MAX_SESSIONS]{};
+  int8_t activeSessionSlot_ = -1;
   uint32_t lastMessageMs_ = 0;
   uint32_t lastSosMs_ = 0;
   uint32_t lastPttMs_ = 0;
@@ -137,6 +143,8 @@ private:
   bool sessionValid();
   bool csrfValid();
   bool issueSession();
+  String csrfTokenHexForActiveSession() const;
+  int findSessionSlot(const uint8_t token[32], uint32_t clientIp) const;
   void auditAuth(bool success);
   void handleConfig();
   void handleConfigExport();

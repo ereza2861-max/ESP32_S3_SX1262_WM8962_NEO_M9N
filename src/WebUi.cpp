@@ -845,18 +845,43 @@ bool WebUi::rateLimit(uint32_t& last, uint32_t interval) {
   return true;
 }
 
+// ENH-1: Find the session slot whose per-session secret validates the presented token.
+int WebUi::findSessionSlot(const uint8_t token[32], uint32_t clientIp) const {
+  if (!token) return -1;
+  for (size_t i = 0; i < MAX_SESSIONS; ++i) {
+    const SessionSlot& slot = sessions_[i];
+    if (!slot.inUse || slot.clientIp != clientIp) continue;
+    uint8_t msg[8] = {};
+    WebUiSessionPolicy::makeSessionMessage(clientIp, slot.issuedMs, msg);
+    uint8_t expected[32] = {};
+    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!md || mbedtls_md_hmac(md, slot.secret, sizeof(slot.secret),
+                               msg, sizeof(msg), expected, sizeof(expected)) != 0)
+      continue;
+    uint8_t diff = 0;
+    for (size_t j = 0; j < sizeof(expected); ++j)
+      diff |= static_cast<uint8_t>(token[j] ^ expected[j]);
+    if (diff == 0) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+// ENH-1: Validate against any live slot instead of a single global session.
 bool WebUi::sessionValid() {
+  activeSessionSlot_ = -1;
   const String cookie = server_.header("Cookie");
   const String prefix = "FR-SESSION=";
   const int start = cookie.indexOf(prefix);
-  if (start < 0 || !sessionSecretReady_) return false;
+  if (start < 0) return false;
   const int end = cookie.indexOf(';', start);
   const String token = cookie.substring(start + prefix.length(),
-                                         end < 0 ? cookie.length() : end);
-  if (token.length() != 64) return false;
+                                        end < 0 ? cookie.length() : end);
+  if (!WebUiSessionPolicy::isHexToken(
+          token.c_str(), token.length(), WebUiSessionPolicy::SESSION_TOKEN_HEX_LENGTH))
+    return false;
 
   uint8_t raw[32] = {};
-  for (size_t i = 0; i < 32; ++i) {
+  for (size_t i = 0; i < sizeof(raw); ++i) {
     const char a = token[i * 2], b = token[i * 2 + 1];
     auto hex = [](char c) -> int {
       if (c >= '0' && c <= '9') return c - '0';
@@ -869,53 +894,58 @@ bool WebUi::sessionValid() {
     raw[i] = static_cast<uint8_t>((hi << 4) | lo);
   }
 
-  // The token is HMAC-SHA256(secret, client-IP || issue-time).
-  // The signing secret exists only in RAM, so a reboot invalidates all sessions.
-  uint8_t expected[32] = {};
+  RuntimeConfig config;
+  if (!configSnapshot(config))
+    return false;
+  const uint32_t now = millis();
   const IPAddress ip = server_.client().remoteIP();
-  uint8_t msg[8] = {};
   const uint32_t ipValue = static_cast<uint32_t>(ip[0]) |
                            (static_cast<uint32_t>(ip[1]) << 8) |
                            (static_cast<uint32_t>(ip[2]) << 16) |
                            (static_cast<uint32_t>(ip[3]) << 24);
-  WebUiSessionPolicy::makeSessionMessage(ipValue, sessionIssuedMs_, msg);
-  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-  if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
-                             msg, sizeof(msg), expected, sizeof(expected)) != 0)
+
+  for (size_t i = 0; i < MAX_SESSIONS; ++i) {
+    if (sessions_[i].inUse &&
+        !WebUiSessionPolicy::isFresh(now, sessions_[i].issuedMs,
+                                     config.webSessionTimeoutMs)) {
+      // ENH-1: Expired slots are made free before LRU selection.
+      sessions_[i].inUse = false;
+    }
+  }
+
+  const int slot = findSessionSlot(raw, ipValue);
+  if (slot < 0) return false;
+  if (static_cast<int32_t>(now - authBlockedUntilMs_) < 0) return false;
+  if (!WebUiSessionPolicy::isFresh(now, sessions_[slot].issuedMs,
+                                   config.webSessionTimeoutMs)) {
+    sessions_[slot].inUse = false;
     return false;
-  uint8_t tokenDiff = 0;
-  for (size_t i = 0; i < sizeof(raw); ++i)
-    tokenDiff |= static_cast<uint8_t>(raw[i] ^ expected[i]);
-  if (tokenDiff != 0) return false;
-  RuntimeConfig config;
-  if (!configSnapshot(config))
-    return false;
-  return static_cast<int32_t>(millis() - authBlockedUntilMs_) >= 0 &&
-         WebUiSessionPolicy::isFresh(millis(), sessionIssuedMs_,
-                                     config.webSessionTimeoutMs);
+  }
+  activeSessionSlot_ = static_cast<int8_t>(slot);
+  return true;
 }
 
+// ENH-1: CSRF is bound to the same session slot as FR-SESSION.
 bool WebUi::csrfValid() {
   if (server_.method() != HTTP_POST && server_.method() != HTTP_DELETE) return false;
+  if (activeSessionSlot_ < 0 ||
+      static_cast<size_t>(activeSessionSlot_) >= MAX_SESSIONS) return false;
+  const SessionSlot& slot = sessions_[activeSessionSlot_];
+  const String supplied = server_.header("X-CSRF-Token");
   if (!WebUiSessionPolicy::isHexToken(
-          csrfTokenHex_.c_str(), csrfTokenHex_.length(),
+          supplied.c_str(), supplied.length(),
           WebUiSessionPolicy::CSRF_TOKEN_HEX_LENGTH)) {
     ++csrfFailures_;
     auditAuth(false);
     return false;
   }
-  const String supplied = server_.header("X-CSRF-Token");
-  if (!WebUiSessionPolicy::isHexToken(
-          supplied.c_str(), supplied.length(),
-          WebUiSessionPolicy::CSRF_TOKEN_HEX_LENGTH) ||
-      supplied.length() != csrfTokenHex_.length()) {
-    ++csrfFailures_;
-    (void)auditAuth(false);
-    return false;
-  }
+
   uint8_t diff = 0;
-  for (size_t i = 0; i < supplied.length(); ++i)
-    diff |= static_cast<uint8_t>(supplied[i] ^ csrfTokenHex_[i]);
+  const char* digits = "0123456789abcdef";
+  for (size_t i = 0; i < sizeof(slot.csrf); ++i) {
+    diff |= static_cast<uint8_t>(supplied[i * 2] ^ digits[slot.csrf[i] >> 4]);
+    diff |= static_cast<uint8_t>(supplied[i * 2 + 1] ^ digits[slot.csrf[i] & 0x0F]);
+  }
   if (diff != 0) {
     ++csrfFailures_;
     auditAuth(false);
@@ -924,20 +954,69 @@ bool WebUi::csrfValid() {
   return true;
 }
 
+// ENH-1: Allocate a free/expired slot, otherwise evict the least recently issued slot.
 bool WebUi::issueSession() {
   const IPAddress ip = server_.client().remoteIP();
-  uint8_t msg[8] = {};
   const uint32_t ipValue = static_cast<uint32_t>(ip[0]) |
                            (static_cast<uint32_t>(ip[1]) << 8) |
                            (static_cast<uint32_t>(ip[2]) << 16) |
                            (static_cast<uint32_t>(ip[3]) << 24);
-  sessionIssuedMs_ = millis();
-  WebUiSessionPolicy::makeSessionMessage(ipValue, sessionIssuedMs_, msg);
+  RuntimeConfig config;
+  if (!configSnapshot(config))
+    return false;
+
+  const uint32_t now = millis();
+  for (size_t i = 0; i < MAX_SESSIONS; ++i) {
+    if (sessions_[i].inUse &&
+        !WebUiSessionPolicy::isFresh(now, sessions_[i].issuedMs,
+                                     config.webSessionTimeoutMs)) {
+      sessions_[i].inUse = false;
+    }
+  }
+
+  size_t slotIndex = MAX_SESSIONS;
+  for (size_t i = 0; i < MAX_SESSIONS; ++i) {
+    if (!sessions_[i].inUse) {
+      slotIndex = i;
+      break;
+    }
+  }
+  if (slotIndex == MAX_SESSIONS) {
+    slotIndex = 0;
+    for (size_t i = 1; i < MAX_SESSIONS; ++i) {
+      if (static_cast<int32_t>(sessions_[i].issuedMs - sessions_[slotIndex].issuedMs) < 0)
+        slotIndex = i;
+    }
+    // ENH-1: Eviction is observable through the existing authentication audit.
+    sessions_[slotIndex].inUse = false;
+    auditAuth(false);
+  }
+
+  SessionSlot& slot = sessions_[slotIndex];
+  for (size_t i = 0; i < sizeof(slot.secret); i += 4) {
+    const uint32_t r = esp_random();
+    memcpy(slot.secret + i, &r, min<size_t>(4, sizeof(slot.secret) - i));
+  }
+  for (size_t i = 0; i < sizeof(slot.csrf); i += 4) {
+    const uint32_t r = esp_random();
+    memcpy(slot.csrf + i, &r, min<size_t>(4, sizeof(slot.csrf) - i));
+  }
+  slot.issuedMs = now;
+  slot.clientIp = ipValue;
+  slot.inUse = true;
+  activeSessionSlot_ = static_cast<int8_t>(slotIndex);
+
+  uint8_t msg[8] = {};
+  WebUiSessionPolicy::makeSessionMessage(ipValue, slot.issuedMs, msg);
   uint8_t token[32] = {};
   const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-  if (!md || mbedtls_md_hmac(md, sessionSecret_, sizeof(sessionSecret_),
-                             msg, sizeof(msg), token, sizeof(token)) != 0)
+  if (!md || mbedtls_md_hmac(md, slot.secret, sizeof(slot.secret),
+                             msg, sizeof(msg), token, sizeof(token)) != 0) {
+    slot.inUse = false;
+    activeSessionSlot_ = -1;
     return false;
+  }
+
   String hex;
   hex.reserve(64);
   const char* digits = "0123456789abcdef";
@@ -945,24 +1024,33 @@ bool WebUi::issueSession() {
     hex += digits[b >> 4];
     hex += digits[b & 0x0F];
   }
-  csrfTokenHex_.reserve(sizeof(csrfToken_) * 2);
-  csrfTokenHex_ = String();
-  for (uint8_t& b : csrfToken_) {
-    b = static_cast<uint8_t>(esp_random() & 0xFFU);
-    csrfTokenHex_ += digits[b >> 4];
-    csrfTokenHex_ += digits[b & 0x0F];
-  }
-  RuntimeConfig config;
-  if (!configSnapshot(config))
-    return false;
+
   char cookie[160] = {};
   if (!WebUiSessionPolicy::buildSessionCookie(
           hex.c_str(), config.webSessionTimeoutMs / 1000, cookie,
-          sizeof(cookie)))
+          sizeof(cookie))) {
+    slot.inUse = false;
+    activeSessionSlot_ = -1;
     return false;
+  }
   server_.sendHeader("Set-Cookie", cookie);
-
   return true;
+}
+
+// ENH-1: Generate the per-session CSRF token only for the authenticated request.
+String WebUi::csrfTokenHexForActiveSession() const {
+  if (activeSessionSlot_ < 0 ||
+      static_cast<size_t>(activeSessionSlot_) >= MAX_SESSIONS ||
+      !sessions_[activeSessionSlot_].inUse)
+    return String();
+  const char* digits = "0123456789abcdef";
+  String hex;
+  hex.reserve(sizeof(sessions_[activeSessionSlot_].csrf) * 2);
+  for (uint8_t b : sessions_[activeSessionSlot_].csrf) {
+    hex += digits[b >> 4];
+    hex += digits[b & 0x0F];
+  }
+  return hex;
 }
 
 void WebUi::auditAuth(bool success) {
@@ -1107,11 +1195,7 @@ bool WebUi::auth() {
 }
 
 void WebUi::begin() {
-  for (size_t i = 0; i < sizeof(sessionSecret_); i += 4) {
-    const uint32_t r = esp_random();
-    memcpy(sessionSecret_ + i, &r, min<size_t>(4, sizeof(sessionSecret_) - i));
-  }
-  sessionSecretReady_ = true;
+  // ENH-1: Session secrets are generated per slot when a session is issued.
   // ESPWebServerSecure exposes request headers directly through header();
   // collectHeaders() is intentionally not used because the HTTPS compatibility
   // layer does not implement the WebServer header collection cache.
@@ -1126,7 +1210,7 @@ void WebUi::begin() {
   server_.on("/api/lorawan/uplink", HTTP_POST, [this]{ if (auth()) handleLoRaWANUplink(); });
   server_.on("/api/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
   server_.on("/api/v1/version", HTTP_GET, [this]{ if (auth()) handleApiVersion(); });
-  server_.on("/api/v1/csrf", HTTP_GET, [this]{ if (auth()) server_.send(200, "application/json", "{\"token\":\"" + csrfTokenHex_ + "\"}"); });
+  server_.on("/api/v1/csrf", HTTP_GET, [this]{ if (auth()) server_.send(200, "application/json", "{\"token\":\"" + csrfTokenHexForActiveSession() + "\"}"); });
   server_.on("/api/files", HTTP_GET, [this]{ if (auth()) handleFiles(); });
   server_.on("/api/download", HTTP_GET, [this]{ if (auth()) handleDownload(); });
   server_.on("/api/upload", HTTP_POST, [this]{ if (auth()) {
@@ -1315,7 +1399,7 @@ void WebUi::handleRoot() {
                      "img-src 'self' data: https://*.tile.openstreetmap.org; "
                      "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'");
   String page = FPSTR(INDEX_HTML);
-  page.replace("__CSRF_TOKEN__", csrfTokenHex_);
+  page.replace("__CSRF_TOKEN__", csrfTokenHexForActiveSession());
   Preferences themePrefs;
   String persistedTheme = "dark";
   if (themePrefs.begin("fieldradio", true)) { persistedTheme = themePrefs.getString("theme", "dark"); themePrefs.end(); }
@@ -3698,9 +3782,9 @@ void WebUi::handleConfig() {
             !audio.setAec(candidate.aecEnabled) || !audio.setUsbMonitor(candidate.usbMonitor) ||
             !audio.setUsbPlaybackTransport(candidate.usbPlaybackTransport) ||
             !audio.setLoopback(candidate.audioLoopback)) return false;
-        if (!mqtt.applyConfig()) return false;
+        if (!mqtt.applyConfig(candidate)) return false;
         if (!lora.setAdrEnabled(candidate.loraAdrEnabled)) return false;
-        if (radioChanged && !lora.applyConfig()) return false;
+        if (radioChanged && !lora.applyConfig(candidate)) return false;
         audio.setVolume(candidate.volume);
         return true;
       },
@@ -3714,8 +3798,8 @@ void WebUi::handleConfig() {
         ok = audio.setLoopback(previous.audioLoopback) && ok;
         ok = audio.setRecordSource(previousSource) && ok;
         ok = lora.setAdrEnabled(previous.loraAdrEnabled) && ok;
-        ok = mqtt.applyConfig() && ok;
-        if (radioChanged) ok = lora.applyConfig() && ok;
+        ok = mqtt.applyConfig(previous) && ok;
+        if (radioChanged) ok = lora.applyConfig(previous) && ok;
         audio.setVolume(previous.volume);
         return ok;
       });

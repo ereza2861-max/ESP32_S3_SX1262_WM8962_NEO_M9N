@@ -119,6 +119,20 @@ extern RuntimeConfig gConfig;
 extern SemaphoreHandle_t gConfigMutex;
 extern std::atomic<uint32_t> gConfigGeneration;
 
+// ENH-2: Runtime-only audit markers for configuration transactions.
+enum class ConfigTxnEvent : uint8_t {
+  Pending,
+  Committed,
+  Applied,
+  ApplyFailed,
+  RolledBack,
+  JournalCleared,
+  Recovered
+};
+
+void configTxnAudit(ConfigTxnEvent event, uint32_t generation,
+                    const char* detail);
+
 bool configSnapshot(RuntimeConfig& out);
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation);
 bool configCommit(const RuntimeConfig& candidate);

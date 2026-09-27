@@ -53,6 +53,9 @@ jobs:
       - name: Validate PlatformIO configuration
         run: pio project config
 
+      - name: Check C3 partition size
+        run: python3 tools/check_partition_size.py partitions.csv
+
       - name: Check configuration ownership
         run: python3 tools/check_gconfig_direct.py
 

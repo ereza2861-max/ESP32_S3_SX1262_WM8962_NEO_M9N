@@ -2783,6 +2783,8 @@ bool LoRaManager::begin() {
   }
 
   ready_ = true;
+  adrEnabled_ = config.loraAdrEnabled;
+  if (!adrEnabled_) currentAdrSf_ = config.loraSf;
   StateLock lock(gState);
   if (lock.ok()) gState.loraReady = true;
   return true;
@@ -4732,6 +4734,10 @@ void LoRaManager::updateSourceId() {
 
 bool LoRaManager::applyConfig() {
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+  return applyConfig(config);
+}
+
+bool LoRaManager::applyConfig(const RuntimeConfig& config) {
   RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
   if (!radioGuard.ok()) return false;
   if (!mutex_) return false;
@@ -4753,6 +4759,10 @@ bool LoRaManager::applyConfig() {
   }
 
   ready_ = ok;
+  if (ok) {
+    adrEnabled_ = config.loraAdrEnabled;
+    if (!adrEnabled_) currentAdrSf_ = config.loraSf;
+  }
   {
     StateLock lock(gState);
     if (lock.ok()) {

@@ -17,7 +17,7 @@ PROJECT_PATH := $(abspath $(PROJECT_DIR))
 PIO_RUN := $(PIO) -d "$(PROJECT_PATH)" run -e "$(PIO_ENV)" $(PIO_ARGS)
 
 .PHONY: all build build-log ci-build sensor-node-build clean upload monitor provision check-provisioning \
-        preflight check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci \
+        preflight test-native check-secrets download-artifacts download-sensor-node-artifacts download-build-log download-ci \
         auth-help info help test test-hil fuzz failure-inject secure-boot-keys security-profile
 
 GH ?= gh
@@ -140,8 +140,17 @@ check-provisioning:
 	@sh "$(PROJECT_PATH)/tools/check-provisioning.sh"
 
 preflight:
+	@python3 "$(PROJECT_PATH)/tools/check_partition_size.py" partitions.csv
 	@python3 "$(PROJECT_PATH)/tools/check_gconfig_direct.py"
 	@sh "$(PROJECT_PATH)/tools/preflight-git-push.sh"
+
+test-native:
+	@set -eu; \
+	command -v c++ >/dev/null 2>&1 || { echo "ERROR: c++ compiler not found."; exit 127; }; \
+	mkdir -p "$(PROJECT_PATH)/.host-test"; \
+	c++ -std=c++17 -Wall -Wextra -Werror "$(PROJECT_PATH)/test/native/test_lora_config_lifecycle.cpp" \
+		-o "$(PROJECT_PATH)/.host-test/test_lora_config_lifecycle"; \
+	"$(PROJECT_PATH)/.host-test/test_lora_config_lifecycle"
 
 check-secrets: preflight
 

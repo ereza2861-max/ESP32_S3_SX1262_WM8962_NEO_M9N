@@ -290,6 +290,9 @@ bool MqttClientManager::loadCredentials() {
     certSubject_ = subject;
     certIssuer_ = issuer;
     certSerial_ = serial;
+    // F1-TODO-2: Keep rotation metadata in RAM only; source it from the active certificate.
+    rotation_.currentSerial = certSerial_;
+    rotation_.expiresAt = certExpiryEpoch_;
     Preferences meta;
     if (meta.begin(NVS_NS, false)) {
       (void)meta.putLong64("cert_expiry", static_cast<int64_t>(certExpiryEpoch_));
@@ -432,6 +435,239 @@ bool MqttClientManager::provisionCertificate(const String& host, uint16_t port,
   retryDelayMs_ = config.mqttReconnectMinMs;
   auditEvent("PKI_PROVISIONED");
   return true;
+}
+
+// F1-TODO-4: Convert the RAM phase value to a stable audit/debug name.
+const char* MqttClientManager::rotationPhaseName(uint8_t phase) {
+  switch (static_cast<RotationPhase>(phase)) {
+    case RotationPhase::Idle: return "idle";
+    case RotationPhase::Requesting: return "requesting";
+    case RotationPhase::Verifying: return "verifying";
+    case RotationPhase::Installing: return "installing";
+    case RotationPhase::Reconnecting: return "reconnecting";
+    case RotationPhase::Failed: return "failed";
+    default: return "unknown";
+  }
+}
+
+// F1-TODO-3: Only inspect certificate expiry; no HTTP or MQTT rotation request is made.
+void MqttClientManager::serviceRotation() {
+  if (!credentialsProvisioned_) return;
+  const uint32_t now = millis();
+  if (now - rotation_.lastCheckMs < ROTATION_CHECK_INTERVAL_MS) return;
+  rotation_.lastCheckMs = now;
+  if (rotation_.expiresAt == 0) return;
+
+  const time_t epoch = time(nullptr);
+  if (epoch < MIN_VALID_EPOCH) {
+    // F1-TODO-3: UNSPECIFIED: epoch source beyond the existing time() API is not defined.
+    return;
+  }
+  const uint64_t nowEpoch = static_cast<uint64_t>(epoch);
+  const uint64_t daysLeft =
+      nowEpoch >= rotation_.expiresAt
+          ? 0ULL
+          : (rotation_.expiresAt - nowEpoch) / 86400ULL;
+
+  RuntimeConfig config{};
+  if (!configSnapshot(config)) return;
+  if (daysLeft <= config.certRenewalThresholdDays) {
+    rotation_.rotationPending = true;
+    // F1-TODO-10: Audit rotation event ROTATION_DUE.
+    auditEvent("ROTATION_DUE");
+  }
+}
+
+// F1-TODO-6: Verify the candidate X.509 material without persisting it.
+bool MqttClientManager::verifyNewCertificate(const String& certPem,
+                                             const String& caPem,
+                                             const String& expectedSerial,
+                                             uint64_t expectedExpiresAt) {
+  rotation_.phase = static_cast<uint8_t>(RotationPhase::Verifying);
+  // F1-TODO-10: Audit rotation event ROTATION_VERIFY_START.
+  auditEvent("ROTATION_VERIFY_START");
+
+  auto fail = [this]() {
+    rotation_.phase = static_cast<uint8_t>(RotationPhase::Failed);
+    ++rotation_.retryCount;
+    // F1-TODO-10: Audit rotation event ROTATION_VERIFY_FAIL.
+    auditEvent("ROTATION_VERIFY_FAIL");
+    if (rotation_.retryCount >= ROTATION_MAX_RETRY) {
+      rotation_.phase = static_cast<uint8_t>(RotationPhase::Idle);
+    }
+    return false;
+  };
+
+  if (certPem.length() < 64 || certPem.length() > 8192 ||
+      caPem.length() < 64 || caPem.length() > 8192 ||
+      expectedSerial.isEmpty() || expectedExpiresAt == 0) {
+    return fail();
+  }
+
+  mbedtls_x509_crt cert;
+  mbedtls_x509_crt ca;
+  mbedtls_x509_crt_init(&cert);
+  mbedtls_x509_crt_init(&ca);
+  bool ok = false;
+
+  do {
+    if (mbedtls_x509_crt_parse(
+            &cert, reinterpret_cast<const unsigned char*>(certPem.c_str()),
+            certPem.length() + 1U) != 0) break;
+    if (mbedtls_x509_crt_parse(
+            &ca, reinterpret_cast<const unsigned char*>(caPem.c_str()),
+            caPem.length() + 1U) != 0) break;
+    if (cert.ca_istrue != 0 || ca.ca_istrue == 0) break;
+    if (mqttCertName(&cert.issuer) != mqttCertName(&ca.subject)) break;
+    if (!mqttCertSerial(cert).equalsIgnoreCase(expectedSerial)) break;
+    if (time(nullptr) < MIN_VALID_EPOCH) break;
+    if (mbedtls_x509_time_is_past(&cert.valid_to) ||
+        mbedtls_x509_time_is_future(&cert.valid_from)) break;
+    const uint64_t notAfter = mqttCertTimeToEpoch(cert.valid_to);
+    if (notAfter == 0 ||
+        (notAfter > expectedExpiresAt
+             ? notAfter - expectedExpiresAt
+             : expectedExpiresAt - notAfter) > 300ULL) break;
+    ok = true;
+  } while (false);
+
+  mbedtls_x509_crt_free(&ca);
+  mbedtls_x509_crt_free(&cert);
+
+  if (!ok) return fail();
+
+  rotation_.pendingSerial = expectedSerial;
+  rotation_.phase = static_cast<uint8_t>(RotationPhase::Idle);
+  rotation_.retryCount = 0;
+  // F1-TODO-10: Audit rotation event ROTATION_VERIFY_OK.
+  auditEvent("ROTATION_VERIFY_OK");
+  return true;
+}
+
+// F1-TODO-7/9: Install new certificate material behind a durable rollback journal.
+bool MqttClientManager::installPendingCertificate(const String& certPem,
+                                                  const String& keyPem,
+                                                  const String& caPem,
+                                                  const String& serial) {
+  if (certPem.isEmpty() || keyPem.isEmpty() || caPem.isEmpty() || serial.isEmpty()) {
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+  uint64_t newExpiry = 0;
+  String newSubject, newIssuer, newSerial;
+  if (!parseMqttCertificateMetadata(certPem, newExpiry, newSubject, newIssuer, newSerial) ||
+      !newSerial.equalsIgnoreCase(serial)) {
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+
+  if (!loadCredentials()) {
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, false)) {
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+  const String oldCert = clientCertificatePem_;
+  const String oldKey = clientPrivateKeyPem_;
+  const String oldCa = prefs.getString("cert_ca", "");
+  const String oldSerial = certSerial_;
+  bool journalOk =
+      prefs.putString("rot_prev_cert", oldCert) > 0 &&
+      prefs.putString("rot_prev_key", oldKey) > 0 &&
+      prefs.putString("rot_prev_ca", oldCa) > 0 &&
+      prefs.putString("rot_prev_serial", oldSerial) > 0 &&
+      prefs.putUChar("rot_state", 1) == sizeof(uint8_t);
+  prefs.end();
+  if (!journalOk) {
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+
+  if (!prefs.begin(NVS_NS, false)) {
+    (void)rollbackPendingInstall();
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+  const bool stored =
+      prefs.putString("cert", certPem) > 0 &&
+      prefs.putString("key", keyPem) > 0 &&
+      prefs.putString("cert_ca", caPem) > 0 &&
+      prefs.putString("cert_serial", serial) > 0 &&
+      prefs.putLong64("cert_expiry", static_cast<int64_t>(newExpiry)) > 0;
+  if (stored) {
+    const String verifyCert = prefs.getString("cert", "");
+    const String verifyKey = prefs.getString("key", "");
+    const String verifyCa = prefs.getString("cert_ca", "");
+    const String verifySerial = prefs.getString("cert_serial", "");
+    if (verifyCert != certPem || verifyKey != keyPem ||
+        verifyCa != caPem || verifySerial != serial) {
+      prefs.end();
+      (void)rollbackPendingInstall();
+      // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+      auditEvent("ROTATION_INSTALL_FAIL");
+      return false;
+    }
+  }
+  if (!stored || prefs.putUChar("rot_state", 2) != sizeof(uint8_t)) {
+    prefs.end();
+    (void)rollbackPendingInstall();
+    // F1-TODO-10: Audit rotation event ROTATION_INSTALL_FAIL.
+    auditEvent("ROTATION_INSTALL_FAIL");
+    return false;
+  }
+  (void)prefs.remove("rot_prev_cert");
+  (void)prefs.remove("rot_prev_key");
+  (void)prefs.remove("rot_prev_ca");
+  (void)prefs.remove("rot_prev_serial");
+  (void)prefs.remove("rot_state");
+  prefs.end();
+  // F1-TODO-10: Audit rotation event ROTATION_INSTALL_OK.
+  auditEvent("ROTATION_INSTALL_OK");
+  return true;
+}
+
+// F1-TODO-9: Restore the journaled MQTT certificate material after a failed install.
+bool MqttClientManager::rollbackPendingInstall() {
+  Preferences prefs;
+  if (!prefs.begin(NVS_NS, false)) return false;
+  const String oldCert = prefs.getString("rot_prev_cert", "");
+  const String oldKey = prefs.getString("rot_prev_key", "");
+  const String oldCa = prefs.getString("rot_prev_ca", "");
+  const String oldSerial = prefs.getString("rot_prev_serial", "");
+  if (prefs.putUChar("rot_state", 3) != sizeof(uint8_t)) {
+    prefs.end();
+    return false;
+  }
+  const bool restored =
+      prefs.putString("cert", oldCert) > 0 &&
+      prefs.putString("key", oldKey) > 0 &&
+      prefs.putString("cert_ca", oldCa) > 0 &&
+      prefs.putString("cert_serial", oldSerial) > 0;
+  if (!restored) {
+    prefs.end();
+    return false;
+  }
+  (void)prefs.remove("rot_prev_cert");
+  (void)prefs.remove("rot_prev_key");
+  (void)prefs.remove("rot_prev_ca");
+  (void)prefs.remove("rot_prev_serial");
+  const bool cleared = prefs.putUChar("rot_state", 0) == sizeof(uint8_t);
+  prefs.end();
+  if (cleared) {
+    // F1-TODO-10: Audit rotation event ROTATION_ROLLBACK_OK.
+    auditEvent("ROTATION_ROLLBACK_OK");
+  }
+  return cleared;
 }
 
 bool MqttClientManager::passwordRotationWarning() const {
@@ -776,6 +1012,10 @@ void MqttClientManager::setEnabled(bool enabled) {
 bool MqttClientManager::applyConfig() {
   RuntimeConfig config;
   if (!configSnapshot(config)) return false;
+  return applyConfig(config);
+}
+
+bool MqttClientManager::applyConfig(const RuntimeConfig& config) {
   if (Config::mqttTlsIsMandatory() && !config.mqttTlsRequired) {
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "MQTT TLS is mandatory in this build";
@@ -829,6 +1069,8 @@ void MqttClientManager::task() {
     ntpRequested = true;
   }
   if (!timeSynchronized()) return;
+  // F1-TODO-3: Run rotation readiness synchronously in the existing MQTT task.
+  serviceRotation();
   if (certExpiryEpoch_ != 0 && static_cast<uint64_t>(time(nullptr)) >= certExpiryEpoch_) {
     connected_ = false;
     client_.disconnect();

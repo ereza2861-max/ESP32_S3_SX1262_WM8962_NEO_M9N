@@ -79,6 +79,24 @@ constexpr uint8_t CONFIG_TXN_PENDING = 0xC1;
 constexpr uint8_t CONFIG_TXN_COMMITTED = 0xC2;
 }
 
+// ENH-2: Map transaction events to the required serial audit names.
+void configTxnAudit(ConfigTxnEvent event, uint32_t generation,
+                    const char* detail) {
+  const char* name = "Unknown";
+  switch (event) {
+    case ConfigTxnEvent::Pending: name = "Pending"; break;
+    case ConfigTxnEvent::Committed: name = "Committed"; break;
+    case ConfigTxnEvent::Applied: name = "Applied"; break;
+    case ConfigTxnEvent::ApplyFailed: name = "ApplyFailed"; break;
+    case ConfigTxnEvent::RolledBack: name = "RolledBack"; break;
+    case ConfigTxnEvent::JournalCleared: name = "JournalCleared"; break;
+    case ConfigTxnEvent::Recovered: name = "Recovered"; break;
+  }
+  Serial.printf("[CFG-TXN] event=%s gen=%lu detail=%s\n",
+                name, static_cast<unsigned long>(generation),
+                detail ? detail : "");
+}
+
 bool configSnapshot(RuntimeConfig& out) { uint32_t generation = 0; return configSnapshot(out, generation); }
 
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation) {
@@ -144,6 +162,8 @@ bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGen
       journal.putUChar(NVS_TXN_STATE, CONFIG_TXN_PENDING) == sizeof(uint8_t);
   journal.end();
   if (!journalOk) { unlock(); return false; }
+  // ENH-2: Record durable transaction journal creation.
+  configTxnAudit(ConfigTxnEvent::Pending, previousGeneration, "journal");
 
   if (!configCommitInternal(candidate, expectedGeneration)) {
     Preferences clear;
@@ -153,10 +173,15 @@ bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGen
       (void)clear.remove(NVS_TXN_CANDIDATE_GEN);
       clear.end();
     }
+    configTxnAudit(ConfigTxnEvent::JournalCleared, previousGeneration, "commit-failed");
     unlock();
     return false;
   }
+  // ENH-2: Record successful persisted commit.
+  configTxnAudit(ConfigTxnEvent::Committed, candidateGeneration, "configCommitInternal");
 
+  // ENH-2: Record the apply invocation immediately before calling apply().
+  if (apply) configTxnAudit(ConfigTxnEvent::Applied, candidateGeneration, "invoking");
   if (apply && apply()) {
     Preferences committed;
     const bool committedOpen = committed.begin(NVS_NS, false);
@@ -165,8 +190,10 @@ bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGen
       if (committedOpen) committed.end();
       const bool runtimeRollback = rollbackRuntime ? rollbackRuntime() : true;
       const bool persistedRollback = configCommitInternal(previous, configGeneration());
+      const bool rolledBack = runtimeRollback && persistedRollback;
+      if (rolledBack) configTxnAudit(ConfigTxnEvent::RolledBack, previousGeneration, "commit-marker");
       unlock();
-      return runtimeRollback && persistedRollback;
+      return rolledBack;
     }
     committed.end();
 
@@ -176,11 +203,14 @@ bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGen
       (void)clear.remove(NVS_TXN_PREV_GEN);
       (void)clear.remove(NVS_TXN_CANDIDATE_GEN);
       clear.end();
+      configTxnAudit(ConfigTxnEvent::JournalCleared, candidateGeneration, "committed");
     }
     unlock();
     return true;
   }
 
+  // ENH-2: Record failed runtime application before rollback.
+  configTxnAudit(ConfigTxnEvent::ApplyFailed, candidateGeneration, "apply");
   const bool runtimeRollback = rollbackRuntime ? rollbackRuntime() : true;
   const bool persistedRollback = configCommitInternal(previous, configGeneration());
   Preferences clear;
@@ -191,6 +221,9 @@ bool configApplyTransaction(const RuntimeConfig& candidate, uint32_t expectedGen
     clear.end();
   }
   const bool result = runtimeRollback && persistedRollback;
+  // ENH-2: Record completed runtime+persistent rollback.
+  if (result) configTxnAudit(ConfigTxnEvent::RolledBack, previousGeneration, "apply-failed");
+  configTxnAudit(ConfigTxnEvent::JournalCleared, previousGeneration, "rolled-back");
   unlock();
   return result;
 }
@@ -517,6 +550,21 @@ bool RuntimeConfig::validLoRaWAN() const {
 }
 
 void RuntimeConfig::load() {
+  // ENH-2: Observe a pending journal before atomic load so recovery can be audited.
+  uint32_t pendingPreviousGeneration = 0;
+  uint32_t pendingCandidateGeneration = 0;
+  bool hadPendingTransaction = false;
+  {
+    Preferences recoveryProbe;
+    if (recoveryProbe.begin(NVS_NS, true)) {
+      hadPendingTransaction =
+          recoveryProbe.getUChar(NVS_TXN_STATE, 0) == CONFIG_TXN_PENDING;
+      pendingPreviousGeneration = recoveryProbe.getUInt(NVS_TXN_PREV_GEN, 0);
+      pendingCandidateGeneration = recoveryProbe.getUInt(NVS_TXN_CANDIDATE_GEN, 0);
+      recoveryProbe.end();
+    }
+  }
+
   uint32_t atomicGeneration = 0;
   RuntimeConfig atomicCandidate = *this;
   bool migratedLegacyAtomic = false;
@@ -546,12 +594,18 @@ void RuntimeConfig::load() {
     if (migratedMqttTls) {
       Serial.println("CONFIG MIGRATION: mqtt_tls false -> true (production TLS mandatory)");
     }
+    if (hadPendingTransaction &&
+        atomicGeneration == pendingPreviousGeneration &&
+        pendingCandidateGeneration != pendingPreviousGeneration) {
+      configTxnAudit(ConfigTxnEvent::Recovered, atomicGeneration, "pending->previous");
+    }
     Preferences recovery;
     if (recovery.begin(NVS_NS, false)) {
       (void)recovery.remove(NVS_TXN_STATE);
       (void)recovery.remove(NVS_TXN_PREV_GEN);
       (void)recovery.remove(NVS_TXN_CANDIDATE_GEN);
       recovery.end();
+      configTxnAudit(ConfigTxnEvent::JournalCleared, atomicGeneration, "boot");
     }
     return;
   }

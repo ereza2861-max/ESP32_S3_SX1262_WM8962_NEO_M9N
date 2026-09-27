@@ -40,6 +40,7 @@ public:
                            float value, uint8_t quality,
                            uint64_t timestampMs);
   bool applyConfig();
+  bool applyConfig(const RuntimeConfig& config);
   void updateSourceId();
   // Arms SX1262 duty-cycle RX before MCU deep sleep. Returns false if the
   // radio cannot be armed safely; caller must not enter deep sleep then.
