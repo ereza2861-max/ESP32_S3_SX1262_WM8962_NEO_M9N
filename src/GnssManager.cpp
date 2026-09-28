@@ -28,7 +28,10 @@ void GnssManager::task() {
     gps_.encode(static_cast<char>(serial_.read()));
   }
 
-  static uint32_t lastTrackLogMs = 0;
+  static bool hasLastTrackLogLocation = false;
+  static double lastTrackLogLat = 0.0;
+  static double lastTrackLogLon = 0.0;
+  constexpr double TRACK_LOG_DISTANCE_DEG = 0.0001;
   RuntimeConfig runtimeConfig;
   if (!configSnapshot(runtimeConfig)) return;
   const uint32_t now = millis();
@@ -45,10 +48,15 @@ void GnssManager::task() {
     gState.gps.ppsLastEdgeUs = ppsEdgeUs;
     gState.gps.ppsValid = ppsEdgeUs != 0U &&
         static_cast<uint32_t>(micros() - ppsEdgeUs) <= Config::GNSS_PPS_VALID_US;
-    if (gps_.location.isValid() && gps_.location.age() < Config::GNSS_STALE_MS) {
+    const double parsedLat = gps_.location.lat();
+    const double parsedLon = gps_.location.lng();
+    if (gps_.location.isValid() && gps_.location.age() < Config::GNSS_STALE_MS &&
+        isfinite(parsedLat) && isfinite(parsedLon) &&
+        parsedLat >= -90.0 && parsedLat <= 90.0 &&
+        parsedLon >= -180.0 && parsedLon <= 180.0) {
       gState.gps.valid = true;
-      gState.gps.lat = gps_.location.lat();
-      gState.gps.lon = gps_.location.lng();
+      gState.gps.lat = parsedLat;
+      gState.gps.lon = parsedLon;
       gState.gps.alt = gps_.altitude.isValid() ? gps_.altitude.meters() : 0.0;
       const uint32_t rawSatellites =
           gps_.satellites.isValid() ? gps_.satellites.value() : 0;
@@ -83,10 +91,18 @@ void GnssManager::task() {
              now - lastSyncMs_ >=
                 static_cast<uint64_t>(runtimeConfig.wakePeriodSec) * 1000ULL);
       }
-      if (now - lastTrackLogMs >= Config::TRACK_LOG_PERIOD_MS) {
-        lastTrackLogMs = now;
+      const double currentLat = gState.gps.lat;
+      const double currentLon = gState.gps.lon;
+      const bool locationMoved =
+          !hasLastTrackLogLocation ||
+          fabs(currentLat - lastTrackLogLat) >= TRACK_LOG_DISTANCE_DEG ||
+          fabs(currentLon - lastTrackLogLon) >= TRACK_LOG_DISTANCE_DEG;
+      if (locationMoved) {
+        hasLastTrackLogLocation = true;
+        lastTrackLogLat = currentLat;
+        lastTrackLogLon = currentLon;
         logFix = true;
-        lat = gState.gps.lat; lon = gState.gps.lon; alt = gState.gps.alt; sats = gState.gps.satellites;
+        lat = currentLat; lon = currentLon; alt = gState.gps.alt; sats = gState.gps.satellites;
         epoch = gState.gps.utcEpoch; timeValid = gState.gps.timeValid;
       }
     } else if (now - gState.gps.lastFixMs > Config::GNSS_STALE_MS) {

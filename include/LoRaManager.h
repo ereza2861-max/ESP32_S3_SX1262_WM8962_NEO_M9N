@@ -138,6 +138,8 @@ private:
   bool sendVoiceAck(uint16_t ackedSeq, uint32_t ackedSourceId, int16_t rssi, float snr);
   void handleVoiceAckPayload(uint32_t ackSenderSourceId, const uint8_t* payload, size_t len);
   void updateNeighborMetric(uint32_t sourceId, int16_t rssi, float snr);
+  void updateNeighborLocation(uint32_t sourceId, int32_t latE6,
+                              int32_t lonE6, uint32_t epochSec);
   uint8_t neighborQualityForPeer(uint32_t sourceId) const;
   uint8_t bestNeighborQuality() const;
   bool persistForwardQueue();
@@ -335,6 +337,11 @@ private:
     uint8_t quality = 0;
     uint16_t txAttempts = 0;
     uint16_t txSuccess = 0;
+    bool locationValid = false;
+    int32_t locationLatE6 = 0;
+    int32_t locationLonE6 = 0;
+    uint32_t locationEpochSec = 0;
+    uint32_t locationUpdatedMs = 0;
   };
   struct RouteEntry {
     uint32_t destination = 0;

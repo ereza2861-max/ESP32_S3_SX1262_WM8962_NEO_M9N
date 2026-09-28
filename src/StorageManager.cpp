@@ -316,46 +316,65 @@ String StorageManager::readTrackCsv(uint64_t fromEpoch, uint64_t toEpoch, size_t
   limit = min<size_t>(limit, 5000);
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return "[]";
-  File f = SD.open("/TRACK/TRACK.CSV", FILE_READ);
-  if (!f || f.isDirectory()) {
-    if (f) f.close();
-    return "[]";
-  }
 
   String out = "[";
   bool first = true;
   size_t emitted = 0;
-  while (f.available() && emitted < limit) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.isEmpty() || line.startsWith("epoch_s")) continue;
+  uint64_t lastEpoch = 0;
+  double lastLat = 0.0, lastLon = 0.0;
+  bool haveLast = false;
 
-    unsigned long long epoch = 0;
-    unsigned long ms = 0, sat = 0;
-    double lat = 0.0, lon = 0.0, alt = 0.0;
-    if (sscanf(line.c_str(), "%llu,%lu,%lf,%lf,%lf,%lu",
-               &epoch, &ms, &lat, &lon, &alt, &sat) != 6)
+  // TRACK.CSV rotates into TRACK.1..TRACK.N. Read oldest to newest so the
+  // historical API exposes one chronological stream rather than silently
+  // discarding the older retained history.
+  for (int rotation = static_cast<int>(Config::TRACK_ROTATIONS);
+       rotation >= 0 && emitted < limit; --rotation) {
+    const String path = rotation == 0 ? "/TRACK/TRACK.CSV" :
+        "/TRACK/TRACK." + String(rotation) + ".CSV";
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) {
+      if (f) f.close();
       continue;
-    if (epoch < fromEpoch || epoch > toEpoch) continue;
-    if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) ||
-        lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0)
-      continue;
+    }
 
-    if (!first) out += ",";
-    first = false;
-    out += "{\"epoch\":" + String(epoch) +
-           ",\"millis\":" + String(ms) +
-           ",\"lat\":" + String(lat, 6) +
-           ",\"lon\":" + String(lon, 6) +
-           ",\"alt\":" + String(alt, 1) +
-           ",\"sat\":" + String(sat) + "}";
-    ++emitted;
+    while (f.available() && emitted < limit) {
+      String line = f.readStringUntil('\n');
+      line.trim();
+      if (line.isEmpty() || line.startsWith("epoch_s")) continue;
+
+      unsigned long long epoch = 0;
+      unsigned long ms = 0, sat = 0;
+      double lat = 0.0, lon = 0.0, alt = 0.0;
+      if (sscanf(line.c_str(), "%llu,%lu,%lf,%lf,%lf,%lu",
+                 &epoch, &ms, &lat, &lon, &alt, &sat) != 6)
+        continue;
+      if (epoch < fromEpoch || epoch > toEpoch) continue;
+      if (!isfinite(lat) || !isfinite(lon) || !isfinite(alt) ||
+          lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0)
+        continue;
+      if (haveLast && epoch == lastEpoch && lat == lastLat && lon == lastLon)
+        continue;
+
+      if (!first) out += ",";
+      first = false;
+      out += "{\"epoch\":" + String(epoch) +
+             ",\"millis\":" + String(ms) +
+             ",\"lat\":" + String(lat, 6) +
+             ",\"lon\":" + String(lon, 6) +
+             ",\"alt\":" + String(alt, 1) +
+             ",\"sat\":" + String(sat) + "}";
+      ++emitted;
+      lastEpoch = epoch;
+      lastLat = lat;
+      lastLon = lon;
+      haveLast = true;
+    }
+    f.close();
   }
-  f.close();
+
   out += "]";
   return out;
 }
-
 
 String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpoch,
                                               size_t limit, double epsilonMeters) {
@@ -366,11 +385,6 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
 
   SpiLock spiLock(pdMS_TO_TICKS(200));
   if (!spiLock.ok()) return "[]";
-  File f = SD.open("/TRACK/TRACK.CSV", FILE_READ);
-  if (!f || f.isDirectory()) {
-    if (f) f.close();
-    return "[]";
-  }
 
   const size_t pointCapacity = min(limit, MAX_POINTS);
   Point* points = static_cast<Point*>(
@@ -390,22 +404,35 @@ String StorageManager::readTrackCsvSimplified(uint64_t fromEpoch, uint64_t toEpo
   memset(keep, 0, pointCapacity * sizeof(uint8_t));
   size_t n = 0;
 
-  while (f.available() && n < min(limit, MAX_POINTS)) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (line.isEmpty() || line.startsWith("epoch_s")) continue;
-    unsigned long long epoch = 0;
-    unsigned long ms = 0, sat = 0;
-    double lat = 0.0, lon = 0.0, alt = 0.0;
-    if (sscanf(line.c_str(), "%llu,%lu,%lf,%lf,%lf,%lu",
-               &epoch, &ms, &lat, &lon, &alt, &sat) != 6) continue;
-    if (epoch < fromEpoch || epoch > toEpoch ||
-        !isfinite(lat) || !isfinite(lon) ||
-        lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) continue;
-    points[n++] = {static_cast<uint64_t>(epoch), static_cast<uint32_t>(ms),
-                   lat, lon, alt, static_cast<uint32_t>(sat)};
+  for (int rotation = static_cast<int>(Config::TRACK_ROTATIONS);
+       rotation >= 0 && n < min(limit, MAX_POINTS); --rotation) {
+    const String path = rotation == 0 ? "/TRACK/TRACK.CSV" :
+        "/TRACK/TRACK." + String(rotation) + ".CSV";
+    File f = SD.open(path, FILE_READ);
+    if (!f || f.isDirectory()) {
+      if (f) f.close();
+      continue;
+    }
+
+    while (f.available() && n < min(limit, MAX_POINTS)) {
+      String line = f.readStringUntil('\n');
+      line.trim();
+      if (line.isEmpty() || line.startsWith("epoch_s")) continue;
+      unsigned long long epoch = 0;
+      unsigned long ms = 0, sat = 0;
+      double lat = 0.0, lon = 0.0, alt = 0.0;
+      if (sscanf(line.c_str(), "%llu,%lu,%lf,%lf,%lf,%lu",
+                 &epoch, &ms, &lat, &lon, &alt, &sat) != 6) continue;
+      if (epoch < fromEpoch || epoch > toEpoch ||
+          !isfinite(lat) || !isfinite(lon) ||
+          lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) continue;
+      if (n > 0 && points[n - 1].epoch == epoch &&
+          points[n - 1].lat == lat && points[n - 1].lon == lon) continue;
+      points[n++] = Point{epoch, static_cast<uint32_t>(ms),
+                          lat, lon, alt, static_cast<uint32_t>(sat)};
+    }
+    f.close();
   }
-  f.close();
   if (n <= 2) {
     String out = "[";
     for (size_t i = 0; i < n; ++i) {

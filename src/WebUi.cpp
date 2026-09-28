@@ -301,6 +301,9 @@ body.light{background:#f5f5f5;color:#111} body.light .card{border-color:#bbb} bo
 @media(max-width:600px){body{padding:8px}.card{padding:8px}button,input,select{width:100%;box-sizing:border-box;margin:3px 0}table{font-size:.8rem;display:block;overflow-x:auto}}
 button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:10px;overflow:auto}
 .battery-low{outline:3px solid orange}.battery-critical{outline:4px solid red}.sensor-badge{padding:2px 5px;border-radius:4px;font-size:.75rem;border:1px solid #777}.sensor-badge.q0{background:#164d25}.sensor-badge:not(.q0){background:#6a4b00}
+.map-shell{height:420px;min-height:280px;border-radius:6px;overflow:hidden;background:#222}
+.map-status{min-height:1.4em;margin:4px 0}
+@media(max-width:600px){.map-shell{height:55vh;min-height:300px}}
 </style></head><body class="__THEME_CLASS__"><h1 id=title>FieldRadio</h1><label>Language <select id=lang onchange="setLang()"><option value="en">EN</option><option value="id">ID</option></select></label>
 <div class=card>
 <button onclick="ptt(1)">PTT ON</button><button onclick="ptt(0)">PTT OFF</button>
@@ -418,23 +421,26 @@ button,input{font-size:1rem;margin:4px;padding:10px}pre{background:#222;padding:
 <div class=card id=sensorPanel><h3>BLE Sensor Nodes</h3>
 <table><thead><tr><th>Node</th><th>Address</th><th>RSSI</th><th>Sensors</th><th>Last Seen</th><th>Status</th><th>Actions</th></tr></thead><tbody id=sensorNodesBody></tbody></table>
 <div id=sensorDetail></div></div>
-<div class=card><button onclick="toggleTheme()">Dark/light</button><button onclick="showTrack()">Track</button><span id=toast></span></div>
-<div class=card id=trackPanel style="display:none"><h3>Track</h3>
-<label>From epoch <input id=trackFrom type=number value="0"></label>
-<label>To epoch <input id=trackTo type=number value=""></label>
-<label>Limit <input id=trackLimit type=number min="1" max="5000" value="1000"></label>
-<button onclick="loadTrack()">Load track</button><div id=trackMap style="height:420px"></div></div>
+<div class=card><button onclick="toggleTheme()">Dark/light</button><button onclick="showTrack()">Map</button><span id=toast></span></div>
+<div class=card id=trackPanel style="display:none"><h3>Node Primer Map</h3>
+<label>Historical Marker <input id=historicalMarker type=checkbox onchange="toggleHistoricalMarker()"></label>
+<button onclick="refreshMap()">Refresh map</button><div id=mapStatus class=map-status>Map not initialized</div>
+<div id=trackMap class=map-shell></div>
+<small>Historical visualization displays up to 1000 markers; the stored track remains available through the existing track download.</small></div>
 <div class=card><h3>Status</h3><pre id=s></pre></div>
 <div class=card><h3>Files</h3><input id=fileDir value="/REC/"><button onclick="refreshFiles()">Open folder</button><pre id=f></pre>
 <input id=upfile type=file accept=".wav,.WAV"><button onclick="uploadFile()">UPLOAD WAV</button>
 <input id=renameFrom placeholder="/REC/old.WAV"><input id=renameTo placeholder="/REC/new.WAV"><button onclick="renameFile()">RENAME</button>
 <a id=trackDownload href="/api/track/download">Download GPS track</a>
 </div>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 const CSRF_TOKEN='__CSRF_TOKEN__';
-let trackMap=null,trackLayer=null;
+let trackMap=null,liveLayer=null,historicalLayer=null,currentMarker=null;
+const neighborMarkers=new Map();
+let mapInitialized=false,historicalLoadToken=0,lastLiveBoundsKey='';
+const historicalMarkerControl=document.getElementById('historicalMarker');
 function sensorBadge(q){let a=[];if(q&1)a.push('STALE');if(q&2)a.push('RANGE');if(q&4)a.push('GW-TS');if(q&8)a.push('BAD-TS');if(q&16)a.push('LINK');return `<span class="sensor-badge q${q}">${a.length?a.join(' '):'VALID'}</span>`}
 function sensorEscape(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function sensorAction(id,action){if(!confirm(action==='forget'?'Forget this sensor node?':'Reconnect this sensor node?'))return;try{const r=await fetch(`/api/sensors/${action}?id=${encodeURIComponent(id)}`,{method:'POST',headers:{'X-CSRF-Token':CSRF_TOKEN}});toast(await r.text());await refreshSensorNodes()}catch(e){toast('Sensor action failed')}}
@@ -482,26 +488,124 @@ async function refreshRadioHistory(){
  radioHistory.textContent+='\\nSTATS RSSI avg='+rs.rssiAvg+' range=['+rs.rssiMin+','+rs.rssiMax+'] SNR avg='+rs.snrAvg;
  }catch(e){toast('Radio/storage refresh failed')}
 }
+function setMapStatus(t){document.getElementById('mapStatus').textContent=t}
+function popupNode(sourceId,rssi,quality,epoch){
+  const d=document.createElement('div');
+  const title=document.createElement('strong'); title.textContent='Connected node '+String(sourceId); d.appendChild(title);
+  const meta=document.createElement('div'); meta.textContent=`RSSI ${rssi} dBm, quality ${quality}`;
+  d.appendChild(meta);
+  if(epoch) { const ts=document.createElement('div'); ts.textContent='Location timestamp '+String(epoch); d.appendChild(ts); }
+  return d;
+}
+function initMap(){
+  if(mapInitialized) return true;
+  if(typeof L==='undefined'){setMapStatus('Leaflet failed to load; map controls unavailable');return false}
+  trackMap=L.map('trackMap');
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+    maxZoom:19,attribution:'© OpenStreetMap',crossOrigin:true
+  }).addTo(trackMap).on('tileerror',()=>setMapStatus('OpenStreetMap tile unavailable; markers remain available'));
+  liveLayer=L.layerGroup().addTo(trackMap);
+  historicalLayer=L.layerGroup();
+  mapInitialized=true;
+  setTimeout(()=>trackMap.invalidateSize(),50);
+  return true;
+}
 function showTrack(){
-  const p=document.getElementById('trackPanel'); p.style.display=p.style.display==='none'?'block':'none';
+  const p=document.getElementById('trackPanel');
+  p.style.display=p.style.display==='none'?'block':'none';
   if(p.style.display==='block'){
-    if(!trackMap){trackMap=L.map('trackMap');L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(trackMap);}
-    setTimeout(()=>trackMap.invalidateSize(),50);
+    if(initMap()) { setTimeout(()=>trackMap.invalidateSize(),50); refreshMap(); }
   }
 }
-async function loadTrack(){
+function validCoord(lat,lon){
+  return Number.isFinite(lat)&&Number.isFinite(lon)&&lat>=-90&&lat<=90&&lon>=-180&&lon<=180;
+}
+function updateCurrentMarker(gps){
+  if(!trackMap) return;
+  if(currentMarker){liveLayer.removeLayer(currentMarker);currentMarker=null}
+  if(!gps||!gps.valid||!validCoord(Number(gps.lat),Number(gps.lon))){
+    return;
+  }
+  currentMarker=L.marker([Number(gps.lat),Number(gps.lon)]);
+  const d=document.createElement('div');
+  const title=document.createElement('strong');title.textContent='Node Primer';d.appendChild(title);
+  const meta=document.createElement('div');meta.textContent=`${Number(gps.lat).toFixed(6)}, ${Number(gps.lon).toFixed(6)}`;d.appendChild(meta);
+  currentMarker.bindPopup(d).addTo(liveLayer);
+}
+function updateNeighborMarkers(nodes){
+  if(!trackMap) return;
+  const active=new Set();
+  for(const n of (Array.isArray(nodes)?nodes:[])){
+    const id=String(n?.sourceId??'');
+    if(!id||n.connected!==true) continue;
+    const loc=n.location;
+    if(!loc||!validCoord(Number(loc.lat),Number(loc.lon))) continue;
+    active.add(id);
+    let marker=neighborMarkers.get(id);
+    const point=[Number(loc.lat),Number(loc.lon)];
+    if(!marker){
+      marker=L.circleMarker(point,{radius:7});
+      neighborMarkers.set(id,marker);
+      marker.addTo(liveLayer);
+    }else marker.setLatLng(point);
+    marker.bindPopup(popupNode(id,Number(n.rssi),Number(n.quality),Number(loc.epoch)||0));
+  }
+  for(const [id,marker] of neighborMarkers){
+    if(!active.has(id)){liveLayer.removeLayer(marker);neighborMarkers.delete(id)}
+  }
+}
+async function refreshMap(){
+  if(!initMap()) return;
   try{
-    const q=new URLSearchParams({from:trackFrom.value||'0',to:trackTo.value||'18446744073709551615',limit:String(Math.min(5000,Math.max(1,Number(trackLimit.value)||1000)))});
-    const a=await (await fetch('/api/track/points?'+q)).json();
-    if(!trackMap){showTrack();}
-    if(trackLayer)trackLayer.clearLayers(); else trackLayer=L.layerGroup().addTo(trackMap);
-    if(!a.length){toast('No track points');return;}
-    const latlng=a.map(x=>[x.lat,x.lon]);
-    L.polyline(latlng).addTo(trackLayer);
-    L.marker(latlng[0]).addTo(trackLayer).bindPopup('Start');
-    L.marker(latlng[latlng.length-1]).addTo(trackLayer).bindPopup('End');
-    trackMap.fitBounds(L.latLngBounds(latlng),{padding:[20,20]});
-  }catch(e){toast('Track load failed')}
+    const [gps,nodes]=await Promise.all([
+      fetch('/api/track',{cache:'no-store'}).then(r=>r.json()),
+      fetch('/api/neighbors',{cache:'no-store'}).then(r=>r.json())
+    ]);
+    updateCurrentMarker(gps);
+    updateNeighborMarkers(nodes);
+    const points=[];
+    if(gps?.valid&&validCoord(Number(gps.lat),Number(gps.lon))) points.push([Number(gps.lat),Number(gps.lon)]);
+    for(const n of (Array.isArray(nodes)?nodes:[])){
+      const p=n?.location;
+      if(n?.connected===true&&p&&validCoord(Number(p.lat),Number(p.lon))) points.push([Number(p.lat),Number(p.lon)]);
+    }
+    const boundsKey=points.map(p=>p.map(v=>v.toFixed(6)).join(',')).sort().join(';');
+    if(points.length&&boundsKey!==lastLiveBoundsKey){
+      trackMap.fitBounds(L.latLngBounds(points),{padding:[20,20],maxZoom:16});
+      lastLiveBoundsKey=boundsKey;
+    }
+    setMapStatus(points.length?`${points.length} live location(s) available`:'No valid live location available');
+  }catch(e){setMapStatus('Map data unavailable; existing UI remains usable')}
+}
+async function loadHistorical(){
+  if(!trackMap||!historicalMarkerControl.checked) return;
+  const token=++historicalLoadToken;
+  try{
+    const a=await (await fetch('/api/track/simplified?epsilon=10',{cache:'no-store'})).json();
+    if(token!==historicalLoadToken||!historicalMarkerControl.checked)return;
+    if(historicalLayer)historicalLayer.clearLayers();
+    const points=(Array.isArray(a)?a:[]).filter(x=>validCoord(Number(x.lat),Number(x.lon)));
+    if(!points.length){setMapStatus('No historical location available');return}
+    const latlng=points.map(x=>[Number(x.lat),Number(x.lon)]);
+    L.polyline(latlng).addTo(historicalLayer);
+    const markerLimit=1000;
+    const step=Math.max(1,Math.ceil(points.length/markerLimit));
+    for(let i=0;i<points.length;i+=step)
+      L.circleMarker(latlng[i],{radius:4}).bindTooltip(String(points[i].epoch||''),{permanent:false}).addTo(historicalLayer);
+    historicalLayer.addTo(trackMap);
+    setMapStatus(points.length>markerLimit
+      ? `Historical track: ${points.length} points, ${Math.ceil(points.length/step)} markers shown`
+      : `Historical track: ${points.length} markers shown`);
+    trackMap.fitBounds(L.latLngBounds(latlng),{padding:[20,20],maxZoom:16});
+  }catch(e){setMapStatus('Historical data unavailable')}
+}
+function toggleHistoricalMarker(){
+  if(!trackMap||!historicalMarkerControl.checked){
+    if(trackMap&&historicalLayer) trackMap.removeLayer(historicalLayer);
+    ++historicalLoadToken;
+    return;
+  }
+  loadHistorical();
 }
 async function refreshSosHistory(){try{const a=await (await fetch('/api/sos-history')).json();sosBadge.textContent=a.map(x=>`event=${x.event} seq=${x.seq} peer=${x.peer}`).join(' | ')}catch(e){}}
 async function refreshFiles(){try{f.textContent=await j('/api/files?dir='+encodeURIComponent(fileDir.value))}catch(e){toast('File list failed')}}
@@ -785,7 +889,7 @@ async function lwUplink(){
   toast(await j('/api/lorawan/uplink',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:q}));
   refreshLw();
 }
-setInterval(refresh,1000);syncSource();refresh();refreshMessages();refreshRadioHistory();refreshSosHistory()
+setInterval(refresh,1000);setInterval(()=>{if(document.getElementById('trackPanel').style.display==='block')refreshMap()},2000);syncSource();refresh();refreshMessages();refreshRadioHistory();refreshSosHistory()
 setInterval(refreshLw,2000);refreshLw();setInterval(refreshScan,3000);setInterval(refreshHop,3000);setInterval(refreshMessages,2000);setInterval(refreshRadioHistory,3000);refreshScan();refreshHop()
 </script></body></html>)HTML";
 

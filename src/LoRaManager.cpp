@@ -53,6 +53,77 @@ constexpr uint8_t LORA_PROTOCOL_VERSION_HOP = 3;
 constexpr size_t PACKET_TAG = Config::LORA_TAG_BYTES;
 constexpr uint8_t FRAGMENT_MAGIC = 0xF2;
 constexpr uint8_t BEACON_MAGIC = 0xB1;
+constexpr uint8_t LOCATION_EXT_MAGIC = 0x4C;
+constexpr uint8_t LOCATION_EXT_VERSION = 1;
+constexpr size_t LOCATION_EXT_BYTES =
+    1 + 1 + 1 + sizeof(int32_t) + sizeof(int32_t) + sizeof(uint32_t);
+
+bool appendCurrentLocation(uint8_t* payload, size_t capacity, size_t& length) {
+  if (!payload || length > capacity || capacity - length < LOCATION_EXT_BYTES) return false;
+  double lat = 0.0, lon = 0.0;
+  uint32_t epochSec = 0;
+  bool valid = false;
+  {
+    StateLock lock(gState);
+    if (!lock.ok()) return false;
+    valid = gState.gps.valid && isfinite(gState.gps.lat) && isfinite(gState.gps.lon) &&
+            gState.gps.lat >= -90.0 && gState.gps.lat <= 90.0 &&
+            gState.gps.lon >= -180.0 && gState.gps.lon <= 180.0;
+    if (valid) {
+      lat = gState.gps.lat;
+      lon = gState.gps.lon;
+      epochSec = gState.gps.timeValid &&
+                 gState.gps.utcEpoch <= UINT32_MAX
+          ? static_cast<uint32_t>(gState.gps.utcEpoch) : 0U;
+    }
+  }
+  int32_t latWire = 0, lonWire = 0;
+  if (valid) {
+    const int64_t latE6 = llround(lat * 1000000.0);
+    const int64_t lonE6 = llround(lon * 1000000.0);
+    if (latE6 < INT32_MIN || latE6 > INT32_MAX ||
+        lonE6 < INT32_MIN || lonE6 > INT32_MAX)
+      valid = false;
+    else {
+      latWire = static_cast<int32_t>(latE6);
+      lonWire = static_cast<int32_t>(lonE6);
+    }
+  }
+  payload[length++] = LOCATION_EXT_MAGIC;
+  payload[length++] = LOCATION_EXT_VERSION;
+  payload[length++] = valid ? 1U : 0U;
+  memcpy(payload + length, &latWire, sizeof(latWire)); length += sizeof(latWire);
+  memcpy(payload + length, &lonWire, sizeof(lonWire)); length += sizeof(lonWire);
+  memcpy(payload + length, &epochSec, sizeof(epochSec)); length += sizeof(epochSec);
+  return true;
+}
+
+bool parseLocationExtension(const uint8_t* payload, size_t length, size_t offset,
+                            bool& valid, int32_t& latE6, int32_t& lonE6,
+                            uint32_t& epochSec) {
+  valid = false;
+  if (!payload || offset > length || length - offset != LOCATION_EXT_BYTES ||
+      payload[offset] != LOCATION_EXT_MAGIC ||
+      payload[offset + 1] != LOCATION_EXT_VERSION)
+    return false;
+  const uint8_t flags = payload[offset + 2];
+  if ((flags & 0xFEU) != 0) return false;
+  memcpy(&latE6, payload + offset + 3, sizeof(latE6));
+  memcpy(&lonE6, payload + offset + 3 + sizeof(latE6), sizeof(lonE6));
+  memcpy(&epochSec, payload + offset + 3 + sizeof(latE6) + sizeof(lonE6),
+         sizeof(epochSec));
+  if (!(flags & 1U)) {
+    valid = false;
+    return true;
+  }
+  const double lat = static_cast<double>(latE6) / 1000000.0;
+  const double lon = static_cast<double>(lonE6) / 1000000.0;
+  valid = isfinite(lat) && isfinite(lon) &&
+          lat >= -90.0 && lat <= 90.0 &&
+          lon >= -180.0 && lon <= 180.0;
+  return valid;
+}
+
 constexpr uint8_t VOICE_ACK_MAGIC = 0xA5;
 constexpr uint8_t VOICE_ACK_VERSION = 1;
 constexpr uint8_t VOICE_ACK_BYTES = 16;
@@ -2595,7 +2666,7 @@ bool LoRaManager::resumeFromLoRaWAN() {
 bool LoRaManager::processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
                                     const uint8_t* payload, size_t len) {
   if (sourceId == 0 || packetEpochSec == 0 || !payload ||
-      len != LoRaEcdhRekey::BEACON_BYTES)
+      len < LoRaEcdhRekey::BEACON_BYTES)
     return false;
 
   LoRaEcdhRekey::Beacon beacon{};
@@ -2666,6 +2737,23 @@ bool LoRaManager::processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
          LoRaEcdhRekey::PUBLIC_KEY_BYTES);
   peer.lastSeenMs = millis();
   peer.valid = true;
+
+  bool locationValid = false;
+  int32_t locationLatE6 = 0, locationLonE6 = 0;
+  uint32_t locationEpochSec = 0;
+  if (parseLocationExtension(payload, len, LoRaEcdhRekey::BEACON_BYTES,
+                              locationValid, locationLatE6, locationLonE6,
+                              locationEpochSec)) {
+    updateNeighborMetric(sourceId, -127, -20.0f);
+    if (locationValid) updateNeighborLocation(sourceId, locationLatE6, locationLonE6, locationEpochSec);
+    else for (auto& entry : neighbors_) {
+      if (entry.sourceId == sourceId) {
+        entry.locationValid = false;
+        entry.locationUpdatedMs = millis();
+        break;
+      }
+    }
+  }
 
   if (ecdhKeyMaterial_.hasEphemeralKey() &&
       ecdhKeyMaterial_.ephemeralEpoch() ==
@@ -3275,6 +3363,20 @@ void LoRaManager::task() {
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_NEIGHBOR_BEACON && !duplicateV2 &&
         appPayloadLen >= 8 && appPayload[0] == BEACON_MAGIC) {
       updateNeighborMetric(rxSourceId, rssi, snr);
+      bool locationValid = false;
+      int32_t latE6 = 0, lonE6 = 0;
+      uint32_t locationEpochSec = 0;
+      if (parseLocationExtension(appPayload, appPayloadLen, 8,
+                                 locationValid, latE6, lonE6, locationEpochSec)) {
+        if (locationValid) updateNeighborLocation(rxSourceId, latE6, lonE6, locationEpochSec);
+        else for (auto& entry : neighbors_) {
+          if (entry.sourceId == rxSourceId) {
+            entry.locationValid = false;
+            entry.locationUpdatedMs = millis();
+            break;
+          }
+        }
+      }
     }
     bool textPayloadValid = false;
     if (rxAuthenticated && addressedToUs &&
@@ -4142,16 +4244,28 @@ String LoRaManager::neighborsJson() const {
   const uint32_t now = millis();
   bool first = true;
   for (const auto& n : neighbors_) {
-    if (!n.sourceId || n.seenMs == 0) continue;
+    if (!n.sourceId || n.seenMs == 0 ||
+        now - n.seenMs > Config::NEIGHBOR_TTL_MS) continue;
     if (!first) out += ",";
     first = false;
     out += "{\"sourceId\":" + String(n.sourceId) +
+           ",\"connected\":true" +
            ",\"rssi\":" + String(n.rssi) +
            ",\"snr\":" + String(n.snr, 1) +
            ",\"quality\":" + String(n.quality) +
            ",\"txAttempts\":" + String(n.txAttempts) +
            ",\"txSuccess\":" + String(n.txSuccess) +
-           ",\"ageMs\":" + String(now - n.seenMs) + "}";
+           ",\"ageMs\":" + String(now - n.seenMs) +
+           ",\"location\":";
+    if (n.locationValid) {
+      out += "{\"lat\":" + String(static_cast<double>(n.locationLatE6) / 1000000.0, 6) +
+             ",\"lon\":" + String(static_cast<double>(n.locationLonE6) / 1000000.0, 6) +
+             ",\"epoch\":" + String(n.locationEpochSec) +
+             ",\"ageMs\":" + String(now - n.locationUpdatedMs) + "}";
+    } else {
+      out += "null";
+    }
+    out += "}";
   }
   out += "]";
   if (mutex_) xSemaphoreGive(mutex_);
@@ -4911,6 +5025,22 @@ void LoRaManager::updateNeighborMetric(uint32_t sourceId, int16_t rssi, float sn
   entry.quality = static_cast<uint8_t>(score);
 }
 
+void LoRaManager::updateNeighborLocation(uint32_t sourceId, int32_t latE6,
+                                           int32_t lonE6, uint32_t epochSec) {
+  if (sourceId == 0 || sourceId == sourceId_) return;
+  const double lat = static_cast<double>(latE6) / 1000000.0;
+  const double lon = static_cast<double>(lonE6) / 1000000.0;
+  for (auto& entry : neighbors_) {
+    if (entry.sourceId != sourceId || entry.seenMs == 0) continue;
+    entry.locationValid = true;
+    entry.locationLatE6 = latE6;
+    entry.locationLonE6 = lonE6;
+    entry.locationEpochSec = epochSec;
+    entry.locationUpdatedMs = millis();
+    return;
+  }
+}
+
 uint8_t LoRaManager::neighborQualityForPeer(uint32_t sourceId) const {
   if (sourceId == 0) return 0;
   const uint32_t now = millis();
@@ -5076,47 +5206,51 @@ void LoRaManager::serviceNeighborBeacon() {
            LoRaEcdhRekey::PUBLIC_KEY_BYTES);
     ecdhBeacon.valid = true;
 
-    uint8_t payload[LoRaEcdhRekey::BEACON_BYTES] = {};
-    if (LoRaEcdhRekey::encodeBeacon(
-            ecdhBeacon, payload, sizeof(payload)) !=
-        LoRaEcdhRekey::BEACON_BYTES)
-      return;
+    uint8_t payload[LoRaEcdhRekey::BEACON_BYTES + LOCATION_EXT_BYTES] = {};
+    size_t payloadLen = LoRaEcdhRekey::encodeBeacon(
+        ecdhBeacon, payload, sizeof(payload));
+    if (payloadLen != LoRaEcdhRekey::BEACON_BYTES) return;
+    (void)appendCurrentLocation(payload, sizeof(payload), payloadLen);
 
     uint16_t seq = 0;
     if (!nextTxSequence(seq)) return;
     String packet;
-    if (encryptPacketV3(payload, sizeof(payload),
+    if (encryptPacketV3(payload, payloadLen,
                         Config::LORA_TYPE_NEIGHBOR_BEACON, seq,
                         computeHopIndex(hopFrame_), epochSec, packet)) {
       if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
     }
   } else {
-    uint8_t payload[8] = {};
+    uint8_t payload[8 + LOCATION_EXT_BYTES] = {};
+    size_t payloadLen = 8;
     payload[0] = BEACON_MAGIC;
     payload[1] = Config::LORA_PROTOCOL_VERSION;
     const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
     memcpy(payload + 2, &sourceIdSnapshot, sizeof(sourceIdSnapshot));
     uint16_t uptime10 = static_cast<uint16_t>(min<uint32_t>(65535U, now / 1000U));
     memcpy(payload + 6, &uptime10, 2);
+    (void)appendCurrentLocation(payload, sizeof(payload), payloadLen);
     uint16_t seq = 0;
     if (!nextTxSequence(seq)) return;
     String packet;
-    if (encryptPacket(payload, sizeof(payload), Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
+    if (encryptPacket(payload, payloadLen, Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
       if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
     }
   }
 #else
-  uint8_t payload[8] = {};
+  uint8_t payload[8 + LOCATION_EXT_BYTES] = {};
+  size_t payloadLen = 8;
   payload[0] = BEACON_MAGIC;
   payload[1] = Config::LORA_PROTOCOL_VERSION;
   const uint32_t sourceIdSnapshot = sourceId_.load(std::memory_order_acquire);
   memcpy(payload + 2, &sourceIdSnapshot, sizeof(sourceIdSnapshot));
   uint16_t uptime10 = static_cast<uint16_t>(min<uint32_t>(65535U, now / 1000U));
   memcpy(payload + 6, &uptime10, 2);
+  (void)appendCurrentLocation(payload, sizeof(payload), payloadLen);
   uint16_t seq = 0;
   if (!nextTxSequence(seq)) return;
   String packet;
-  if (encryptPacket(payload, sizeof(payload), Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
+  if (encryptPacket(payload, payloadLen, Config::LORA_TYPE_NEIGHBOR_BEACON, seq, packet)) {
     if (queuePendingTx(packet, TX_PRIORITY_BEACON)) lastNeighborBeaconMs_ = now;
   }
 #endif

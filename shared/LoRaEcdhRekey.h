@@ -88,7 +88,7 @@ inline size_t encodeBeacon(const Beacon& beacon, uint8_t* out, size_t capacity) 
 
 inline bool decodeBeacon(const uint8_t* data, size_t length, Beacon& out) {
   out = Beacon{};
-  if (!data || length != BEACON_BYTES ||
+  if (!data || length < BEACON_BYTES ||
       data[0] != Config::LORA_ECDH_BEACON_MAGIC ||
       data[1] != Config::LORA_ECDH_PROTOCOL_VERSION ||
       getLe32(data + 2) == 0) {
