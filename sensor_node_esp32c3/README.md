@@ -5,7 +5,7 @@ The canonical wire contract is `../shared/SensorProtocol.h`; do not create a sec
 
 ## Profile runtime configuration
 
-The sensor node has four mutually exclusive runtime profiles. The active profile is stored in the
+The sensor node has six mutually exclusive runtime profiles. The active profile is stored in the
 `sensor` NVS namespace under key `profile` and is changed through the WebUI `/profile` endpoint.
 Only one profile's sensor cabling is installed at a time; changing profile means physically
 unplugging the previous profile's sensor cables and installing the new profile's PCB/cabling.
@@ -67,6 +67,8 @@ pin-capability conflicts.
 | Profile 1 — Tropical Forest | 12 | 0x0200..0x020B | Twelve profile entries; RFID uses the 13th registry slot |
 | Profile 2 — Volcanic Mountain | 8 | 0x0300..0x0307 | Source-level roster; GPIO3 time-sharing requires hardware validation |
 | Profile 3 — Sub-Zero Snow | 9 | 0x0400..0x0408 | Source-level roster; GPIO3 leakage requires hardware validation |
+| Profile 4 — Desert | 8 | 0x0500..0x0507 | Source-level roster |
+| Profile 5 — Mine Tunnel | 10 | 0x0600..0x0609 | Source-level roster |
 
 Profile 1 has 12 profile sensors. The global RFID event descriptor is registered separately, so
 the registry capacity is 13 and must not be reduced below that value.
@@ -84,7 +86,7 @@ AP through OtaApManager.
 
 ## Runtime profile change
 
-The WebUI exposes `POST /profile` with the body `{"profile":0..3}`. The browser first
+The WebUI exposes `POST /profile` with the body `{"profile":0..5}`. The browser first
 requires confirmation that the old sensor cables have been removed and the new profile's
 cables installed; the server enforces the confirmation header before applying the change.
 The firmware persists the profile in NVS and reboots. Firmware assumes only the selected

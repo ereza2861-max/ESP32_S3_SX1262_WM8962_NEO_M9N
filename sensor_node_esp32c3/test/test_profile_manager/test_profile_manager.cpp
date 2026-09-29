@@ -17,7 +17,7 @@
 namespace {
 
 void testRuntimeProfileRange() {
-  assert(ProfileConfig::PROFILE_COUNT == 4);
+  assert(ProfileConfig::PROFILE_COUNT == 6);
   for (uint8_t value = 0; value < ProfileConfig::PROFILE_COUNT; ++value) {
     assert(value < ProfileConfig::PROFILE_COUNT);
   }
@@ -25,6 +25,8 @@ void testRuntimeProfileRange() {
   assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::TropicalForest) == 0x0200);
   assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::VolcanicMountain) == 0x0300);
   assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::SubZeroSnow) == 0x0400);
+  assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::Desert) == 0x0500);
+  assert(ProfileConfig::sensorIdBase(ProfileConfig::Profile::MineTunnel) == 0x0600);
 }
 
 void testProfileNamesDistinct() {
@@ -56,9 +58,12 @@ void testProfileRosterContracts() {
   assert(ProfileConfig::expectedSensorCount(Profile::TropicalForest) == 12);
   assert(ProfileConfig::expectedSensorCount(Profile::VolcanicMountain) == 8);
   assert(ProfileConfig::expectedSensorCount(Profile::SubZeroSnow) == 9);
+  assert(ProfileConfig::expectedSensorCount(Profile::Desert) == 8);
+  assert(ProfileConfig::expectedSensorCount(Profile::MineTunnel) == 10);
 
   for (Profile profile : {Profile::IslandSea, Profile::TropicalForest,
-                          Profile::VolcanicMountain, Profile::SubZeroSnow}) {
+                          Profile::VolcanicMountain, Profile::SubZeroSnow,
+                          Profile::Desert, Profile::MineTunnel}) {
     const size_t count = ProfileConfig::expectedSensorCount(profile);
     for (size_t i = 0; i < count; ++i) {
       const uint16_t id = ProfileConfig::sensorIdFor(profile, i);

@@ -47,14 +47,14 @@ bool parseProfileBody(const String& body, uint8_t& profile) {
 
   size_t pos = static_cast<size_t>(colon + 1);
   while (pos < value.length() && isspace(static_cast<unsigned char>(value[pos]))) ++pos;
-  if (pos >= value.length() || value[pos] < '0' || value[pos] > '3') return false;
+  if (pos >= value.length() || value[pos] < '0' || value[pos] > '5') return false;
 
   const uint8_t parsed = static_cast<uint8_t>(value[pos] - '0');
   ++pos;
   while (pos < value.length() && isspace(static_cast<unsigned char>(value[pos]))) ++pos;
   if (pos >= value.length() || value[pos] != '}') return false;
 
-  // Only the documented {profile: 0..3} payload is accepted.
+  // Only the documented {profile: 0..5} payload is accepted.
   const String prefix = value.substring(0, key);
   if (prefix.indexOf('"') >= 0) return false;
   const String suffix = value.substring(pos + 1);
@@ -247,7 +247,7 @@ void OtaApManager::handleProfile() {
   uint8_t profile = 0;
   if (!parseProfileBody(gServer->arg("plain"), profile)) {
     gServer->send(400, "application/json",
-                  "{\"ok\":false,\"error\":\"body must be {\\\"profile\\\":0..3}\"}");
+                  "{\"ok\":false,\"error\":\"body must be {\\\"profile\\\":0..5}\"}");
     return;
   }
 

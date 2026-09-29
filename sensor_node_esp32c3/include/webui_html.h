@@ -16,7 +16,7 @@ pre{background:#eee;padding:.5rem;overflow:auto}
 </style></head><body>
 <h1>FieldRadio Sensor Node</h1>
 <fieldset><legend>Profile</legend>
-<label>Runtime profile <select id=profile><option value=0>0 — Island / Sea</option><option value=1>1 — Tropical Forest</option><option value=2>2 — Volcanic Mountain</option><option value=3>3 — Sub-Zero Snow</option></select></label>
+<label>Runtime profile <select id=profile><option value=0>0 — Island / Sea</option><option value=1>1 — Tropical Forest</option><option value=2>2 — Volcanic Mountain</option><option value=3>3 — Sub-Zero Snow</option><option value=4>4 — Desert</option><option value=5>5 — Mine Tunnel</option></select></label>
 <button id=applyProfile type=button>Apply profile</button>
 <pre id=profileResult></pre></fieldset>
 <fieldset><legend>Status</legend><pre id=status>loading...</pre></fieldset>

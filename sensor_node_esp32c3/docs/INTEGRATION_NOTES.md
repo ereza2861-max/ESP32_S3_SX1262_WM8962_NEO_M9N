@@ -98,3 +98,8 @@ protocol is implemented.
 - HIL/electrical validation: **NOT VERIFIED**
 - GPIO11 suitability: **HARDWARE DEPENDENT**
 - Locked sensor addresses: **PLACEHOLDER**
+### D-12 — Profile 4 (Desert) & Profile 5 (Mine Tunnel)
+- Cross-profile GPIO overlap is intentional because sensor cabling is exclusive per profile.
+- GPIO3 remains routed through the CD74HC4051 mux; MFRC522 remains global and non-overlapping.
+- Immutable rosters: Desert = 8, Mine Tunnel = 10; stable ID bases 0x0500/0x0600.
+- Dust UART, seismic SPI, H2S I2C, and O2 UART remain placeholders and report QUALITY_STALE.

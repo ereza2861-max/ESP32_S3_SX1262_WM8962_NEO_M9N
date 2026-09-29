@@ -23,9 +23,11 @@ enum class Profile : uint8_t {
   TropicalForest = 1,
   VolcanicMountain = 2,
   SubZeroSnow = 3,
+  Desert = 4,
+  MineTunnel = 5,
 };
 
-constexpr uint8_t PROFILE_COUNT = 4;
+constexpr uint8_t PROFILE_COUNT = 6;
 
 // --- Runtime profile configuration -----------------------------------------
 // Profile selection is persisted in NVS namespace "sensor" under key "profile".
@@ -68,6 +70,8 @@ constexpr uint16_t SENSOR_ID_BASE_ISLAND_SEA = 0x0100;
 constexpr uint16_t SENSOR_ID_BASE_TROPICAL_FOREST = 0x0200;
 constexpr uint16_t SENSOR_ID_BASE_VOLCANIC_MOUNTAIN = 0x0300;
 constexpr uint16_t SENSOR_ID_BASE_SUB_ZERO_SNOW = 0x0400;
+constexpr uint16_t SENSOR_ID_BASE_DESERT = 0x0500;
+constexpr uint16_t SENSOR_ID_BASE_MINE_TUNNEL = 0x0600;
 constexpr uint16_t SENSOR_ID_BASE_RFID = 0x00F0;
 constexpr uint16_t SENSOR_ID_BASE_BUTTON = 0x00F1;
 constexpr uint16_t SENSOR_ID_RFID_EVENT = SENSOR_ID_BASE_RFID;  // 0x00F0
@@ -92,6 +96,8 @@ constexpr uint16_t sensorIdBase(Profile profile) {
     case Profile::TropicalForest:    return SENSOR_ID_BASE_TROPICAL_FOREST;
     case Profile::VolcanicMountain:  return SENSOR_ID_BASE_VOLCANIC_MOUNTAIN;
     case Profile::SubZeroSnow:       return SENSOR_ID_BASE_SUB_ZERO_SNOW;
+    case Profile::Desert:            return SENSOR_ID_BASE_DESERT;
+    case Profile::MineTunnel:        return SENSOR_ID_BASE_MINE_TUNNEL;
   }
   return 0;
 }
@@ -156,6 +162,33 @@ constexpr int PROFILE3_MAX31865_CS_PIN = 11;
 constexpr int PROFILE3_UART_NUM = 1;
 constexpr int PROFILE3_UART_RX_PIN = 18;
 constexpr int PROFILE3_UART_TX_PIN = 19;
+constexpr int PROFILE4_I2C_SDA_PIN = 8;
+constexpr int PROFILE4_I2C_SCL_PIN = 9;
+constexpr uint32_t PROFILE4_I2C_HZ = 100000UL;
+constexpr int PROFILE4_SAND_TEMP_ADC_PIN = 4;
+constexpr int PROFILE4_SOIL_MOISTURE_ADC_PIN = GPIO3_MUX_COM_PIN;
+constexpr int PROFILE4_DUST_UART_RX_PIN = 18;
+constexpr int PROFILE4_DUST_UART_TX_PIN = 19;
+constexpr int PROFILE4_DUST_UART_NUM = 1;
+constexpr int PROFILE4_WIND_PULSE_PIN = 11;
+constexpr uint8_t PROFILE4_BME280_I2C_ADDR = 0x76;
+constexpr uint8_t PROFILE4_VEML6075_I2C_ADDR = 0x10;
+constexpr uint8_t PROFILE4_PMS_I2C_ADDR = 0x12;
+constexpr int PROFILE5_I2C_SDA_PIN = 8;
+constexpr int PROFILE5_I2C_SCL_PIN = 9;
+constexpr uint32_t PROFILE5_I2C_HZ = 100000UL;
+constexpr int PROFILE5_CH4_ADC_PIN = 4;
+constexpr int PROFILE5_CO_ADC_PIN = 11;
+constexpr int PROFILE5_SEISMIC_CS_PIN = GPIO3_MUX_COM_PIN;
+constexpr int PROFILE5_SEISMIC_SCK_PIN = 6;
+constexpr int PROFILE5_O2_UART_RX_PIN = 18;
+constexpr int PROFILE5_O2_UART_TX_PIN = 19;
+constexpr int PROFILE5_O2_UART_NUM = 1;
+constexpr uint8_t PROFILE5_BME280_I2C_ADDR = 0x76;
+constexpr uint8_t PROFILE5_H2S_I2C_ADDR = 0x5A;
+constexpr uint8_t PROFILE5_O2_I2C_ADDR = 0x73;
+constexpr uint8_t PROFILE5_CO2_I2C_ADDR = 0x62;
+constexpr uint8_t PROFILE5_PMS_I2C_ADDR = 0x12;
 constexpr uint8_t PROFILE3_VEML6075_I2C_ADDR = 0x10;
 constexpr uint8_t PROFILE3_O2_I2C_ADDR = 0x73;
 constexpr uint8_t PROFILE3_SNOW_I2C_ADDR = 0x70;
@@ -177,6 +210,8 @@ constexpr size_t expectedSensorCount(Profile profile) {
     case Profile::TropicalForest: return 12;
     case Profile::VolcanicMountain: return 8;
     case Profile::SubZeroSnow: return 9;
+    case Profile::Desert: return 8;
+    case Profile::MineTunnel: return 10;
   }
   return 0;
 }
@@ -203,6 +238,8 @@ constexpr const char* profileName(Profile profile) {
     case Profile::TropicalForest:    return "tropical_forest";
     case Profile::VolcanicMountain:  return "volcanic_mountain";
     case Profile::SubZeroSnow:       return "sub_zero_snow";
+    case Profile::Desert:            return "desert";
+    case Profile::MineTunnel:        return "mine_tunnel";
   }
   return "unknown";
 }

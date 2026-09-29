@@ -9,7 +9,7 @@
 class SensorDriverRegistry {
 public:
   // Capacity includes the largest profile roster plus the global RFID descriptor.
-  static constexpr size_t MAX_DRIVERS = 13;
+  static constexpr size_t MAX_DRIVERS = 15;
   static constexpr uint8_t DRIVER_BME280 = 1;
   static constexpr uint8_t DRIVER_BATTERY_ADC = 2;
   static constexpr uint8_t DRIVER_DIGITAL_INPUT = 3;
@@ -19,6 +19,9 @@ public:
   static constexpr uint8_t DRIVER_ATLAS_EZO = 7;
   static constexpr uint8_t DRIVER_ONEWIRE_TEMP = 8;
   static constexpr uint8_t DRIVER_PULSE_COUNTER = 9;
+  static constexpr uint8_t DRIVER_GAS_ADC = 10;
+  static constexpr uint8_t DRIVER_SEISMIC_SPI = 11;
+  static constexpr uint8_t DRIVER_DUST_VISIBILITY = 12;
   static constexpr uint16_t FLAG_SIGNED = 1U << 0;
   static constexpr uint16_t FLAG_LITTLE_ENDIAN = 1U << 1;
   static constexpr uint16_t FLAG_REGISTER_16BIT = 1U << 2;

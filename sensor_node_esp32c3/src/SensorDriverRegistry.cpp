@@ -202,6 +202,150 @@ private:
 // and are marked NOT VERIFIED in README.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Profile 4 - Desert & Profile 5 - Mine Tunnel driver additions.
+// ---------------------------------------------------------------------------
+
+// MQ-series / electrochemical gas sensor on ADC (CH4, CO, H2S).
+// Returns raw voltage; caller-supplied descriptor carries scale/offset to
+// convert to ppm. Calibration is NOT VERIFIED until hardware sample.
+class GasAdcDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    analogReadResolution(12);
+    analogSetPinAttenuation(config_.pinSda, ADC_11db);
+    return true;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::GENERIC;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    const uint32_t mv = analogReadMilliVolts(config_.pinSda);
+    // Return volts; descriptor scale converts to ppm.
+    value = static_cast<float>(mv) / 1000.0f;
+    // A sensor that has not warmed up or is disconnected reports 0 mV.
+    quality = (mv < 50) ? SensorProtocol::QUALITY_STALE
+                        : SensorProtocol::QUALITY_VALID;
+    return mv >= 50;
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    // registerAddr selects the gas family:
+    //   0 = CH4, 1 = CO, 2 = H2S
+    const char* name = "gas_ch4";
+    const char* unit = "V";
+    float maxValue = 3.3f;
+    switch (config_.registerAddr) {
+      case 1: name = "gas_co";  break;
+      case 2: name = "gas_h2s"; break;
+      default: name = "gas_ch4"; break;
+    }
+    std::strncpy(d.name, name, sizeof(d.name) - 1);
+    std::strncpy(d.unit, unit, sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = 0.0f;
+    d.max = maxValue;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+private:
+  DriverConfig config_{};
+};
+
+// Seismic / tilt sensor over SPI (ADXL355-class) routed through GPIO3 mux.
+// Placeholder: register-level protocol NOT VERIFIED.
+class SeismicSpiDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    ready_ = false;  // Requires hardware-specific register sequence.
+    return true;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::ACCELEROMETER;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    // Placeholder: never fabricate a seismic reading.
+    value = 0.0f;
+    quality = SensorProtocol::QUALITY_STALE;
+    return false;
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    std::strncpy(d.name, "seismic_tilt", sizeof(d.name) - 1);
+    std::strncpy(d.unit, "g", sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = -2.0f;
+    d.max = 2.0f;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+private:
+  DriverConfig config_{};
+  bool ready_ = false;
+};
+
+// Dust / visibility sensor over UART (e.g. Sharp GP2Y1010 or PMS-class).
+// Placeholder: UART framing NOT VERIFIED.
+class DustVisibilityDriver final : public SensorDriver {
+public:
+  bool begin(const DriverConfig& config) override {
+    config_ = config;
+    return config_.periodMs > 0;
+  }
+
+  SensorProtocol::SensorType type() const override {
+    return SensorProtocol::SensorType::GENERIC;
+  }
+  uint16_t sensorId() const override { return config_.sensorId; }
+
+  bool read(float& value, uint8_t& quality) override {
+    value = 0.0f;
+    quality = SensorProtocol::QUALITY_STALE;
+    return false;  // UART parser NOT VERIFIED.
+  }
+
+  SensorProtocol::SensorDescriptor descriptor() const override {
+    SensorProtocol::SensorDescriptor d{};
+    d.id = config_.sensorId;
+    d.type = static_cast<uint8_t>(type());
+    std::strncpy(d.name, "dust_visibility", sizeof(d.name) - 1);
+    std::strncpy(d.unit, "ug/m3", sizeof(d.unit) - 1);
+    d.datatype = static_cast<uint8_t>(SensorProtocol::SensorDataType::FLOAT32);
+    d.scale = 1.0f;
+    d.offset = 0.0f;
+    d.min = 0.0f;
+    d.max = 1000.0f;
+    d.periodMs = config_.periodMs;
+    d.flags = SensorProtocol::FLAG_ENABLED;
+    return d;
+  }
+
+private:
+  DriverConfig config_{};
+};
+
 class GenericAdcDriver final : public SensorDriver {
 public:
   bool begin(const DriverConfig& config) override {
@@ -550,7 +694,7 @@ private: DriverConfig config_{}; PulseSlot* slot_=nullptr;
 
 bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
   if (config.sensorId == 0 || config.periodMs == 0 || config.periodMs > 86400000UL) return false;
-  if (config.driverType < DRIVER_BME280 || config.driverType > DRIVER_PULSE_COUNTER) return false;
+  if (config.driverType < DRIVER_BME280 || config.driverType > DRIVER_DUST_VISIBILITY) return false;
   if (config.pinSda > 21 || config.pinScl > 21) return false;
   if (config.driverType == DRIVER_BME280) {
     if (config.i2cAddr < 0x08 || config.i2cAddr > 0x77 || config.registerAddr > 2) return false;
@@ -578,6 +722,13 @@ bool SensorDriverRegistry::validConfig(const DriverConfig& config) {
   } else if (config.driverType == DRIVER_PULSE_COUNTER) {
     if (config.pinSda == 2 || config.pinSda > 21) return false;
     if (config.registerAddr > 1 || config.dataWidth > 100) return false;
+  } else if (config.driverType == DRIVER_GAS_ADC) {
+    if ((config.pinSda > 4 && config.pinSda != 11) || config.pinSda == 2) return false;
+    if (config.registerAddr > 2) return false;  // 0=CH4, 1=CO, 2=H2S
+  } else if (config.driverType == DRIVER_SEISMIC_SPI) {
+    // CS routed through GPIO3 mux; no additional pin constraints here.
+  } else if (config.driverType == DRIVER_DUST_VISIBILITY) {
+    if (config.dataWidth == 0) return false;
   }
   return true;
 }
@@ -593,6 +744,9 @@ SensorDriver* SensorDriverRegistry::createDriver(const DriverConfig& config) {
     case DRIVER_ATLAS_EZO: return new AtlasEzoDriver();
     case DRIVER_ONEWIRE_TEMP: return new OneWireTempDriver();
     case DRIVER_PULSE_COUNTER: return new PulseCounterDriver();
+    case DRIVER_GAS_ADC: return new GasAdcDriver();
+    case DRIVER_SEISMIC_SPI: return new SeismicSpiDriver();
+    case DRIVER_DUST_VISIBILITY: return new DustVisibilityDriver();
     default: return nullptr;
   }
 }

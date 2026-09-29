@@ -47,6 +47,8 @@ private:
   bool registerTropicalForest(SensorDriverRegistry& drivers, SensorRegistry& registry);
   bool registerVolcanicMountain(SensorDriverRegistry& drivers, SensorRegistry& registry);
   bool registerSubZeroSnow(SensorDriverRegistry& drivers, SensorRegistry& registry);
+  bool registerDesert(SensorDriverRegistry& drivers, SensorRegistry& registry);
+  bool registerMineTunnel(SensorDriverRegistry& drivers, SensorRegistry& registry);
 
   size_t registeredCount_ = 0;
   size_t expectedCount_ = 0;
