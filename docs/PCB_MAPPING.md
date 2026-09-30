@@ -7,6 +7,9 @@ Nilai pin harus identik dengan `include/BoardConfig.h`; jangan membuat alias pin
 alternatif di schematic/KiCad tanpa mengubah kedua dokumen dan firmware secara atomik.
 Semua net pada tabel di bawah adalah candidate routing Rev-C dan menjadi basis rerouting dari mapping ESP32-WROOM-32E lama; ini belum merupakan bukti routing PCB fisik telah diproduksi.
 
+Behavioral contract perangkat untuk RGB, TX LED, haptic, buzzer, charging-estimate LED,
+dan battery fallback dipelihara di `docs/BEHAVIORAL_CONTRACT.md`.
+
 ## Normalized GPIO policy
 
 - **ADC1 (GPIO1..10)** adalah domain analog utama. Semua input analog onboard tetap di
@@ -57,7 +60,7 @@ Semua net pada tabel di bawah adalah candidate routing Rev-C dan menjadi basis r
 | WM8962 I2C SDA | 38 | GPIO Matrix I2C |
 | Addressable RGB | 39 | JTAG-capable after boot; one-wire data |
 | Haptic enable | 40 | JTAG-capable after boot; active-high driver enable |
-| Charging indicator | 41 | JTAG-capable after boot; heuristic only |
+| BATTERY_CHARGE_ESTIMATE_LED | 41 | JTAG-capable after boot; heuristic only |
 | TX indicator | 42 | JTAG-capable after boot; dedicated |
 | GNSS TX | 43 | UART0 default pin; remapped Serial output |
 | GNSS RX | 44 | UART0 default pin; remapped Serial input |
@@ -76,7 +79,7 @@ The current design package has no fabrication-confirmed routed PTT/SOS/battery/L
 - GPIO47: active-high buzzer output
 - GPIO39: addressable RGB data output
 - GPIO40: active-high haptic-driver enable
-- GPIO41: charging-indicator output (heuristic only; no charger STAT input)
+- GPIO41: `BATTERY_CHARGE_ESTIMATE_LED` output (heuristic only; no charger STAT input)
 - GPIO42: TX indicator output
 - GPIO9: GNSS 1-PPS timing input; not reserved for future analog devices
 - GPIO48: I2C SCL

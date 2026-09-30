@@ -86,13 +86,52 @@ static uint32_t lastLogPersistMs = 0;
 static size_t lastPersistedLoraLogCount = 0;
 static size_t lastPersistedHealthLogCount = 0;
 
+static void buzzerInit() {
+#if defined(BUZZER_MODE_ACTIVE)
+  if (Board::BUZZER >= 0) {
+    pinMode(Board::BUZZER, OUTPUT);
+    digitalWrite(Board::BUZZER, LOW);
+  }
+#elif defined(BUZZER_MODE_PASSIVE)
+  if (Board::BUZZER >= 0) {
+    pinMode(Board::BUZZER, OUTPUT);
+    digitalWrite(Board::BUZZER, LOW);
+    (void)ledcAttachChannel(Board::BUZZER, 2000, 10, Board::BUZZER_PWM_CHANNEL);
+    (void)ledcWriteTone(Board::BUZZER, 0);
+  }
+#endif
+}
+
+static void buzzerOn(uint32_t freqHz) {
+#if defined(BUZZER_MODE_ACTIVE)
+  (void)freqHz;
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
+#elif defined(BUZZER_MODE_PASSIVE)
+  if (Board::BUZZER >= 0)
+    (void)ledcWriteTone(Board::BUZZER, static_cast<double>(freqHz));
+#endif
+}
+
+static void buzzerOff() {
+#if defined(BUZZER_MODE_ACTIVE)
+  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
+#elif defined(BUZZER_MODE_PASSIVE)
+  if (Board::BUZZER >= 0) (void)ledcWriteTone(Board::BUZZER, 0);
+#endif
+}
+
+static void buzzerBeep(uint32_t freqHz, uint16_t durationMs) {
+  buzzerOn(freqHz);
+  const uint32_t started = millis();
+  while (millis() - started < durationMs) delay(1);
+  buzzerOff();
+}
+
 static void pulseAuxiliary(uint16_t ms) {
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, HIGH);
-  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
   const uint32_t started = millis();
   while (millis() - started < ms) delay(1);
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
-  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
 }
 
 static void updateAuxiliaryIndicators(bool tx, bool rx) {
@@ -110,8 +149,8 @@ static void updateAuxiliaryIndicators(bool tx, bool rx) {
     // GPIO41 cannot prove charger state without a charger STAT input. The
     // LED is therefore used only for a clearly documented "charge probable"
     // heuristic based on a sustained positive battery-voltage slope.
-    if (Board::LED_CHARGING >= 0)
-      digitalWrite(Board::LED_CHARGING, gState.batteryChargeProbable ? HIGH : LOW);
+    if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0)
+      digitalWrite(Board::BATTERY_CHARGE_ESTIMATE_LED, gState.batteryChargeProbable ? HIGH : LOW);
   }
 }
 
@@ -266,26 +305,26 @@ static void serviceSosBuzzer(uint32_t now) {
     sosBuzzerActive = true;
     sosBuzzerOn = true;
     sosBuzzerSymbol = 0;
-    sosBuzzerDeadline = now + sosBuzzerDuration(0);
-    if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
+    sosBuzzerDeadline = now + 50U;
+    buzzerOn(1500);
     return;
   }
   if (!sosBuzzerActive || static_cast<int32_t>(now - sosBuzzerDeadline) < 0) return;
 
   if (sosBuzzerOn) {
     sosBuzzerOn = false;
-    if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
-    sosBuzzerDeadline = now + (sosBuzzerSymbol == 8 ? 1000U : 180U);
+    buzzerOff();
+    sosBuzzerDeadline = now + 50U;
     return;
   }
-  if (sosBuzzerSymbol == 8) {
+  if (sosBuzzerSymbol >= 4) {
     sosBuzzerActive = false;
     return;
   }
   ++sosBuzzerSymbol;
   sosBuzzerOn = true;
-  sosBuzzerDeadline = now + sosBuzzerDuration(sosBuzzerSymbol);
-  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, HIGH);
+  sosBuzzerDeadline = now + 50U;
+  buzzerOn(1500);
 }
 
 static bool eraseStorageTreeBoot(const char* path) {
@@ -333,13 +372,9 @@ static void executeEmergencyWipe() {
     (void)eraseStorageTreeBoot("/LOG");
     (void)eraseStorageTreeBoot("/TRACK");
   }
-  if (Board::BUZZER >= 0) {
-    for (uint8_t i = 0; i < 3; ++i) {
-      digitalWrite(Board::BUZZER, HIGH);
-      delay(600);
-      digitalWrite(Board::BUZZER, LOW);
-      delay(250);
-    }
+  for (uint8_t i = 0; i < 3; ++i) {
+    buzzerBeep(1000, 600);
+    delay(250);
   }
 }
 
@@ -905,7 +940,8 @@ static void handlePhysicalControls(uint32_t now) {
   if (pttPressed != lastPttButton) {
     lastPttButton = pttPressed;
     if (pttPressed) {
-      pulseAuxiliary(30);
+      pulseAuxiliary(50);
+      buzzerBeep(1000, 100);
       (void)audio.playTone(1000, 60);
       if (audio.startRecording()) {
         StateLock lock(gState);
@@ -928,7 +964,9 @@ static void handlePhysicalControls(uint32_t now) {
       StateLock lock(gState);
       if (lock.ok()) gState.sos = true;
     }
-    pulseAuxiliary(80);
+    pulseAuxiliary(50);
+    delay(50);
+    pulseAuxiliary(50);
     (void)audio.playTone(1400, 150);
   } else if (sosPressed && lastSosButton &&
              !sosLongPressCancelled && sosPressedSinceMs != 0 &&
@@ -936,7 +974,7 @@ static void handlePhysicalControls(uint32_t now) {
     if (lora.cancelSOS()) {
       ++sosCancelCount_;
       sosLongPressCancelled = true;
-      pulseAuxiliary(120);
+      pulseAuxiliary(50);
       (void)audio.playTone(700, 120);
     }
   } else if (!sosPressed) {
@@ -1380,10 +1418,9 @@ void setup() {
   delay(300);
   Serial.println("\nFieldRadio ESP32-S3-WROOM-1 boot");
 #if defined(ARDUINO_ARCH_ESP32)
-  if (Board::BUZZER >= 0) pinMode(Board::BUZZER, OUTPUT);
+  buzzerInit();
   if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLDOWN);
   if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
-  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
 #endif
   if (detectEmergencyWipeAtBoot()) {
     Serial.println("EMERGENCY WIPE: SOS+PTT held for 10s");
@@ -1428,14 +1465,12 @@ void setup() {
 #if defined(ARDUINO_ARCH_ESP32)
   if (Board::BTN_PTT >= 0) pinMode(Board::BTN_PTT, INPUT_PULLDOWN);
   if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
-  if (Board::BUZZER >= 0) pinMode(Board::BUZZER, OUTPUT);
   if (Board::HAPTIC >= 0) pinMode(Board::HAPTIC, OUTPUT);
-  if (Board::LED_CHARGING >= 0) pinMode(Board::LED_CHARGING, OUTPUT);
+  if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0) pinMode(Board::BATTERY_CHARGE_ESTIMATE_LED, OUTPUT);
   if (Board::LED_TX >= 0) pinMode(Board::LED_TX, OUTPUT);
   if (Board::LED_RX >= 0) pinMode(Board::LED_RX, OUTPUT);
-  if (Board::BUZZER >= 0) digitalWrite(Board::BUZZER, LOW);
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
-  if (Board::LED_CHARGING >= 0) digitalWrite(Board::LED_CHARGING, LOW);
+  if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0) digitalWrite(Board::BATTERY_CHARGE_ESTIMATE_LED, LOW);
   if (Board::LED_TX >= 0) digitalWrite(Board::LED_TX, LOW);
   if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, LOW);
   rgb.begin();

@@ -1,6 +1,22 @@
 #pragma once
 #include <Arduino.h>
 
+/*
+ * Buzzer hardware mode — compile-time selection.
+ *
+ * Active buzzer: internal oscillator; GPIO47 is driven HIGH/LOW.
+ * Passive buzzer: requires PWM; GPIO47 is driven with LEDC tone output.
+ *
+ * Define BUZZER_MODE_PASSIVE=1 in the build flags for a passive buzzer.
+ * Do not define both modes simultaneously.
+ */
+#if !defined(BUZZER_MODE_ACTIVE) && !defined(BUZZER_MODE_PASSIVE)
+#define BUZZER_MODE_ACTIVE 1
+#endif
+#if defined(BUZZER_MODE_ACTIVE) && defined(BUZZER_MODE_PASSIVE)
+#error "Select exactly one buzzer mode: BUZZER_MODE_ACTIVE or BUZZER_MODE_PASSIVE"
+#endif
+
 #if !defined(FIELD_RADIO_ESP32_S3_WROOM_1_N16R8)
 #error "This firmware is pinned to ESP32-S3-WROOM-1-N16R8"
 #endif
@@ -73,10 +89,11 @@ constexpr int MAX2016_OUT_REF = 8;
 // GPIO48 is a normal GPIO on ESP32-S3-WROOM-1 and is routed through the GPIO matrix.
 constexpr int FRAM_SDA = I2C_SDA;
 constexpr int FRAM_SCL = I2C_SCL;
-constexpr int BUZZER = 47;        // active-high buzzer; passive buzzer needs PWM hardware
+constexpr int BUZZER = 47;        // active-high buzzer; passive mode uses LEDC PWM
+constexpr uint8_t BUZZER_PWM_CHANNEL = 7;
 constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
 constexpr int HAPTIC = 40;        // active-high haptic driver enable
-constexpr int LED_CHARGING = 41;  // charging-status LED; driven only from charger heuristic
+constexpr int BATTERY_CHARGE_ESTIMATE_LED = 41; // charging heuristic; no charger STAT input
 constexpr int LED_TX = 42;        // dedicated TX indicator
 constexpr int LED_RX = -1;        // RX is already indicated by the addressable RGB LED; GPIO48 is reserved for I2C SCL
 constexpr int STATUS_LED = -1;    // removed: do not alias status onto another function
@@ -97,7 +114,7 @@ constexpr bool pinsUnique() {
       I2C_SDA, I2C_SCL, I2S_BCLK, I2S_LRCLK, I2S_DOUT, I2S_DIN,
       SPI_SCK, SPI_MISO, SPI_MOSI, LORA_CS, LORA_RST, LORA_DIO1,
       LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, GNSS_PPS, BTN_PTT, BTN_SOS, BATTERY_ADC,
-      BUZZER, LED_RGB, HAPTIC, LED_CHARGING, LED_TX, LED_RX,
+      BUZZER, LED_RGB, HAPTIC, BATTERY_CHARGE_ESTIMATE_LED, LED_TX, LED_RX,
       USB_D_MINUS, USB_D_PLUS, MAX2016_OUT_FWD, MAX2016_OUT_REF
   };
   for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
