@@ -61,7 +61,7 @@ dan battery fallback dipelihara di `docs/BEHAVIORAL_CONTRACT.md`.
 | Addressable RGB | 39 | JTAG-capable after boot; one-wire data |
 | Haptic enable | 40 | JTAG-capable after boot; active-high driver enable |
 | BATTERY_CHARGE_ESTIMATE_LED | 41 | JTAG-capable after boot; heuristic only |
-| MRAM CS | 42 | JTAG MTMS; exclusive Everspin MR25H256ACDF chip-select while firmware runs |
+| MRAM CS | 42 | JTAG MTMS; exclusive MR25H256 chip-select while firmware runs |
 | GNSS TX | 43 | UART0 default pin; remapped Serial output |
 | GNSS RX | 44 | UART0 default pin; remapped Serial input |
 | GPIO45 | 45 | **Strapping; do not use for LED** |
@@ -91,7 +91,7 @@ The external pulldown is required for a deterministic deep-sleep state.
 
 ### GPIO42 MRAM contract
 
-GPIO42 is exclusively assigned to the Everspin MR25H256ACDF SPI MRAM chip-select. It is not a
+GPIO42 is exclusively assigned to the Everspin MR25H256 SPI MRAM chip-select. It is not a
 TX indicator and must not be reused by another active subsystem. The addressable RGB LED on
 GPIO39 remains the firmware TX/RX indication mechanism. GPIO19/20 remain the native USB
 D-/D+ debug path; GPIO42's MTMS/JTAG function is therefore unavailable while MRAM CS is

@@ -6,7 +6,7 @@ Baseline: `c5ca35829a09dcc191ff2d75e1be3fa1934172c4`
 
 ## Hardware
 
-- Everspin MR25H256ACDF, 256 Kbit, SOIC-8
+- Everspin MR25H256, 256 Kbit, SOIC-8
 - SPI Mode 0, 40 MHz
 - SCK GPIO12, MISO GPIO13, MOSI GPIO11
 - CS GPIO42
@@ -65,7 +65,7 @@ moved from FRAM/NVS to MRAM.
 
 ## Hardware validation checklist
 
-- [ ] MR25H256ACDF responds correctly
+- [ ] MR25H256 responds correctly
 - [ ] SPI Mode 0 at 40 MHz
 - [ ] GPIO42 CS
 - [ ] read/write/verify

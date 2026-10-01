@@ -141,39 +141,13 @@ bool CertLifecycleManager::loadPersistentState() {
 bool CertLifecycleManager::savePersistentState() {
   Preferences p;
   if (!p.begin(NVS_NS, false)) return false;
-    auto updateLong64 = [&](const char* key, int64_t value) {
-    return !p.isKey(key) || p.getLong64(key, 0) != value
-               ? p.putLong64(key, value) > 0
-               : true;
-  };
-  auto updateUInt = [&](const char* key, uint32_t value) {
-    return !p.isKey(key) || p.getUInt(key, 0) != value
-               ? p.putUInt(key, value) > 0
-               : true;
-  };
-  auto updateUShort = [&](const char* key, uint16_t value) {
-    return !p.isKey(key) || p.getUShort(key, 0) != value
-               ? p.putUShort(key, value) > 0
-               : true;
-  };
-  auto updateString = [&](const char* key, const String& value) {
-    return !p.isKey(key) || p.getString(key, "") != value
-               ? p.putString(key, value) > 0
-               : true;
-  };
-  auto updateBool = [&](const char* key, bool value) {
-    return !p.isKey(key) || p.getBool(key, false) != value
-               ? p.putBool(key, value)
-               : true;
-  };
-  const bool ok =
-      updateLong64("cert_expiry", static_cast<int64_t>(expiryEpoch_)) &&
-      updateUInt("cert_last_ms", lastRenewalMs_) &&
-      updateUShort("cert_failures", renewalFailures_) &&
-      updateString("cert_serial", serial_) &&
-      updateString("cert_issuer", issuer_) &&
-      updateString("cert_last_status", lastRenewalStatus_) &&
-      updateBool("cert_enrolled", enrolled_);
+  bool ok = p.putLong64("cert_expiry", static_cast<int64_t>(expiryEpoch_)) > 0;
+  ok = ok && p.putUInt("cert_last_ms", lastRenewalMs_) > 0;
+  ok = ok && p.putUShort("cert_failures", renewalFailures_) > 0;
+  ok = ok && p.putString("cert_serial", serial_) > 0;
+  ok = ok && p.putString("cert_issuer", issuer_) > 0;
+  ok = ok && p.putString("cert_last_status", lastRenewalStatus_) > 0;
+  ok = ok && p.putBool("cert_enrolled", enrolled_);
   p.end();
   return ok;
 }

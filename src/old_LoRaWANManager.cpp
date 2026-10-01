@@ -159,13 +159,9 @@ bool LoRaWANManager::saveNonces() {
   const uint8_t* buffer = node_->getBufferNonces();
   const size_t n = prefs.putBytes(NVS_NONCES_KEY, buffer,
                                   RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
-    const bool versionOk =
-      prefs.isKey(NVS_NONCES_VERSION_KEY) &&
-      prefs.getUChar(NVS_NONCES_VERSION_KEY, 0) == NVS_NONCES_VERSION
-          ? true
-          : prefs.putUChar(NVS_NONCES_VERSION_KEY, NVS_NONCES_VERSION) == sizeof(uint8_t);
+  const size_t v = prefs.putUChar(NVS_NONCES_VERSION_KEY, NVS_NONCES_VERSION);
   prefs.end();
-    return n == RADIOLIB_LORAWAN_NONCES_BUF_SIZE && versionOk;
+  return n == RADIOLIB_LORAWAN_NONCES_BUF_SIZE && v == sizeof(uint8_t);
 }
 
 bool LoRaWANManager::loadSession() {
@@ -191,13 +187,9 @@ bool LoRaWANManager::saveSession() {
   const uint8_t* buffer = node_->getBufferSession();
   const size_t n = prefs.putBytes(NVS_SESSION_KEY, buffer,
                                   RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
-    const bool versionOk =
-      prefs.isKey(NVS_SESSION_VERSION_KEY) &&
-      prefs.getUChar(NVS_SESSION_VERSION_KEY, 0) == NVS_SESSION_VERSION
-          ? true
-          : prefs.putUChar(NVS_SESSION_VERSION_KEY, NVS_SESSION_VERSION) == sizeof(uint8_t);
+  const size_t v = prefs.putUChar(NVS_SESSION_VERSION_KEY, NVS_SESSION_VERSION);
   prefs.end();
-    return n == RADIOLIB_LORAWAN_SESSION_BUF_SIZE && versionOk;
+  return n == RADIOLIB_LORAWAN_SESSION_BUF_SIZE && v == sizeof(uint8_t);
 }
 
 void LoRaWANManager::setError(const String& message) {

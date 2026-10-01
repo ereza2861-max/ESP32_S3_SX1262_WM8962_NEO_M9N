@@ -85,9 +85,7 @@ constexpr int BATTERY_ADC = 1;    // battery divider ADC input
 constexpr int MAX2016_OUT_FWD = 2;
 constexpr int MAX2016_OUT_REF = 8;
 
-// Everspin MR25H256ACDF 32-KB SPI MRAM on the shared SPI bus.
-constexpr char MRAM_PART_NUMBER[] = "MR25H256ACDF";
-static_assert(sizeof(MRAM_PART_NUMBER) == sizeof("MR25H256ACDF"), "MRAM part number must remain MR25H256ACDF");
+// Everspin MR25H256 32-KB SPI MRAM on the shared SPI bus.
 constexpr int MRAM_CS = 42;
 constexpr int BUZZER = 47;        // active-high buzzer; passive mode uses LEDC PWM
 constexpr uint8_t BUZZER_PWM_CHANNEL = 7;

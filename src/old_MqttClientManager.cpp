@@ -295,20 +295,10 @@ bool MqttClientManager::loadCredentials() {
     rotation_.expiresAt = certExpiryEpoch_;
     Preferences meta;
     if (meta.begin(NVS_NS, false)) {
-            auto updateLong64 = [&](const char* key, int64_t value) {
-        if (!meta.isKey(key) || meta.getLong64(key, 0) != value)
-          return meta.putLong64(key, value) > 0;
-        return true;
-      };
-      auto updateString = [&](const char* key, const String& value) {
-        if (!meta.isKey(key) || meta.getString(key, "") != value)
-          return meta.putString(key, value) > 0;
-        return true;
-      };
-      (void)updateLong64("cert_expiry", static_cast<int64_t>(certExpiryEpoch_));
-      (void)updateString("cert_subject", certSubject_);
-      (void)updateString("cert_issuer", certIssuer_);
-      (void)updateString("cert_serial", certSerial_);
+      (void)meta.putLong64("cert_expiry", static_cast<int64_t>(certExpiryEpoch_));
+      (void)meta.putString("cert_subject", certSubject_);
+      (void)meta.putString("cert_issuer", certIssuer_);
+      (void)meta.putString("cert_serial", certSerial_);
       meta.end();
     }
   }
