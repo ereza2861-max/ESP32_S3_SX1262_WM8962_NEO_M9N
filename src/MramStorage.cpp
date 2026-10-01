@@ -90,8 +90,3 @@ bool MramStorage::write(uint32_t address, const void* data, size_t len) {
   if (!transfer(CMD_WRITE, address, static_cast<const uint8_t*>(data), nullptr, len)) return false;
   return waitReady();
 }
-
-bool MramStorage::update(uint32_t address, const void* data, size_t len) {
-  if (!data || !validRange(address, len)) return false;
-  return write(address, data, len);
-}

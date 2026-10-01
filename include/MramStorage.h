@@ -13,7 +13,6 @@ public:
   bool begin();
   bool read(uint32_t address, void* data, size_t len);
   bool write(uint32_t address, const void* data, size_t len);
-  bool update(uint32_t address, const void* data, size_t len);
   bool ready() const { return ready_; }
 
 private:
