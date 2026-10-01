@@ -92,7 +92,6 @@ constexpr uint8_t BUZZER_PWM_CHANNEL = 7;
 constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
 constexpr int HAPTIC = 40;        // active-high haptic driver enable
 constexpr int BATTERY_CHARGE_ESTIMATE_LED = 41; // charging heuristic; no charger STAT input
-constexpr int LED_RX = -1;        // RX is already indicated by the addressable RGB LED; GPIO48 is reserved for I2C SCL
 constexpr int STATUS_LED = -1;    // removed: do not alias status onto another function
 
 // ESP32-S3 native USB uses GPIO19=D- and GPIO20=D+.
@@ -111,7 +110,7 @@ constexpr bool pinsUnique() {
       I2C_SDA, I2C_SCL, I2S_BCLK, I2S_LRCLK, I2S_DOUT, I2S_DIN,
       SPI_SCK, SPI_MISO, SPI_MOSI, LORA_CS, LORA_RST, LORA_DIO1,
       LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, GNSS_PPS, BTN_PTT, BTN_SOS, BATTERY_ADC,
-      BUZZER, LED_RGB, HAPTIC, BATTERY_CHARGE_ESTIMATE_LED, MRAM_CS, LED_RX,
+      BUZZER, LED_RGB, HAPTIC, BATTERY_CHARGE_ESTIMATE_LED, MRAM_CS,
       USB_D_MINUS, USB_D_PLUS, MAX2016_OUT_FWD, MAX2016_OUT_REF
   };
   for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {

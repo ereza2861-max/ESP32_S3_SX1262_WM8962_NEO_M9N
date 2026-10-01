@@ -7,12 +7,19 @@ constexpr uint32_t SPI_HZ = 40000000UL;
 constexpr SPISettings MRAM_SPI_SETTINGS(SPI_HZ, MSBFIRST, SPI_MODE0);
 }
 
+MramStorage& MramStorage::shared() {
+  static MramStorage instance;
+  return instance;
+}
+
 bool MramStorage::validRange(uint32_t address, size_t len) const {
   return len > 0 && address < SIZE_BYTES && len <= SIZE_BYTES - address;
 }
 
 bool MramStorage::begin() {
   if (!gSpiMutex || Board::MRAM_CS < 0) return false;
+  SpiLock lock(pdMS_TO_TICKS(100));
+  if (!lock.ok()) return false;
   pinMode(Board::MRAM_CS, OUTPUT);
   digitalWrite(Board::MRAM_CS, HIGH);
   ready_ = true;

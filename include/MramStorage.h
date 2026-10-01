@@ -9,6 +9,7 @@ public:
   static constexpr uint32_t SIZE_BYTES = 32768UL;
   static constexpr uint32_t MAX_ADDRESS = SIZE_BYTES - 1U;
 
+  static MramStorage& shared();
   bool begin();
   bool read(uint32_t address, void* data, size_t len);
   bool write(uint32_t address, const void* data, size_t len);

@@ -501,7 +501,7 @@ bool readMramConfigSlot(MramStorage& mram, uint16_t slot, uint16_t commit, MramC
          record.crc == atomicCrc32(reinterpret_cast<const uint8_t*>(&record), offsetof(MramConfigRecord, crc));
 }
 
-bool loadNvsCredentialFields(RuntimeConfig& out) {
+bool loadNvsCredentialFields(RuntimeConfig& out, uint32_t expectedGeneration = 0) {
   Preferences p;
   if (!p.begin(NVS_NS, true)) return false;
   out.loraKeyHex = p.getString("lorakey", out.loraKeyHex);
@@ -523,8 +523,17 @@ bool loadNvsCredentialFields(RuntimeConfig& out) {
   const bool vb = readAtomicSlot(p, NVS_SLOT_B, NVS_COMMIT_B, b);
   if (va || vb) {
     const AtomicConfigRecord* r = va && vb ? (generationNewer(a.generation, b.generation) ? &a : &b) : (va ? &a : &b);
+    if (expectedGeneration != 0 && r->generation != expectedGeneration) {
+      p.end();
+      return false;
+    }
     RuntimeConfig credentials = out;
-    if (decodePayload(r->payload, credentials)) {
+    if (!decodePayload(r->payload, credentials)) {
+      if (expectedGeneration != 0) {
+        p.end();
+        return false;
+      }
+    } else {
       out.loraKeyHex = credentials.loraKeyHex; out.apPassword = credentials.apPassword;
       out.webUser = credentials.webUser; out.webPasswordSaltHex = credentials.webPasswordSaltHex;
       out.webPasswordHashHex = credentials.webPasswordHashHex; out.lorawanAppKey = credentials.lorawanAppKey;
@@ -532,6 +541,11 @@ bool loadNvsCredentialFields(RuntimeConfig& out) {
       out.estUsername = credentials.estUsername; out.estPassword = credentials.estPassword;
       out.estBootstrapToken = credentials.estBootstrapToken; out.staPassword = credentials.staPassword;
     }
+  } else if (expectedGeneration != 0) {
+    // Once MRAM is authoritative, legacy per-key credentials are not a valid
+    // source: accepting them would mix generations after an interrupted save.
+    p.end();
+    return false;
   }
   p.end();
   return true;
@@ -539,32 +553,35 @@ bool loadNvsCredentialFields(RuntimeConfig& out) {
 
 bool loadMramConfig(RuntimeConfig& out, uint32_t& generation, bool& authoritative) {
   authoritative = false; generation = 0;
-  static MramStorage mram;
+  MramStorage& mram = MramStorage::shared();
   if (!mram.begin()) return false;
   MramMigrationMarker marker{};
   if (!readMramMarker(mram, marker)) return false;
   authoritative = true;
+  generation = marker.generation;
   MramConfigRecord a{}, b{};
   const bool va = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_A, Config::PERSISTENT_CONFIG_MRAM_COMMIT_A, a);
   const bool vb = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_B, Config::PERSISTENT_CONFIG_MRAM_COMMIT_B, b);
   if (!va && !vb) return false;
   const MramConfigRecord* r = va && vb ? (generationNewer(a.generation, b.generation) ? &a : &b) : (va ? &a : &b);
   if (!decodePayload(r->payload, out) || !validRuntimeConfig(out)) return false;
-  if (!loadNvsCredentialFields(out) || !validRuntimeConfig(out)) return false;
+  if (!loadNvsCredentialFields(out, r->generation) || !validRuntimeConfig(out)) return false;
   generation = r->generation;
   return true;
 }
 
 bool mramAuthorityMarkerPresent() {
-  static MramStorage mram;
+  MramStorage& mram = MramStorage::shared();
   if (!mram.begin()) return false;
   MramMigrationMarker marker{};
   return readMramMarker(mram, marker);
 }
 
 bool saveMramConfig(const RuntimeConfig& source, uint32_t& generation, uint32_t requestedGeneration = 0) {
-  static MramStorage mram;
+  MramStorage& mram = MramStorage::shared();
   if (!mram.begin()) return false;
+  MramMigrationMarker existingMarker{};
+  const bool markerAlreadyValid = readMramMarker(mram, existingMarker);
   MramConfigRecord a{}, b{};
   const bool va = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_A, Config::PERSISTENT_CONFIG_MRAM_COMMIT_A, a);
   const bool vb = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_B, Config::PERSISTENT_CONFIG_MRAM_COMMIT_B, b);
@@ -587,12 +604,14 @@ bool saveMramConfig(const RuntimeConfig& source, uint32_t& generation, uint32_t 
   if (!mram.read(slot, &verify, sizeof(verify)) || memcmp(&verify, &record, sizeof(record)) != 0) return false;
   const uint8_t committed = Config::PERSISTENT_CONFIG_MRAM_COMMIT;
   if (!mram.write(commit, &committed, sizeof(committed))) return false;
-  MramMigrationMarker marker{};
-  marker.magic = MRAM_MIGRATION_MAGIC; marker.schema = MRAM_CONFIG_SCHEMA; marker.generation = next;
-  marker.crc = atomicCrc32(reinterpret_cast<const uint8_t*>(&marker), offsetof(MramMigrationMarker, crc));
-  if (!mram.write(Config::PERSISTENT_CONFIG_MRAM_MARKER, &marker, sizeof(marker))) return false;
   MramConfigRecord committedRecord{};
   if (!readMramConfigSlot(mram, slot, commit, committedRecord) || committedRecord.generation != next) return false;
+  if (!markerAlreadyValid) {
+    MramMigrationMarker marker{};
+    marker.magic = MRAM_MIGRATION_MAGIC; marker.schema = MRAM_CONFIG_SCHEMA; marker.generation = next;
+    marker.crc = atomicCrc32(reinterpret_cast<const uint8_t*>(&marker), offsetof(MramMigrationMarker, crc));
+    if (!mram.write(Config::PERSISTENT_CONFIG_MRAM_MARKER, &marker, sizeof(marker))) return false;
+  }
   generation = next;
   return true;
 }
@@ -642,7 +661,14 @@ bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation,bool* legacySchema
 
 bool saveAtomicConfig(const RuntimeConfig& source){Preferences p;if(!p.begin(NVS_NS,false))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);uint32_t current=0;bool writeA=true;if(va&&(!vb||generationNewer(a.generation,b.generation))){current=a.generation;writeA=false;}else if(vb){current=b.generation;writeA=true;}uint32_t next=current==UINT32_MAX?1U:current+1U;AtomicConfigRecord r{};r.magic=ATOMIC_CONFIG_MAGIC;r.schema=ATOMIC_CONFIG_SCHEMA;r.payloadSize=sizeof(r.payload);r.generation=next;encodePayload(source,r.payload);r.crc=atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));const char* sk=writeA?NVS_SLOT_A:NVS_SLOT_B;const char* ck=writeA?NVS_COMMIT_A:NVS_COMMIT_B;(void)p.remove(ck);if(p.putBytes(sk,&r,sizeof(r))!=sizeof(r)){p.end();return false;}AtomicConfigRecord verify{};if(p.getBytes(sk,&verify,sizeof(verify))!=sizeof(verify)||memcmp(&verify,&r,sizeof(r))!=0){p.end();return false;}if(p.putUChar(ck,ATOMIC_CONFIG_COMMIT)!=sizeof(uint8_t)){p.end();return false;}AtomicConfigRecord committed{};bool ok=readAtomicSlot(p,sk,ck,committed)&&committed.generation==next&&memcmp(&committed,&r,sizeof(r))==0;p.end();if(!ok)return false;
   uint32_t mramGeneration = 0;
-  if (!saveMramConfig(source, mramGeneration, next) && mramAuthorityMarkerPresent()) return false;
+  if (!saveMramConfig(source, mramGeneration, next)) {
+    Preferences rollback;
+    if (rollback.begin(NVS_NS, false)) {
+      (void)rollback.remove(ck);
+      rollback.end();
+    }
+    return false;
+  }
   gConfigGeneration.store(next,std::memory_order_release);Preferences legacy;if(legacy.begin(NVS_NS,false)){(void)legacy.remove("webpass");legacy.end();}return true;}
 
 
@@ -718,8 +744,34 @@ void RuntimeConfig::load() {
   if (loadMramConfig(mramCandidate, mramGeneration, mramAuthoritative)) {
     *this = mramCandidate;
     gConfigGeneration.store(mramGeneration, std::memory_order_release);
+    Preferences recovery;
+    if (recovery.begin(NVS_NS, false)) {
+      (void)recovery.remove(NVS_TXN_STATE);
+      (void)recovery.remove(NVS_TXN_PREV_GEN);
+      (void)recovery.remove(NVS_TXN_CANDIDATE_GEN);
+      recovery.end();
+    }
+    return;
   } else if (mramAuthoritative) {
-    Serial.println("CONFIG: MRAM is authoritative but no valid committed configuration exists; refusing NVS downgrade");
+    // The MRM1 marker proves that MRAM became authoritative, but a torn/corrupt
+    // config record must not brick the device when an equal-or-newer complete
+    // NVS generation is available. Recovery is allowed only when it cannot
+    // downgrade below the last authoritative marker generation.
+    RuntimeConfig recoveryCandidate = *this;
+    uint32_t nvsGeneration = 0;
+    bool legacySchema = false;
+    if (loadAtomicConfig(recoveryCandidate, nvsGeneration, &legacySchema) &&
+        (nvsGeneration == mramGeneration || generationNewer(nvsGeneration, mramGeneration)) &&
+        validRuntimeConfig(recoveryCandidate)) {
+      uint32_t recoveredGeneration = 0;
+      if (saveMramConfig(recoveryCandidate, recoveredGeneration, nvsGeneration)) {
+        *this = recoveryCandidate;
+        gConfigGeneration.store(recoveredGeneration, std::memory_order_release);
+        Serial.println("CONFIG RECOVERY: restored MRAM from equal-or-newer NVS generation");
+        return;
+      }
+    }
+    Serial.println("CONFIG: MRAM is authoritative and no safe equal-or-newer recovery exists");
     return;
   } else {
     uint32_t nvsGeneration = 0; bool legacySchema = false;

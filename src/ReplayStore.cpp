@@ -53,7 +53,7 @@ bool ReplayStore::begin() {
 }
 
 bool ReplayStore::beginMram() {
-  static MramStorage mram;
+  MramStorage& mram = MramStorage::shared();
   if (!mram.begin()) return false;
   MramHeader header{};
   if (!mram.read(Config::REPLAY_MRAM_HEADER_ADDR, &header, sizeof(header))) return false;
@@ -92,13 +92,13 @@ bool ReplayStore::beginNvsJournal() {
 }
 
 bool ReplayStore::readMram(uint16_t address, void* data, size_t len) const {
-  static MramStorage mram;
+  MramStorage& mram = MramStorage::shared();
   if (!mram.ready() && !mram.begin()) return false;
   return mram.read(address, data, len);
 }
 
 bool ReplayStore::writeMram(uint16_t address, const void* data, size_t len) const {
-  static MramStorage mram;
+  MramStorage& mram = MramStorage::shared();
   if (!mram.ready() && !mram.begin()) return false;
   return mram.write(address, data, len);
 }
