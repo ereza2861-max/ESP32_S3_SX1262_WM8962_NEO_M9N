@@ -1,5 +1,13 @@
 # FieldRadio decisions — GAP A–I
 
+## Gap-closure decision record — 2026-10-01
+
+The implementation closure follows the decision matrix in `teks.md`: local
+BLE/MQTT remains authoritative with optional remote LoRa telemetry; telemetry
+uses spool `sampleId` for application identity; feedback is non-blocking; OTA
+AP/profile access is authenticated; Secure Boot/flash encryption remain
+procedure-only until hardware provisioning evidence exists.
+
 ## GAP A — per-node passkey
 Each BLE sensor node has its own six-digit passkey. The gateway stores identity-address → passkey mappings in the encrypted `ble_peer` NVS namespace and requires a provisioned passkey before secure connection.
 

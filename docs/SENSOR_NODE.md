@@ -1,5 +1,11 @@
 # BLE Sensor Node — ESP32-C3 canonical guide
 
+**2026-10-01 contract update:** `SensorDescriptor.periodMs` controls driver
+sampling; BLE notifications use the separate fixed one-second reporting
+cadence. The node emits zero sensor timestamps and the gateway supplies
+wall-clock receipt time. OTA uses a protected AP and authenticated profile
+changes; physical cable confirmation remains mandatory.
+
 ## Scope and processor selection
 
 The BLE sensor node is a **separate ESP32-C3 DevKitM-1 PlatformIO project**:

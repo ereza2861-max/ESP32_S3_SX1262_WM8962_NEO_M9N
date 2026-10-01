@@ -1,5 +1,13 @@
 # Project status — pre-fabrication / pre-deployment
 
+**Gap-closure status (2026-10-01):** Firmware-level closures in this patch are
+implemented but are not hardware/runtime evidence. The target commit still
+requires PlatformIO build, native tests, BLE HIL, RF HIL, and factory
+provisioning evidence before any production or hardware-validated claim.
+Remaining intentional gaps include Secure Boot/flash-encryption acceptance,
+placeholder sensor electrical/protocol validation, sensor-node watchdog
+evidence, and full BLE sequence side-channel/loss HIL.
+
 **Status baseline: 2026-09-17**
 
 - **Belum ada node yang beroperasi.**

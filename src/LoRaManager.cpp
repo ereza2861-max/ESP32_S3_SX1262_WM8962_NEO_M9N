@@ -1,4 +1,5 @@
 #include "LoRaManager.h"
+#include "MqttClientManager.h"
 #include "BoardConfig.h"
 #include "Config.h"
 #include "AppState.h"
@@ -14,6 +15,7 @@
 #include <mbedtls/aes.h>
 #include <mbedtls/md.h>
 #include <mbedtls/gcm.h>
+extern MqttClientManager mqtt;
 #include <mbedtls/platform_util.h>
 #include <time.h>
 #include <esp_attr.h>
@@ -3487,6 +3489,41 @@ void LoRaManager::task() {
         for (auto& slot : voiceRx_)
           if (slot.used && slot.seq == seq) { alreadyQueued = true; break; }
         if (!duplicateV2 && !alreadyQueued) {
+    if (rxAuthenticated && addressedToUs &&
+        type == Config::LORA_TYPE_SENSOR_TELEMETRY &&
+        appPayloadLen == SensorTelemetry::PAYLOAD_BYTES) {
+      SensorTelemetry::Decoded decoded{};
+      if (SensorTelemetry::deserializeSensorTelemetry(
+              appPayload, appPayloadLen, decoded)) {
+        static uint32_t seenSource[Config::LORA_DEDUP_CACHE_SIZE] = {};
+        static uint32_t seenSample[Config::LORA_DEDUP_CACHE_SIZE] = {};
+        static uint32_t seenMs[Config::LORA_DEDUP_CACHE_SIZE] = {};
+        static size_t seenNext = 0;
+        uint32_t identity = decoded.sampleId;
+        if (identity == 0) identity = hashPayload(appPayload, appPayloadLen);
+        bool duplicate = false;
+        for (size_t i = 0; i < Config::LORA_DEDUP_CACHE_SIZE; ++i) {
+          if (seenSource[i] == rxSourceId && seenSample[i] == identity &&
+              seenMs[i] != 0 &&
+              static_cast<uint32_t>(millis() - seenMs[i]) < Config::LORA_DEDUP_TTL_MS) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) {
+          seenSource[seenNext] = rxSourceId;
+          seenSample[seenNext] = identity;
+          seenMs[seenNext] = millis();
+          seenNext = (seenNext + 1U) % Config::LORA_DEDUP_CACHE_SIZE;
+          const String sensorName = String("sensor-") +
+                                    String(static_cast<unsigned>(decoded.sensorId));
+          (void)mqtt.publishSensorData(
+              decoded.nodeId, "LoRa-remote", decoded.sensorId,
+              sensorName.c_str(), "", decoded.value, decoded.quality,
+              rssi, decoded.timestampMs);
+        }
+      }
+    }
           VoiceRxSlot* freeSlot = nullptr;
           for (auto& slot : voiceRx_)
             if (!slot.used) { freeSlot = &slot; break; }
@@ -5663,14 +5700,15 @@ void LoRaManager::serviceFragmentTx() {
 
 bool LoRaManager::sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,
                                         float value, uint8_t quality,
-                                        uint64_t timestampMs) {
+                                        uint64_t timestampMs,
+                                        uint32_t sampleId) {
   RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
   if (!radioGuard.ok()) return false;
   if (!ready_ || nodeId == 0 || sensorId == 0 || !isfinite(value)) return false;
 
   uint8_t payload[Config::SENSOR_LORA_MAX_PAYLOAD] = {};
   if (SensorTelemetry::serializeSensorTelemetry(payload, nodeId, sensorId, value,
-                                                  quality, timestampMs) !=
+                                                  quality, timestampMs, sampleId) !=
       Config::SENSOR_LORA_MAX_PAYLOAD) return false;
   // Keep the sensor record as an opaque binary payload. transmitHopped() adds
   // the authenticated routing envelope and consumes the normal duty budget.

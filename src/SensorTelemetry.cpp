@@ -29,6 +29,12 @@ uint16_t crc16Ccitt(const uint8_t* data, size_t len) {
 size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
                                 uint16_t sensorId, float value, uint8_t quality,
                                 uint64_t timestampMs) {
+  return serializeSensorTelemetry(out, nodeId, sensorId, value, quality, timestampMs, 0);
+}
+
+size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
+                                uint16_t sensorId, float value, uint8_t quality,
+                                uint64_t timestampMs, uint32_t sampleId) {
   if (!out || nodeId == 0 || sensorId == 0 || !std::isfinite(value)) return 0;
   std::memset(out, 0, PAYLOAD_BYTES);
   out[0] = MAGIC;
@@ -39,7 +45,21 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
   out[12] = quality;
   putU64(out + 13, timestampMs);
   putU16(out + 21, crc16Ccitt(out, SERIALIZED_FIELDS_BYTES - 2));
+  putU32(out + 23, sampleId);
   return PAYLOAD_BYTES;
+}
+
+bool deserializeSensorTelemetry(const uint8_t* in, size_t len, Decoded& out) {
+  if (!in || len != PAYLOAD_BYTES || in[0] != MAGIC || in[1] != VERSION) return false;
+  if (crc16Ccitt(in, SERIALIZED_FIELDS_BYTES - 2) !=
+      static_cast<uint16_t>(in[21] | (static_cast<uint16_t>(in[22]) << 8))) return false;
+  std::memcpy(&out.nodeId, in + 2, sizeof(out.nodeId));
+  std::memcpy(&out.sensorId, in + 6, sizeof(out.sensorId));
+  std::memcpy(&out.value, in + 8, sizeof(out.value));
+  out.quality = in[12];
+  std::memcpy(&out.timestampMs, in + 13, sizeof(out.timestampMs));
+  std::memcpy(&out.sampleId, in + 23, sizeof(out.sampleId));
+  return out.nodeId != 0 && out.sensorId != 0 && std::isfinite(out.value);
 }
 
 bool shouldReportSensor(float oldV, float newV, uint32_t lastMs, uint32_t nowMs,

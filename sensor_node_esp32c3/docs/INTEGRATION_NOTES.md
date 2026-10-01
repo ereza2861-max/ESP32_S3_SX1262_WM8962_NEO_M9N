@@ -1,5 +1,12 @@
 # ESP32-C3 Sensor Node — Integration Notes
 
+## 2026-10 gap-closure addendum
+
+Sampling/reporting are intentionally split: driver `periodMs` controls physical
+sampling and BLE notifications remain 1 Hz. OTA is protected by the provisioned
+AP password; `/profile` additionally requires the OTA password, session token,
+and physical-cable confirmation.
+
 This file records final architecture decisions and validation status. Design
 decisions are closed; remaining items are hardware/build verification.
 

@@ -80,6 +80,8 @@ private:
   void handleStatus();
   void handleProfile();
   bool checkOtaPassword(const String& supplied);
+  bool checkSessionToken(const String& supplied) const;
+  String sessionToken_;
 
   bool apEnabled_ = false;
   bool clientConnected_ = false;

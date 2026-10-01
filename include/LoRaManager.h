@@ -38,7 +38,8 @@ public:
   bool sendVoiceFrame();
   bool sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,
                            float value, uint8_t quality,
-                           uint64_t timestampMs);
+                           uint64_t timestampMs,
+                           uint32_t sampleId = 0);
   bool applyConfig();
   bool applyConfig(const RuntimeConfig& config);
   void updateSourceId();

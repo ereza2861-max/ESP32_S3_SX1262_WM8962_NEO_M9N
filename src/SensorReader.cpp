@@ -340,6 +340,11 @@ void notifyCallback(NimBLERemoteCharacteristic* characteristic,
     if (value.timestamp == 0) {
       value.timestamp = gatewayTimestampMs();
       value.quality |= SensorProtocol::QUALITY_TIMESTAMP_GATEWAY;
+      // Sensor nodes intentionally leave timestamp=0 because they do not own
+      // wall-clock time. The resulting timestamp is the gateway receive/
+      // processing time, not the physical measurement instant.
+      // This is the canonical Q-B03(A) contract until an explicit time-sync
+      // protocol is introduced.
     } else if (value.timestamp < MIN_VALID_EPOCH_MS) {
       value.timestamp = gatewayTimestampMs();
       value.quality |= SensorProtocol::QUALITY_TIMESTAMP_INVALID |

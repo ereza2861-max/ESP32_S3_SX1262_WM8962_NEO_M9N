@@ -120,22 +120,58 @@ static void buzzerOff() {
 #endif
 }
 
+struct FeedbackEvent {
+  uint32_t freqHz = 0;
+  uint16_t durationMs = 0;
+  bool haptic = false;
+};
+
+constexpr size_t FEEDBACK_QUEUE_DEPTH = 8;
+static FeedbackEvent feedbackQueue[FEEDBACK_QUEUE_DEPTH]{};
+static size_t feedbackHead = 0;
+static size_t feedbackTail = 0;
+static size_t feedbackCount = 0;
+static bool feedbackActive = false;
+static FeedbackEvent feedbackCurrent{};
+static uint32_t feedbackDeadline = 0;
+
+static bool enqueueFeedback(const FeedbackEvent& event) {
+  if (event.durationMs == 0 || feedbackCount >= FEEDBACK_QUEUE_DEPTH) return false;
+  feedbackQueue[feedbackTail] = event;
+  feedbackTail = (feedbackTail + 1U) % FEEDBACK_QUEUE_DEPTH;
+  ++feedbackCount;
+  return true;
+}
+
 static void buzzerBeep(uint32_t freqHz, uint16_t durationMs) {
-  buzzerOn(freqHz);
-  const uint32_t started = millis();
-  while (millis() - started < durationMs) delay(1);
-  buzzerOff();
+  (void)enqueueFeedback({freqHz, durationMs, false});
 }
 
 static void pulseAuxiliary(uint16_t ms) {
-  if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, HIGH);
-  const uint32_t started = millis();
-  while (millis() - started < ms) delay(1);
-  if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
+  (void)enqueueFeedback({0, ms, true});
+}
+
+static void serviceFeedback(uint32_t now) {
+  if (sosBuzzerActive) return;
+  if (feedbackActive) {
+    if (static_cast<int32_t>(now - feedbackDeadline) < 0) return;
+    if (feedbackCurrent.haptic && Board::HAPTIC >= 0)
+      digitalWrite(Board::HAPTIC, LOW);
+    if (feedbackCurrent.freqHz != 0) buzzerOff();
+    feedbackActive = false;
+  }
+  if (feedbackCount == 0) return;
+  feedbackCurrent = feedbackQueue[feedbackHead];
+  feedbackHead = (feedbackHead + 1U) % FEEDBACK_QUEUE_DEPTH;
+  --feedbackCount;
+  if (feedbackCurrent.haptic && Board::HAPTIC >= 0)
+    digitalWrite(Board::HAPTIC, HIGH);
+  if (feedbackCurrent.freqHz != 0) buzzerOn(feedbackCurrent.freqHz);
+  feedbackDeadline = now + feedbackCurrent.durationMs;
+  feedbackActive = true;
 }
 
 static void updateAuxiliaryIndicators(bool tx, bool rx) {
-  if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, rx ? HIGH : LOW);
   StateLock lock(gState);
   if (lock.ok()) {
     const bool critical = gState.batteryCritical;
@@ -874,7 +910,8 @@ static void taskSensorForward(void*) {
         if (reportDue &&
             lora.sendSensorTelemetry(pending.sample.nodeId, pending.sample.sensorId,
                                      pending.sample.value, pending.sample.quality,
-                                     pending.sample.timestampMs)) {
+                                     pending.sample.timestampMs,
+                                     pending.sampleId)) {
           (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_LORA);
           if (state) {
             state->nodeId = pending.sample.nodeId;
@@ -964,7 +1001,6 @@ static void handlePhysicalControls(uint32_t now) {
       if (lock.ok()) gState.sos = true;
     }
     pulseAuxiliary(50);
-    delay(50);
     pulseAuxiliary(50);
     (void)audio.playTone(1400, 150);
   } else if (sosPressed && lastSosButton &&
@@ -1099,6 +1135,7 @@ static void taskHealth(void*) {
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
     }
+    updateBattery(now);
     if (fuelGauge.available()) {
       const float voltage = fuelGauge.voltage();
       const int8_t percent = fuelGauge.percent();
@@ -1461,10 +1498,8 @@ void setup() {
   if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
   if (Board::HAPTIC >= 0) pinMode(Board::HAPTIC, OUTPUT);
   if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0) pinMode(Board::BATTERY_CHARGE_ESTIMATE_LED, OUTPUT);
-  if (Board::LED_RX >= 0) pinMode(Board::LED_RX, OUTPUT);
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
   if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0) digitalWrite(Board::BATTERY_CHARGE_ESTIMATE_LED, LOW);
-  if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, LOW);
   rgb.begin();
   rgb.clear();
   rgb.show();
@@ -1547,6 +1582,7 @@ void loop() {
   }
 #endif
   serviceSosBuzzer(now);
+  serviceFeedback(now);
   persistRuntimeLogs(now);
   handlePhysicalControls(now);
   bool activePower = false;

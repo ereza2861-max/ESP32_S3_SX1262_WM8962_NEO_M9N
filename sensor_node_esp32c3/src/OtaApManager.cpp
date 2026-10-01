@@ -17,6 +17,8 @@ constexpr char NVS_NAMESPACE[] = "ota";
 constexpr char NVS_KEY_AP_ENABLED[] = "ap_enabled";
 constexpr uint16_t AP_PORT = 80;
 constexpr const char* AP_SSID_PREFIX = "FieldRadio-Sensor-";
+constexpr char PROFILE_PASSWORD_HEADER[] = "X-OTA-Password";
+constexpr char PROFILE_SESSION_HEADER[] = "X-OTA-Session";
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
 constexpr char PROFILE_CABLES_HEADER[] = "X-Profile-Cables-Changed";
@@ -123,8 +125,9 @@ bool OtaApManager::startAp() {
   const String ssid = String(AP_SSID_PREFIX) + String((uint32_t)ESP.getEfuseMac(), HEX);
 
   WiFi.mode(WIFI_AP);
-  // OPEN AP — deliberate security trade-off, documented in header.
-  if (!WiFi.softAP(ssid.c_str())) {
+  // Protected AP is mandatory. Arduino-ESP32 uses WPA2-PSK for a normal
+  // passphrase SoftAP; WPA3/transition mode remains an IDF provisioning option.
+  if (!WiFi.softAP(ssid.c_str(), otaPassword_.c_str())) {
     Serial.println("OTA: softAP start failed");
     return false;
   }
@@ -139,8 +142,10 @@ bool OtaApManager::startAp() {
               [this]() { handleUploadDone(); },
               [this]() { handleUpload(); });
   gServer->on("/profile", HTTP_POST, [this]() { handleProfile(); });
-  const char* headerKeys[] = {PROFILE_CABLES_HEADER};
-  gServer->collectHeaders(headerKeys, 1);
+  const char* headerKeys[] = {
+      PROFILE_CABLES_HEADER, PROFILE_PASSWORD_HEADER, PROFILE_SESSION_HEADER};
+  gServer->collectHeaders(headerKeys, 3);
+  sessionToken_ = String(static_cast<uint32_t>(ESP.getEfuseMac() ^ micros()), HEX);
   gServer->begin();
 
   ArduinoOTA.setHostname(ssid.c_str());
@@ -214,6 +219,14 @@ bool OtaApManager::checkOtaPassword(const String& supplied) {
   return diff == 0;
 }
 
+bool OtaApManager::checkSessionToken(const String& supplied) const {
+  if (sessionToken_.isEmpty() || supplied.length() != sessionToken_.length()) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < supplied.length(); ++i)
+    diff |= static_cast<uint8_t>(supplied[i] ^ sessionToken_[i]);
+  return diff == 0;
+}
+
 void OtaApManager::handleRoot() {
   if (!gServer) return;
   gServer->sendHeader("Cache-Control", "no-store");
@@ -227,6 +240,7 @@ void OtaApManager::handleStatus() {
   j += ",\"windowMs\":" + String(OTA_AP_WINDOW_MS);
   j += ",\"elapsedMs\":" + String(millis() - apStartedAtMs_);
   j += ",\"otaReady\":" + String(otaPassword_.isEmpty() ? "false" : "true");
+  j += ",\"session\":\"" + sessionToken_ + "\"";
   j += "}";
   gServer->send(200, "application/json", j);
 }
@@ -241,6 +255,12 @@ void OtaApManager::handleProfile() {
   if (gServer->header(PROFILE_CABLES_HEADER) != "true") {
     gServer->send(409, "application/json",
                   "{\"ok\":false,\"error\":\"confirm physical sensor cables were replaced\"}");
+    return;
+  }
+  if (!checkOtaPassword(gServer->header(PROFILE_PASSWORD_HEADER)) ||
+      !checkSessionToken(gServer->header(PROFILE_SESSION_HEADER))) {
+    gServer->send(401, "application/json",
+                  "{\"ok\":false,\"error\":\"OTA authentication required\"}");
     return;
   }
 

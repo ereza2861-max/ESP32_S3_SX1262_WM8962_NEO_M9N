@@ -1,5 +1,14 @@
 # Rev-C feature-gap audit and implementation gates
 
+> **Gap-closure addendum (target `b5b87b27`, 2026-10-01):** The canonical
+> behavioral contract is now `docs/BEHAVIORAL_CONTRACT.md`. The dedicated RX
+> LED is not a board symbol; RGB is the TX/RX indicator. Battery ADC health
+> bookkeeping is scheduled even when MAX17048 is present. Sensor sampling uses
+> descriptor `periodMs`, while BLE notification remains a separate 1-second
+> cadence. `LORA_TYPE_SENSOR_TELEMETRY` now has an application consumer and
+> carries the existing spool `sampleId` in its pre-existing padding. Sensor OTA
+> AP access is protected and `/profile` requires authenticated headers.
+
 > **Project status (2026-09-17):** No node is operating and the PCB has not been fabricated. Rev-C is a pre-fabrication candidate; pin rolling remains acceptable until fabrication is explicitly recorded. See `docs/PROJECT_STATUS.md`.
 
 The firmware target is ESP32-S3-WROOM-1-N16R8 (16 MiB Quad SPI flash + 8 MiB Octal SPI PSRAM).
@@ -24,7 +33,7 @@ The firmware allocation is:
 | Addressable RGB | 39 | one-wire data; requires actual addressable LED |
 | Haptic | 40 | active-high driver enable; do not drive a motor directly from GPIO |
 | Charging LED | 41 | charge-probable heuristic only; no charger STAT input is defined |
-| TX LED | 42 | dedicated |
+| TX/RX status | 39 | addressable RGB; priority contract in `docs/BEHAVIORAL_CONTRACT.md` |
 | RX LED | — | Dedicated RX LED removed; RX is already represented by the addressable RGB status LED so GPIO48 can be reserved for I2C SCL. |
 | PTT | 21 | active-high RTC wake input; external pulldown required |
 | GNSS 1-PPS | 9 | dedicated digital timing input; no longer an analog spare |

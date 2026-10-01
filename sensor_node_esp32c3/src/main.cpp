@@ -231,6 +231,8 @@ void loop() {
   const uint32_t now = millis();
   if (now - lastSampleMs >= SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS) {
     lastSampleMs = now;
+    // The driver registry is the authoritative sampling scheduler: each
+    // descriptor periodMs is checked per driver. This loop is only its tick.
     (void)driverRegistry.sample(registry, now);
   }
   profileManager.task();

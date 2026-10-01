@@ -13,6 +13,9 @@ constexpr char DEFAULT_NODE_NAME[] = "FieldRadio-Sensor-C3";
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SENSOR_SAMPLE_PERIOD_MS = 1000;
+// Driver descriptors are authoritative for sampling; BLE reporting remains a
+// fixed one-second notification cadence to keep the v1 GATT contract stable.
+constexpr uint32_t SENSOR_NOTIFICATION_PERIOD_MS = 1000;
 constexpr float BATTERY_DIVIDER_RATIO = 2.0f;
 
 // Disabled by default because deep sleep prevents a gateway from maintaining

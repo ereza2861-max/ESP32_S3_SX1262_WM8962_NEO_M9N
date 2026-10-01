@@ -166,7 +166,7 @@ void BleSensorServer::notifyValues() {
 void BleSensorServer::task() {
   if (!running_) return;
   const uint32_t now = millis();
-  if (now - lastNotifyMs_ >= SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS) {
+  if (now - lastNotifyMs_ >= SensorNodeConfig::SENSOR_NOTIFICATION_PERIOD_MS) {
     lastNotifyMs_ = now;
     notifyValues();
   }

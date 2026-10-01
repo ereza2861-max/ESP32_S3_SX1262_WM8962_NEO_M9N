@@ -6,6 +6,15 @@ namespace SensorTelemetry {
 
 constexpr uint8_t MAGIC = 0x53; // "S"
 constexpr uint8_t VERSION = 1;
+
+struct Decoded {
+  uint32_t nodeId = 0;
+  uint16_t sensorId = 0;
+  float value = 0.0f;
+  uint8_t quality = 0;
+  uint64_t timestampMs = 0;
+  uint32_t sampleId = 0;
+};
 constexpr size_t PAYLOAD_BYTES = 40;
 constexpr size_t SERIALIZED_FIELDS_BYTES = 22;
 
@@ -15,6 +24,10 @@ constexpr size_t SERIALIZED_FIELDS_BYTES = 22;
 size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
                                 uint16_t sensorId, float value, uint8_t quality,
                                 uint64_t timestampMs);
+size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
+                                uint16_t sensorId, float value, uint8_t quality,
+                                uint64_t timestampMs, uint32_t sampleId);
+bool deserializeSensorTelemetry(const uint8_t* in, size_t len, Decoded& out);
 
 bool shouldReportSensor(float oldV, float newV, uint32_t lastMs, uint32_t nowMs,
                         float threshold, uint32_t periodMs);

@@ -1,5 +1,11 @@
 # FieldRadio ESP32-C3 BLE Sensor Node
 
+**Gap-closure contract (2026-10-01):** The BLE sensor node remains BLE-only.
+`periodMs` is authoritative for driver sampling; notification cadence is a
+separate fixed 1-second contract. Sensor timestamps are intentionally zero and
+the gateway supplies wall-clock receipt time. OTA AP access is password
+protected and `/profile` requires authenticated headers plus cable confirmation.
+
 PlatformIO project for the BLE peripheral/counterpart of the gateway `SensorProtocol.h`.
 The canonical wire contract is `../shared/SensorProtocol.h`; do not create a second copy.
 
