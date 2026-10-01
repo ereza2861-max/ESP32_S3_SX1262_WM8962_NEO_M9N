@@ -25,11 +25,11 @@ public:
 private:
   enum class Backend : uint8_t {
     None = 0,
-    Fram,
+    Mram,
     NvsJournal,
   };
 
-  struct FramHeader {
+  struct MramHeader {
     uint32_t magic;
     uint16_t version;
     uint16_t entrySize;
@@ -38,7 +38,7 @@ private:
     uint32_t crc;
   } __attribute__((packed));
 
-  struct FramSlot {
+  struct MramSlot {
     ReplayEntry entry;
     uint32_t crc;
     uint32_t generation;
@@ -69,8 +69,8 @@ private:
   static constexpr uint8_t NVS_SNAPSHOT_VERSION = 1;
 
   static_assert(sizeof(ReplayEntry) == 24, "ReplayEntry layout changed");
-  static_assert(sizeof(FramSlot) == Config::REPLAY_FRAM_SLOT_BYTES,
-                "FRAM replay slot size mismatch");
+  static_assert(sizeof(MramSlot) == Config::REPLAY_MRAM_SLOT_BYTES,
+                "MRAM replay slot size mismatch");
 
   Backend backend_ = Backend::None;
   bool healthy_ = false;
@@ -78,16 +78,16 @@ private:
   uint16_t nvsHead_ = 0;
   uint8_t nvsValidRecords_ = 0;
 
-  bool beginFram();
+  bool beginMram();
   bool beginNvsJournal();
-  bool loadFram(ReplayEntry* out, size_t count);
+  bool loadMram(ReplayEntry* out, size_t count);
   bool loadNvsJournal(ReplayEntry* out, size_t count);
-  bool persistFram(const ReplayEntry& entry, size_t slot);
+  bool persistMram(const ReplayEntry& entry, size_t slot);
   bool persistNvsJournal(const ReplayEntry& entry, size_t slot);
   bool compactNvsJournal(const ReplayEntry* entries, size_t count);
   bool loadNvsSnapshot(ReplayEntry* out, size_t count, uint32_t& generation);
-  bool readFram(uint16_t address, void* data, size_t len) const;
-  bool writeFram(uint16_t address, const void* data, size_t len) const;
+  bool readMram(uint16_t address, void* data, size_t len) const;
+  bool writeMram(uint16_t address, const void* data, size_t len) const;
   bool validEntry(const ReplayEntry& entry) const;
   static uint32_t crc32(const void* data, size_t len);
 };

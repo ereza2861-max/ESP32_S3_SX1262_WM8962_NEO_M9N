@@ -1,0 +1,28 @@
+#include <unity.h>
+#include "Config.h"
+
+void test_mram_address_map() {
+  TEST_ASSERT_EQUAL_HEX16(0x0000, Config::REPLAY_MRAM_HEADER_ADDR);
+  TEST_ASSERT_EQUAL_HEX16(0x0010, Config::REPLAY_MRAM_BANK0_ADDR);
+  TEST_ASSERT_EQUAL_HEX16(0x0410, Config::REPLAY_MRAM_BANK1_ADDR);
+  TEST_ASSERT_EQUAL_HEX16(0x1000, Config::PERSISTENT_CONFIG_MRAM_SLOT_A);
+  TEST_ASSERT_EQUAL_HEX16(0x2000, Config::PERSISTENT_CONFIG_MRAM_SLOT_B);
+  TEST_ASSERT_EQUAL_HEX16(0x3000, Config::PERSISTENT_CONFIG_MRAM_COMMIT_A);
+  TEST_ASSERT_EQUAL_HEX16(0x3001, Config::PERSISTENT_CONFIG_MRAM_COMMIT_B);
+  TEST_ASSERT_EQUAL_HEX16(0x3010, Config::PERSISTENT_CONFIG_MRAM_MARKER);
+}
+
+void test_mram_replay_area_fits() {
+  TEST_ASSERT_TRUE(Config::REPLAY_MRAM_BANK1_ADDR +
+                   Config::LORA_REPLAY_SOURCE_CACHE_SIZE *
+                   Config::REPLAY_MRAM_SLOT_BYTES <= 0x1000);
+}
+
+void setup() {
+  UNITY_BEGIN();
+  RUN_TEST(test_mram_address_map);
+  RUN_TEST(test_mram_replay_area_fits);
+  UNITY_END();
+}
+
+void loop() {}

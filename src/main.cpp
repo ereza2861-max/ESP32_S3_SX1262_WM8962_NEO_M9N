@@ -135,7 +135,6 @@ static void pulseAuxiliary(uint16_t ms) {
 }
 
 static void updateAuxiliaryIndicators(bool tx, bool rx) {
-  if (Board::LED_TX >= 0) digitalWrite(Board::LED_TX, tx ? HIGH : LOW);
   if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, rx ? HIGH : LOW);
   StateLock lock(gState);
   if (lock.ok()) {
@@ -1427,10 +1426,14 @@ void setup() {
     executeEmergencyWipe();
   }
   gConfigMutex = xSemaphoreCreateMutex();
-  if (!gConfigMutex) {
-    Serial.println("FATAL: config mutex initialization");
+  gState.mutex = xSemaphoreCreateMutex();
+  gSpiMutex = xSemaphoreCreateMutex();
+  gI2cMutex = xSemaphoreCreateMutex();
+  if (!gConfigMutex || !gState.mutex || !gSpiMutex || !gI2cMutex) {
+    Serial.println("FATAL: mutex initialization");
     for (;;) delay(1000);
   }
+  SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
   configLoad();
   if (!configManagerBegin()) {
     Serial.println("FATAL: configuration manager initialization");
@@ -1443,14 +1446,6 @@ void setup() {
     Serial.println("FATAL: configuration snapshot unavailable");
     for (;;) delay(1000);
   }
-
-  gState.mutex = xSemaphoreCreateMutex();
-  gSpiMutex = xSemaphoreCreateMutex();
-  gI2cMutex = xSemaphoreCreateMutex();
-  if (!gState.mutex || !gSpiMutex || !gI2cMutex) {
-    Serial.println("FATAL: mutex initialization");
-    for (;;) delay(1000);
-  }
   {
     StateLock lock(gState);
     if (lock.ok()) gState.rangeTest = config.loraRangeTestMode;
@@ -1458,7 +1453,6 @@ void setup() {
 
   recordBootDiagnostics();
   loadBatteryHealth();
-  SPI.begin(Board::SPI_SCK, Board::SPI_MISO, Board::SPI_MOSI);
   Wire.begin(Board::I2C_SDA, Board::I2C_SCL, 400000);
   Wire.setTimeOut(Config::I2C_TIMEOUT_MS);
 
@@ -1467,11 +1461,9 @@ void setup() {
   if (Board::BTN_SOS >= 0) pinMode(Board::BTN_SOS, INPUT_PULLDOWN);
   if (Board::HAPTIC >= 0) pinMode(Board::HAPTIC, OUTPUT);
   if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0) pinMode(Board::BATTERY_CHARGE_ESTIMATE_LED, OUTPUT);
-  if (Board::LED_TX >= 0) pinMode(Board::LED_TX, OUTPUT);
   if (Board::LED_RX >= 0) pinMode(Board::LED_RX, OUTPUT);
   if (Board::HAPTIC >= 0) digitalWrite(Board::HAPTIC, LOW);
   if (Board::BATTERY_CHARGE_ESTIMATE_LED >= 0) digitalWrite(Board::BATTERY_CHARGE_ESTIMATE_LED, LOW);
-  if (Board::LED_TX >= 0) digitalWrite(Board::LED_TX, LOW);
   if (Board::LED_RX >= 0) digitalWrite(Board::LED_RX, LOW);
   rgb.begin();
   rgb.clear();

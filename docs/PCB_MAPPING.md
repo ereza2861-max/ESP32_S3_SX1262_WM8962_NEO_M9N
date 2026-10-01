@@ -61,7 +61,7 @@ dan battery fallback dipelihara di `docs/BEHAVIORAL_CONTRACT.md`.
 | Addressable RGB | 39 | JTAG-capable after boot; one-wire data |
 | Haptic enable | 40 | JTAG-capable after boot; active-high driver enable |
 | BATTERY_CHARGE_ESTIMATE_LED | 41 | JTAG-capable after boot; heuristic only |
-| TX indicator | 42 | JTAG-capable after boot; dedicated |
+| MRAM CS | 42 | JTAG MTMS; exclusive MR25H256 chip-select while firmware runs |
 | GNSS TX | 43 | UART0 default pin; remapped Serial output |
 | GNSS RX | 44 | UART0 default pin; remapped Serial input |
 | GPIO45 | 45 | **Strapping; do not use for LED** |
@@ -80,7 +80,7 @@ The current design package has no fabrication-confirmed routed PTT/SOS/battery/L
 - GPIO39: addressable RGB data output
 - GPIO40: active-high haptic-driver enable
 - GPIO41: `BATTERY_CHARGE_ESTIMATE_LED` output (heuristic only; no charger STAT input)
-- GPIO42: TX indicator output
+- GPIO42: MR25H256 MRAM chip-select; no longer a TX indicator
 - GPIO9: GNSS 1-PPS timing input; not reserved for future analog devices
 - GPIO48: I2C SCL
 
@@ -89,14 +89,13 @@ normally-open pushbutton to 3V3. Add a local 100 nF capacitor from each input to
 This is intentionally active-high; an external pullup would invert the idle/push polarity.
 The external pulldown is required for a deterministic deep-sleep state.
 
-### Strapping LED warning
+### GPIO42 MRAM contract
 
-Do **not** copy the proposed `GPIO46 -> TX LED` arrangement. GPIO46 is a strapping pin with
-a default weak pulldown. It can operate as a normal GPIO after reset, but an external LED
-network participates in the reset-time strap level and can also affect ROM strap behavior.
-An active-low LED tied to VCC would also naturally be driven toward **ON** during reset by
-the weak pulldown. GPIO42 is therefore retained for the TX indicator; it is not a strapping
-pin. This avoids making LED behavior part of the boot contract.
+GPIO42 is exclusively assigned to the Everspin MR25H256 SPI MRAM chip-select. It is not a
+TX indicator and must not be reused by another active subsystem. The addressable RGB LED on
+GPIO39 remains the firmware TX/RX indication mechanism. GPIO19/20 remain the native USB
+D-/D+ debug path; GPIO42's MTMS/JTAG function is therefore unavailable while MRAM CS is
+driven by firmware.
 
 ### ADC2 + Wi-Fi rule
 

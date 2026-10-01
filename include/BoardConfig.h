@@ -85,16 +85,13 @@ constexpr int BATTERY_ADC = 1;    // battery divider ADC input
 constexpr int MAX2016_OUT_FWD = 2;
 constexpr int MAX2016_OUT_REF = 8;
 
-// External 32-KB I2C FRAM (MB85RC256V), sharing the codec I2C bus.
-// GPIO48 is a normal GPIO on ESP32-S3-WROOM-1 and is routed through the GPIO matrix.
-constexpr int FRAM_SDA = I2C_SDA;
-constexpr int FRAM_SCL = I2C_SCL;
+// Everspin MR25H256 32-KB SPI MRAM on the shared SPI bus.
+constexpr int MRAM_CS = 42;
 constexpr int BUZZER = 47;        // active-high buzzer; passive mode uses LEDC PWM
 constexpr uint8_t BUZZER_PWM_CHANNEL = 7;
 constexpr int LED_RGB = 39;       // one-wire/addressable RGB data
 constexpr int HAPTIC = 40;        // active-high haptic driver enable
 constexpr int BATTERY_CHARGE_ESTIMATE_LED = 41; // charging heuristic; no charger STAT input
-constexpr int LED_TX = 42;        // dedicated TX indicator
 constexpr int LED_RX = -1;        // RX is already indicated by the addressable RGB LED; GPIO48 is reserved for I2C SCL
 constexpr int STATUS_LED = -1;    // removed: do not alias status onto another function
 
@@ -114,7 +111,7 @@ constexpr bool pinsUnique() {
       I2C_SDA, I2C_SCL, I2S_BCLK, I2S_LRCLK, I2S_DOUT, I2S_DIN,
       SPI_SCK, SPI_MISO, SPI_MOSI, LORA_CS, LORA_RST, LORA_DIO1,
       LORA_BUSY, SD_CS, GNSS_RX, GNSS_TX, GNSS_PPS, BTN_PTT, BTN_SOS, BATTERY_ADC,
-      BUZZER, LED_RGB, HAPTIC, BATTERY_CHARGE_ESTIMATE_LED, LED_TX, LED_RX,
+      BUZZER, LED_RGB, HAPTIC, BATTERY_CHARGE_ESTIMATE_LED, MRAM_CS, LED_RX,
       USB_D_MINUS, USB_D_PLUS, MAX2016_OUT_FWD, MAX2016_OUT_REF
   };
   for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
@@ -126,6 +123,7 @@ constexpr bool pinsUnique() {
 }
 static_assert(pinsUnique(), "BoardConfig GPIO collision detected");
 static_assert(LORAWAN_SHARES_RADIO, "LoRaWAN requires the existing SX1262 radio");
+static_assert(MRAM_CS == 42, "MRAM CS is fixed to GPIO42");
 
 // ESP32-S3-WROOM-1-N16R8 reserves GPIO26..37 for package flash/PSRAM and
 // GPIO0/3/45/46 are strapping pins. Keep the routing contract explicit so a

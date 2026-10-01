@@ -1,6 +1,7 @@
 #include "PersistentConfig.h"
 #include "Config.h"
 #include <Preferences.h>
+#include "MramStorage.h"
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/platform_util.h>
@@ -445,6 +446,157 @@ bool validRuntimeConfig(const RuntimeConfig& c) {
 }
 
 bool saveAtomicConfig(const RuntimeConfig& source);
+bool validRuntimeConfig(const RuntimeConfig& c);
+
+constexpr uint32_t MRAM_CONFIG_MAGIC = 0x4D434647UL; // "MCFG"
+constexpr uint16_t MRAM_CONFIG_SCHEMA = 1;
+constexpr uint32_t MRAM_MIGRATION_MAGIC = 0x314D524DUL; // "MRM1"
+
+struct __attribute__((packed)) MramConfigRecord {
+  uint32_t magic;
+  uint16_t schema;
+  uint16_t payloadSize;
+  uint32_t generation;
+  PersistedConfigPayload payload;
+  uint32_t crc;
+};
+struct __attribute__((packed)) MramMigrationMarker {
+  uint32_t magic;
+  uint16_t schema;
+  uint16_t reserved;
+  uint32_t generation;
+  uint32_t crc;
+};
+static_assert(sizeof(MramConfigRecord) <= Config::PERSISTENT_CONFIG_MRAM_SLOT_BYTES,
+              "MRAM PersistentConfig record must fit in 4KB slot");
+
+void stripMramCredentials(PersistedConfigPayload& p) {
+  memset(p.loraKeyHex, 0, sizeof(p.loraKeyHex));
+  memset(p.apPassword, 0, sizeof(p.apPassword));
+  memset(p.webPasswordSaltHex, 0, sizeof(p.webPasswordSaltHex));
+  memset(p.webPasswordHashHex, 0, sizeof(p.webPasswordHashHex));
+  memset(p.lorawanAppKey, 0, sizeof(p.lorawanAppKey));
+  memset(p.lorawanNwkSKey, 0, sizeof(p.lorawanNwkSKey));
+  memset(p.lorawanAppSKey, 0, sizeof(p.lorawanAppSKey));
+  memset(p.estUsername, 0, sizeof(p.estUsername));
+  memset(p.estPassword, 0, sizeof(p.estPassword));
+  memset(p.estBootstrapToken, 0, sizeof(p.estBootstrapToken));
+  memset(p.staPassword, 0, sizeof(p.staPassword));
+}
+
+bool readMramMarker(MramStorage& mram, MramMigrationMarker& marker) {
+  if (!mram.read(Config::PERSISTENT_CONFIG_MRAM_MARKER, &marker, sizeof(marker))) return false;
+  return marker.magic == MRAM_MIGRATION_MAGIC && marker.schema == MRAM_CONFIG_SCHEMA &&
+         marker.generation != 0 &&
+         marker.crc == atomicCrc32(reinterpret_cast<const uint8_t*>(&marker), offsetof(MramMigrationMarker, crc));
+}
+
+bool readMramConfigSlot(MramStorage& mram, uint16_t slot, uint16_t commit, MramConfigRecord& record) {
+  memset(&record, 0, sizeof(record));
+  uint8_t committed = 0;
+  if (!mram.read(commit, &committed, sizeof(committed)) || committed != Config::PERSISTENT_CONFIG_MRAM_COMMIT) return false;
+  if (!mram.read(slot, &record, sizeof(record))) return false;
+  return record.magic == MRAM_CONFIG_MAGIC && record.schema == MRAM_CONFIG_SCHEMA &&
+         record.payloadSize == sizeof(record.payload) && record.generation != 0 &&
+         record.crc == atomicCrc32(reinterpret_cast<const uint8_t*>(&record), offsetof(MramConfigRecord, crc));
+}
+
+bool loadNvsCredentialFields(RuntimeConfig& out) {
+  Preferences p;
+  if (!p.begin(NVS_NS, true)) return false;
+  out.loraKeyHex = p.getString("lorakey", out.loraKeyHex);
+  out.apPassword = p.getString("appass", out.apPassword);
+  out.webUser = p.getString("webuser", out.webUser);
+  out.webPasswordSaltHex = p.getString("websalt", out.webPasswordSaltHex);
+  out.webPasswordHashHex = p.getString("webph", out.webPasswordHashHex);
+  out.lorawanAppKey = p.getString("lw_appkey", out.lorawanAppKey);
+  out.lorawanNwkSKey = p.getString("lw_nwkskey", out.lorawanNwkSKey);
+  out.lorawanAppSKey = p.getString("lw_appskey", out.lorawanAppSKey);
+  out.estUsername = p.getString("est_user", out.estUsername);
+  out.estPassword = p.getString("est_pass", out.estPassword);
+  out.estBootstrapToken = p.getString("est_token", out.estBootstrapToken);
+  out.staPassword = p.getString("sta_pass", out.staPassword);
+  // The atomic NVS record remains the encrypted credential source on devices
+  // where the credentials are stored there rather than in individual keys.
+  AtomicConfigRecord a{}, b{};
+  const bool va = readAtomicSlot(p, NVS_SLOT_A, NVS_COMMIT_A, a);
+  const bool vb = readAtomicSlot(p, NVS_SLOT_B, NVS_COMMIT_B, b);
+  if (va || vb) {
+    const AtomicConfigRecord* r = va && vb ? (generationNewer(a.generation, b.generation) ? &a : &b) : (va ? &a : &b);
+    RuntimeConfig credentials = out;
+    if (decodePayload(r->payload, credentials)) {
+      out.loraKeyHex = credentials.loraKeyHex; out.apPassword = credentials.apPassword;
+      out.webUser = credentials.webUser; out.webPasswordSaltHex = credentials.webPasswordSaltHex;
+      out.webPasswordHashHex = credentials.webPasswordHashHex; out.lorawanAppKey = credentials.lorawanAppKey;
+      out.lorawanNwkSKey = credentials.lorawanNwkSKey; out.lorawanAppSKey = credentials.lorawanAppSKey;
+      out.estUsername = credentials.estUsername; out.estPassword = credentials.estPassword;
+      out.estBootstrapToken = credentials.estBootstrapToken; out.staPassword = credentials.staPassword;
+    }
+  }
+  p.end();
+  return true;
+}
+
+bool loadMramConfig(RuntimeConfig& out, uint32_t& generation, bool& authoritative) {
+  authoritative = false; generation = 0;
+  static MramStorage mram;
+  if (!mram.begin()) return false;
+  MramMigrationMarker marker{};
+  if (!readMramMarker(mram, marker)) return false;
+  authoritative = true;
+  MramConfigRecord a{}, b{};
+  const bool va = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_A, Config::PERSISTENT_CONFIG_MRAM_COMMIT_A, a);
+  const bool vb = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_B, Config::PERSISTENT_CONFIG_MRAM_COMMIT_B, b);
+  if (!va && !vb) return false;
+  const MramConfigRecord* r = va && vb ? (generationNewer(a.generation, b.generation) ? &a : &b) : (va ? &a : &b);
+  if (!decodePayload(r->payload, out) || !validRuntimeConfig(out)) return false;
+  if (!loadNvsCredentialFields(out) || !validRuntimeConfig(out)) return false;
+  generation = r->generation;
+  return true;
+}
+
+bool mramAuthorityMarkerPresent() {
+  static MramStorage mram;
+  if (!mram.begin()) return false;
+  MramMigrationMarker marker{};
+  return readMramMarker(mram, marker);
+}
+
+bool saveMramConfig(const RuntimeConfig& source, uint32_t& generation, uint32_t requestedGeneration = 0) {
+  static MramStorage mram;
+  if (!mram.begin()) return false;
+  MramConfigRecord a{}, b{};
+  const bool va = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_A, Config::PERSISTENT_CONFIG_MRAM_COMMIT_A, a);
+  const bool vb = readMramConfigSlot(mram, Config::PERSISTENT_CONFIG_MRAM_SLOT_B, Config::PERSISTENT_CONFIG_MRAM_COMMIT_B, b);
+  uint32_t current = 0;
+  bool writeA = true;
+  if (va && (!vb || generationNewer(a.generation, b.generation))) { current = a.generation; writeA = false; }
+  else if (vb) { current = b.generation; writeA = true; }
+  const uint32_t next = requestedGeneration ? requestedGeneration : (current == UINT32_MAX ? 1U : current + 1U);
+  MramConfigRecord record{};
+  record.magic = MRAM_CONFIG_MAGIC; record.schema = MRAM_CONFIG_SCHEMA;
+  record.payloadSize = sizeof(record.payload); record.generation = next;
+  encodePayload(source, record.payload); stripMramCredentials(record.payload);
+  record.crc = atomicCrc32(reinterpret_cast<const uint8_t*>(&record), offsetof(MramConfigRecord, crc));
+  const uint16_t slot = writeA ? Config::PERSISTENT_CONFIG_MRAM_SLOT_A : Config::PERSISTENT_CONFIG_MRAM_SLOT_B;
+  const uint16_t commit = writeA ? Config::PERSISTENT_CONFIG_MRAM_COMMIT_A : Config::PERSISTENT_CONFIG_MRAM_COMMIT_B;
+  uint8_t clear = 0;
+  if (!mram.write(commit, &clear, sizeof(clear))) return false;
+  if (!mram.write(slot, &record, sizeof(record))) return false;
+  MramConfigRecord verify{};
+  if (!mram.read(slot, &verify, sizeof(verify)) || memcmp(&verify, &record, sizeof(record)) != 0) return false;
+  const uint8_t committed = Config::PERSISTENT_CONFIG_MRAM_COMMIT;
+  if (!mram.write(commit, &committed, sizeof(committed))) return false;
+  MramMigrationMarker marker{};
+  marker.magic = MRAM_MIGRATION_MAGIC; marker.schema = MRAM_CONFIG_SCHEMA; marker.generation = next;
+  marker.crc = atomicCrc32(reinterpret_cast<const uint8_t*>(&marker), offsetof(MramMigrationMarker, crc));
+  if (!mram.write(Config::PERSISTENT_CONFIG_MRAM_MARKER, &marker, sizeof(marker))) return false;
+  MramConfigRecord committedRecord{};
+  if (!readMramConfigSlot(mram, slot, commit, committedRecord) || committedRecord.generation != next) return false;
+  generation = next;
+  return true;
+}
+
 bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation,bool* legacySchema=nullptr){
   if (legacySchema) *legacySchema = false;
   Preferences p;
@@ -488,7 +640,10 @@ bool loadAtomicConfig(RuntimeConfig& out,uint32_t& generation,bool* legacySchema
   out=candidate;generation=chosen->generation;p.end();return true;
 }
 
-bool saveAtomicConfig(const RuntimeConfig& source){Preferences p;if(!p.begin(NVS_NS,false))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);uint32_t current=0;bool writeA=true;if(va&&(!vb||generationNewer(a.generation,b.generation))){current=a.generation;writeA=false;}else if(vb){current=b.generation;writeA=true;}uint32_t next=current==UINT32_MAX?1U:current+1U;AtomicConfigRecord r{};r.magic=ATOMIC_CONFIG_MAGIC;r.schema=ATOMIC_CONFIG_SCHEMA;r.payloadSize=sizeof(r.payload);r.generation=next;encodePayload(source,r.payload);r.crc=atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));const char* sk=writeA?NVS_SLOT_A:NVS_SLOT_B;const char* ck=writeA?NVS_COMMIT_A:NVS_COMMIT_B;(void)p.remove(ck);if(p.putBytes(sk,&r,sizeof(r))!=sizeof(r)){p.end();return false;}AtomicConfigRecord verify{};if(p.getBytes(sk,&verify,sizeof(verify))!=sizeof(verify)||memcmp(&verify,&r,sizeof(r))!=0){p.end();return false;}if(p.putUChar(ck,ATOMIC_CONFIG_COMMIT)!=sizeof(uint8_t)){p.end();return false;}AtomicConfigRecord committed{};bool ok=readAtomicSlot(p,sk,ck,committed)&&committed.generation==next&&memcmp(&committed,&r,sizeof(r))==0;p.end();if(!ok)return false;gConfigGeneration.store(next,std::memory_order_release);Preferences legacy;if(legacy.begin(NVS_NS,false)){(void)legacy.remove("webpass");legacy.end();}return true;}
+bool saveAtomicConfig(const RuntimeConfig& source){Preferences p;if(!p.begin(NVS_NS,false))return false;AtomicConfigRecord a{},b{};bool va=readAtomicSlot(p,NVS_SLOT_A,NVS_COMMIT_A,a),vb=readAtomicSlot(p,NVS_SLOT_B,NVS_COMMIT_B,b);uint32_t current=0;bool writeA=true;if(va&&(!vb||generationNewer(a.generation,b.generation))){current=a.generation;writeA=false;}else if(vb){current=b.generation;writeA=true;}uint32_t next=current==UINT32_MAX?1U:current+1U;AtomicConfigRecord r{};r.magic=ATOMIC_CONFIG_MAGIC;r.schema=ATOMIC_CONFIG_SCHEMA;r.payloadSize=sizeof(r.payload);r.generation=next;encodePayload(source,r.payload);r.crc=atomicCrc32(reinterpret_cast<const uint8_t*>(&r),offsetof(AtomicConfigRecord,crc));const char* sk=writeA?NVS_SLOT_A:NVS_SLOT_B;const char* ck=writeA?NVS_COMMIT_A:NVS_COMMIT_B;(void)p.remove(ck);if(p.putBytes(sk,&r,sizeof(r))!=sizeof(r)){p.end();return false;}AtomicConfigRecord verify{};if(p.getBytes(sk,&verify,sizeof(verify))!=sizeof(verify)||memcmp(&verify,&r,sizeof(r))!=0){p.end();return false;}if(p.putUChar(ck,ATOMIC_CONFIG_COMMIT)!=sizeof(uint8_t)){p.end();return false;}AtomicConfigRecord committed{};bool ok=readAtomicSlot(p,sk,ck,committed)&&committed.generation==next&&memcmp(&committed,&r,sizeof(r))==0;p.end();if(!ok)return false;
+  uint32_t mramGeneration = 0;
+  if (!saveMramConfig(source, mramGeneration, next) && mramAuthorityMarkerPresent()) return false;
+  gConfigGeneration.store(next,std::memory_order_release);Preferences legacy;if(legacy.begin(NVS_NS,false)){(void)legacy.remove("webpass");legacy.end();}return true;}
 
 
 bool validHexKey(const String& value) {
@@ -556,6 +711,32 @@ bool RuntimeConfig::validLoRaWAN() const {
 }
 
 void RuntimeConfig::load() {
+  // MRAM is the runtime backend. NVS remains the migration/credential source.
+  uint32_t mramGeneration = 0;
+  bool mramAuthoritative = false;
+  RuntimeConfig mramCandidate = *this;
+  if (loadMramConfig(mramCandidate, mramGeneration, mramAuthoritative)) {
+    *this = mramCandidate;
+    gConfigGeneration.store(mramGeneration, std::memory_order_release);
+  } else if (mramAuthoritative) {
+    Serial.println("CONFIG: MRAM is authoritative but no valid committed configuration exists; refusing NVS downgrade");
+    return;
+  } else {
+    uint32_t nvsGeneration = 0; bool legacySchema = false;
+    RuntimeConfig nvsCandidate = *this;
+    if (loadAtomicConfig(nvsCandidate, nvsGeneration, &legacySchema)) {
+      uint32_t migratedGeneration = 0;
+      if (!saveMramConfig(nvsCandidate, migratedGeneration, nvsGeneration)) {
+        Serial.println("CONFIG MIGRATION: NVS -> MRAM failed; retaining NVS-loaded runtime state");
+      } else {
+        *this = nvsCandidate;
+        gConfigGeneration.store(migratedGeneration, std::memory_order_release);
+        mramAuthoritative = true;
+        Serial.println("CONFIG MIGRATION: NVS -> MRAM committed");
+      }
+    }
+  }
+
   // ENH-2: Observe a pending journal before atomic load so recovery can be audited.
   uint32_t pendingPreviousGeneration = 0;
   uint32_t pendingCandidateGeneration = 0;
@@ -574,7 +755,7 @@ void RuntimeConfig::load() {
   uint32_t atomicGeneration = 0;
   RuntimeConfig atomicCandidate = *this;
   bool migratedLegacyAtomic = false;
-  if (loadAtomicConfig(atomicCandidate, atomicGeneration, &migratedLegacyAtomic)) {
+  if (!mramAuthoritative && loadAtomicConfig(atomicCandidate, atomicGeneration, &migratedLegacyAtomic)) {
     bool migratedMqttTls = false;
     if (migratedLegacyAtomic) {
       // Schema-2 atomic payloads predate persistent STA credentials. The

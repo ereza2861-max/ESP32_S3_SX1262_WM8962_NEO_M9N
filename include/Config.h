@@ -227,26 +227,35 @@ constexpr size_t LORA_ECDH_BEACON_BYTES =
     1U + 1U + sizeof(uint32_t) +
     LORA_ECDH_PUBLIC_KEY_BYTES + LORA_ECDH_PUBLIC_KEY_BYTES;
 
-// Replay persistence backend. FRAM is the production backend; the NVS
-// journal is retained as an automatic fallback when FRAM is absent.
+// Replay persistence backend. MRAM is authoritative once detected; NVS is
+// retained only as the pre-authority fallback/migration source.
 #ifndef FIELDRADIO_REPLAY_BACKEND
 #define FIELDRADIO_REPLAY_BACKEND 0
 #endif
 enum class ReplayStoreBackend : uint8_t {
-  BACKEND_FRAM = 0,
+  BACKEND_MRAM = 0,
   BACKEND_NVS_JOURNAL = 1,
 };
 constexpr ReplayStoreBackend REPLAY_STORE_BACKEND =
     static_cast<ReplayStoreBackend>(FIELDRADIO_REPLAY_BACKEND);
 static_assert(FIELDRADIO_REPLAY_BACKEND == 0 || FIELDRADIO_REPLAY_BACKEND == 1,
-              "FIELDRADIO_REPLAY_BACKEND must be 0 (FRAM) or 1 (NVS journal)");
+              "FIELDRADIO_REPLAY_BACKEND must be 0 (MRAM) or 1 (NVS journal)");
 constexpr uint8_t REPLAY_STORE_VERSION = 1;
-constexpr uint16_t REPLAY_FRAM_I2C_ADDR = 0x50;
-constexpr uint32_t REPLAY_FRAM_SIZE_BYTES = 32768UL;
-constexpr uint16_t REPLAY_FRAM_HEADER_BYTES = 16;
-constexpr uint16_t REPLAY_FRAM_SLOT_BYTES = 32;
-constexpr uint16_t REPLAY_FRAM_WRITE_CHUNK_BYTES = 16;
-constexpr uint32_t REPLAY_FRAM_WRITE_DELAY_MS = 1;
+constexpr uint32_t MRAM_SIZE_BYTES = 32768UL;
+constexpr uint16_t REPLAY_MRAM_HEADER_ADDR = 0x0000;
+constexpr uint16_t REPLAY_MRAM_HEADER_BYTES = 16;
+constexpr uint16_t REPLAY_MRAM_BANK0_ADDR = 0x0010;
+constexpr uint16_t REPLAY_MRAM_BANK1_ADDR = 0x0410;
+constexpr uint16_t REPLAY_MRAM_SLOT_BYTES = 32;
+constexpr uint8_t REPLAY_MRAM_BANK_COUNT = 2;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_SLOT_A = 0x1000;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_SLOT_B = 0x2000;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_COMMIT_A = 0x3000;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_COMMIT_B = 0x3001;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_MARKER = 0x3010;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_MARKER_BYTES = 16;
+constexpr uint16_t PERSISTENT_CONFIG_MRAM_SLOT_BYTES = 4096;
+constexpr uint8_t PERSISTENT_CONFIG_MRAM_COMMIT = 0xA5;
 constexpr size_t REPLAY_NVS_JOURNAL_RECORDS = 64;
 constexpr uint8_t REPLAY_NVS_COMPACT_PERCENT = 75;
 

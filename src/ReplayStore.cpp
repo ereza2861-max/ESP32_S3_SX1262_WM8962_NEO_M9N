@@ -1,21 +1,24 @@
 #include "ReplayStore.h"
 #include "BoardConfig.h"
+#include "MramStorage.h"
 #include <Preferences.h>
-#include <Wire.h>
+
 #include <cstring>
 
 namespace {
-constexpr uint32_t FRAM_MAGIC = 0x4652504CUL; // "FRPL"
+constexpr uint32_t MRAM_MAGIC = 0x4D52504CUL; // "MRPL"
 constexpr uint32_t NVS_MAGIC = 0x524A5231UL;  // "RJR1"
 constexpr char NVS_NAMESPACE[] = "fieldradio";
 constexpr char NVS_HEAD_KEY[] = "rj_head";
-constexpr char NVS_SNAPSHOT_NS_A[] = "fr_rj_a";
-constexpr char NVS_SNAPSHOT_NS_B[] = "fr_rj_b";
+constexpr char NVS_SNAPSHOT_NS_A[] = "mr_rj_a";
+constexpr char NVS_SNAPSHOT_NS_B[] = "mr_rj_b";
 constexpr char NVS_SNAPSHOT_KEY[] = "snapshot";
-static_assert(Config::REPLAY_FRAM_HEADER_BYTES +
-                  Config::LORA_REPLAY_SOURCE_CACHE_SIZE * 2U *
-                  Config::REPLAY_FRAM_SLOT_BYTES <= Config::REPLAY_FRAM_SIZE_BYTES,
-              "Rev-C FRAM replay double-buffer does not fit");
+static_assert(Config::REPLAY_MRAM_BANK0_ADDR +
+                  Config::LORA_REPLAY_SOURCE_CACHE_SIZE * Config::REPLAY_MRAM_SLOT_BYTES <= Config::REPLAY_MRAM_BANK1_ADDR,
+              "MRAM replay bank 0 overlaps bank 1");
+static_assert(Config::REPLAY_MRAM_BANK1_ADDR +
+                  Config::LORA_REPLAY_SOURCE_CACHE_SIZE * Config::REPLAY_MRAM_SLOT_BYTES <= 0x1000,
+              "MRAM replay area overlaps PersistentConfig");
 }
 
 uint32_t ReplayStore::crc32(const void* data, size_t len) {
@@ -42,50 +45,36 @@ bool ReplayStore::begin() {
   nvsHead_ = 0;
   nvsValidRecords_ = 0;
 
-  if (Config::REPLAY_STORE_BACKEND == Config::ReplayStoreBackend::BACKEND_FRAM) {
-    if (beginFram()) return true;
-    // A missing/unresponsive FRAM is a deployment condition, not a reason to
-    // disable replay persistence. Fall back to the wear-levelled NVS journal.
+  if (Config::REPLAY_STORE_BACKEND == Config::ReplayStoreBackend::BACKEND_MRAM) {
+    if (beginMram()) return true;
+    // NVS is permitted only before MRAM becomes authoritative.
   }
   return beginNvsJournal();
 }
 
-bool ReplayStore::beginFram() {
-  if (!gI2cMutex) return false;
-  Wire.begin(Board::FRAM_SDA, Board::FRAM_SCL, 400000);
-  Wire.setTimeOut(Config::I2C_TIMEOUT_MS);
-  {
-    I2cLock lock(pdMS_TO_TICKS(Config::I2C_TIMEOUT_MS));
-    if (!lock.ok()) return false;
-    Wire.beginTransmission(Config::REPLAY_FRAM_I2C_ADDR);
-    if (Wire.endTransmission() != 0) return false;
-  }
-
-  FramHeader header{};
-  const bool headerRead = readFram(0, &header, sizeof(header));
-  const bool blank = headerRead &&
-      (header.magic == 0x00000000UL || header.magic == 0xFFFFFFFFUL);
-  if (!headerRead) return false;
+bool ReplayStore::beginMram() {
+  static MramStorage mram;
+  if (!mram.begin()) return false;
+  MramHeader header{};
+  if (!mram.read(Config::REPLAY_MRAM_HEADER_ADDR, &header, sizeof(header))) return false;
+  const bool blank = header.magic == 0x00000000UL || header.magic == 0xFFFFFFFFUL;
   if (blank) {
-    header.magic = FRAM_MAGIC;
+    header.magic = MRAM_MAGIC;
     header.version = Config::REPLAY_STORE_VERSION;
     header.entrySize = sizeof(ReplayEntry);
-    header.slotSize = Config::REPLAY_FRAM_SLOT_BYTES;
+    header.slotSize = Config::REPLAY_MRAM_SLOT_BYTES;
     header.slotCount = Config::LORA_REPLAY_SOURCE_CACHE_SIZE;
-    header.crc = crc32(&header, offsetof(FramHeader, crc));
-    if (!writeFram(0, &header, sizeof(header))) return false;
-  } else if (header.magic != FRAM_MAGIC ||
+    header.crc = crc32(&header, offsetof(MramHeader, crc));
+    if (!mram.write(Config::REPLAY_MRAM_HEADER_ADDR, &header, sizeof(header))) return false;
+  } else if (header.magic != MRAM_MAGIC ||
              header.version != Config::REPLAY_STORE_VERSION ||
              header.entrySize != sizeof(ReplayEntry) ||
-             header.slotSize != Config::REPLAY_FRAM_SLOT_BYTES ||
+             header.slotSize != Config::REPLAY_MRAM_SLOT_BYTES ||
              header.slotCount != Config::LORA_REPLAY_SOURCE_CACHE_SIZE ||
-             header.crc != crc32(&header, offsetof(FramHeader, crc))) {
-    // Never reinitialize a non-blank FRAM header on corruption: doing so
-    // would silently erase the replay state and weaken anti-replay.
+             header.crc != crc32(&header, offsetof(MramHeader, crc))) {
     return false;
   }
-
-  backend_ = Backend::Fram;
+  backend_ = Backend::Mram;
   healthy_ = true;
   return true;
 }
@@ -102,44 +91,19 @@ bool ReplayStore::beginNvsJournal() {
   return true;
 }
 
-bool ReplayStore::readFram(uint16_t address, void* data, size_t len) const {
-  if (!data || !len || static_cast<uint32_t>(address) + len > Config::REPLAY_FRAM_SIZE_BYTES)
-    return false;
-  I2cLock lock(pdMS_TO_TICKS(Config::I2C_TIMEOUT_MS));
-  if (!lock.ok()) return false;
-  Wire.beginTransmission(Config::REPLAY_FRAM_I2C_ADDR);
-  Wire.write(static_cast<uint8_t>(address >> 8));
-  Wire.write(static_cast<uint8_t>(address));
-  if (Wire.endTransmission(false) != 0) return false;
-  const size_t requested = Wire.requestFrom(static_cast<int>(Config::REPLAY_FRAM_I2C_ADDR),
-                                             static_cast<int>(len));
-  if (requested != len) return false;
-  uint8_t* p = static_cast<uint8_t*>(data);
-  for (size_t i = 0; i < len; ++i) p[i] = Wire.read();
-  return true;
+bool ReplayStore::readMram(uint16_t address, void* data, size_t len) const {
+  static MramStorage mram;
+  if (!mram.ready() && !mram.begin()) return false;
+  return mram.read(address, data, len);
 }
 
-bool ReplayStore::writeFram(uint16_t address, const void* data, size_t len) const {
-  if (!data || !len || static_cast<uint32_t>(address) + len > Config::REPLAY_FRAM_SIZE_BYTES)
-    return false;
-  I2cLock lock(pdMS_TO_TICKS(Config::I2C_TIMEOUT_MS));
-  if (!lock.ok()) return false;
-  const uint8_t* p = static_cast<const uint8_t*>(data);
-  while (len) {
-    const size_t chunk = min<size_t>(Config::REPLAY_FRAM_WRITE_CHUNK_BYTES, len);
-    Wire.beginTransmission(Config::REPLAY_FRAM_I2C_ADDR);
-    Wire.write(static_cast<uint8_t>(address >> 8));
-    Wire.write(static_cast<uint8_t>(address));
-    if (Wire.write(p, chunk) != chunk || Wire.endTransmission() != 0) return false;
-    address = static_cast<uint16_t>(address + chunk);
-    p += chunk;
-    len -= chunk;
-    if (Config::REPLAY_FRAM_WRITE_DELAY_MS) delay(Config::REPLAY_FRAM_WRITE_DELAY_MS);
-  }
-  return true;
+bool ReplayStore::writeMram(uint16_t address, const void* data, size_t len) const {
+  static MramStorage mram;
+  if (!mram.ready() && !mram.begin()) return false;
+  return mram.write(address, data, len);
 }
 
-bool ReplayStore::loadFram(ReplayEntry* out, size_t count) {
+bool ReplayStore::loadMram(ReplayEntry* out, size_t count) {
   if (!out || count != Config::LORA_REPLAY_SOURCE_CACHE_SIZE) return false;
   memset(out, 0, sizeof(ReplayEntry) * count);
   for (size_t i = 0; i < count; ++i) {
@@ -148,19 +112,15 @@ bool ReplayStore::loadFram(ReplayEntry* out, size_t count) {
     ReplayEntry newestEntry{};
 
     // Rev-C uses two physical banks per logical replay slot. Bank 0 preserves
-    // the original fixed-slot addresses so existing FRAM state remains readable;
+    // the original fixed-slot addresses so existing MRAM state remains readable;
     // bank 1 is the new shadow bank. A torn write to the inactive bank therefore
     // cannot destroy the last committed anti-replay state. generation==0 records
     // retain the legacy CRC format for migration.
     for (uint8_t bank = 0; bank < 2; ++bank) {
-      FramSlot slot{};
-      const uint32_t physicalSlot =
-          bank == 0 ? static_cast<uint32_t>(i)
-                    : static_cast<uint32_t>(Config::LORA_REPLAY_SOURCE_CACHE_SIZE) + i;
-      const uint16_t address = static_cast<uint16_t>(
-          Config::REPLAY_FRAM_HEADER_BYTES +
-          physicalSlot * Config::REPLAY_FRAM_SLOT_BYTES);
-      if (!readFram(address, &slot, sizeof(slot))) return false;
+      MramSlot slot{};
+      const uint16_t bankBase = bank == 0 ? Config::REPLAY_MRAM_BANK0_ADDR : Config::REPLAY_MRAM_BANK1_ADDR;
+      const uint16_t address = static_cast<uint16_t>(bankBase + i * Config::REPLAY_MRAM_SLOT_BYTES);
+      if (!readMram(address, &slot, sizeof(slot))) return false;
 
       bool valid = false;
       if (slot.generation == 0) {
@@ -279,24 +239,20 @@ bool ReplayStore::loadNvsJournal(ReplayEntry* out, size_t count) {
 
 bool ReplayStore::load(ReplayEntry* out, size_t count) {
   if (!healthy_) return false;
-  return backend_ == Backend::Fram ? loadFram(out, count) : loadNvsJournal(out, count);
+  return backend_ == Backend::Mram ? loadMram(out, count) : loadNvsJournal(out, count);
 }
 
-bool ReplayStore::persistFram(const ReplayEntry& entry, size_t slot) {
+bool ReplayStore::persistMram(const ReplayEntry& entry, size_t slot) {
   if (slot >= Config::LORA_REPLAY_SOURCE_CACHE_SIZE) return false;
 
   uint32_t newestGeneration = 0;
   uint8_t newestBank = 0;
   bool haveValid = false;
   for (uint8_t bank = 0; bank < 2; ++bank) {
-    FramSlot current{};
-    const uint32_t physicalSlot =
-        bank == 0 ? static_cast<uint32_t>(slot)
-                  : static_cast<uint32_t>(Config::LORA_REPLAY_SOURCE_CACHE_SIZE) + slot;
-    const uint16_t address = static_cast<uint16_t>(
-        Config::REPLAY_FRAM_HEADER_BYTES +
-        physicalSlot * Config::REPLAY_FRAM_SLOT_BYTES);
-    if (!readFram(address, &current, sizeof(current))) return false;
+    MramSlot current{};
+    const uint16_t bankBase = bank == 0 ? Config::REPLAY_MRAM_BANK0_ADDR : Config::REPLAY_MRAM_BANK1_ADDR;
+    const uint16_t address = static_cast<uint16_t>(bankBase + slot * Config::REPLAY_MRAM_SLOT_BYTES);
+    if (!readMram(address, &current, sizeof(current))) return false;
 
     bool valid = false;
     if (current.generation == 0) {
@@ -320,7 +276,7 @@ bool ReplayStore::persistFram(const ReplayEntry& entry, size_t slot) {
   if (generation == 0) generation = 1;  // reserve 0 for legacy records
   const uint8_t targetBank = haveValid ? static_cast<uint8_t>(newestBank ^ 1U) : 0U;
 
-  FramSlot record{};
+  MramSlot record{};
   record.entry = entry;
   record.generation = generation;
   uint8_t commitData[sizeof(ReplayEntry) + sizeof(uint32_t)] = {};
@@ -329,11 +285,9 @@ bool ReplayStore::persistFram(const ReplayEntry& entry, size_t slot) {
          sizeof(record.generation));
   record.crc = crc32(commitData, sizeof(commitData));
 
-  const uint32_t physicalSlot = static_cast<uint32_t>(slot) * 2U + targetBank;
-  const uint16_t address = static_cast<uint16_t>(
-      Config::REPLAY_FRAM_HEADER_BYTES +
-      physicalSlot * Config::REPLAY_FRAM_SLOT_BYTES);
-  return writeFram(address, &record, sizeof(record));
+  const uint16_t bankBase = targetBank == 0 ? Config::REPLAY_MRAM_BANK0_ADDR : Config::REPLAY_MRAM_BANK1_ADDR;
+  const uint16_t address = static_cast<uint16_t>(bankBase + slot * Config::REPLAY_MRAM_SLOT_BYTES);
+  return writeMram(address, &record, sizeof(record));
 }
 
 bool ReplayStore::compactNvsJournal(const ReplayEntry* entries, size_t count) {
@@ -442,15 +396,15 @@ bool ReplayStore::persistNvsJournal(const ReplayEntry& entry, size_t slot) {
 
 bool ReplayStore::persist(const ReplayEntry& entry, size_t slot) {
   if (!healthy_ || !validEntry(entry)) return false;
-  if (backend_ == Backend::Fram) return persistFram(entry, slot);
+  if (backend_ == Backend::Mram) return persistMram(entry, slot);
   return persistNvsJournal(entry, slot);
 }
 
 bool ReplayStore::flushAll(const ReplayEntry* in, size_t count) {
   if (!healthy_ || !in || count != Config::LORA_REPLAY_SOURCE_CACHE_SIZE) return false;
-  if (backend_ == Backend::Fram) {
+  if (backend_ == Backend::Mram) {
     for (size_t i = 0; i < count; ++i)
-      if (validEntry(in[i]) && !persistFram(in[i], i)) return false;
+      if (validEntry(in[i]) && !persistMram(in[i], i)) return false;
     return true;
   }
   return compactNvsJournal(in, count);

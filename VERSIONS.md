@@ -20,3 +20,6 @@
 | zlib | ESP-IDF bundled component | transitive | `ESP-IDF v5.5.4 bundled` | Bundled by ESP-IDF v5.5.4; cannot be independently pinned. |
 
 ESP-IDF v5.5.4 and Arduino-ESP32 core v3.3.9 are resolved by pioarduino `55.03.39` rather than independently declared component versions.
+
+| MramStorage driver | native (repo) | — | inline | Everspin MR25H256 SPI, 40 MHz, Mode 0. No external dependency. |
+| Everspin MR25H256 | hardware | — | device | 256 Kbit SPI MRAM, SOIC-8, CS = GPIO42. |
