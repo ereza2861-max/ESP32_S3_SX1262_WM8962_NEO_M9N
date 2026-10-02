@@ -25,7 +25,7 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
   uint8_t prefix[offsetof(DiskRecord, sample)] = {};
   if (file.read(prefix, prefixLen) != prefixLen) return false;
   uint8_t version = prefix[offsetof(DiskRecord, version)];
-  if (version != VERSION && version != LEGACY_VERSION) return false;
+  if (version != VERSION && version != LEGACY_VERSION_V2 && version != LEGACY_VERSION) return false;
   uint32_t magic = 0;
   std::memcpy(&magic, prefix, sizeof(magic));
   if (magic != MAGIC) return false;
@@ -33,9 +33,25 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
   std::memcpy(reinterpret_cast<uint8_t*>(&out), prefix, prefixLen);
   if (version == VERSION) {
     if (file.read(reinterpret_cast<uint8_t*>(&out.sample), sizeof(out.sample)) != sizeof(out.sample) ||
+        file.read(reinterpret_cast<uint8_t*>(&out.sourceSequence), sizeof(out.sourceSequence)) != sizeof(out.sourceSequence) ||
+        file.read(reinterpret_cast<uint8_t*>(&out.schemaVersion), sizeof(out.schemaVersion)) != sizeof(out.schemaVersion) ||
+        file.read(reinterpret_cast<uint8_t*>(&out.firmwareVersion), sizeof(out.firmwareVersion)) != sizeof(out.firmwareVersion) ||
         file.read(reinterpret_cast<uint8_t*>(&out.crc32), sizeof(out.crc32)) != sizeof(out.crc32))
       return false;
     recordSize = sizeof(DiskRecord);
+  } else if (version == LEGACY_VERSION_V2) {
+    LegacyDiskRecordV2 legacy{};
+    std::memcpy(reinterpret_cast<uint8_t*>(&legacy), prefix, prefixLen);
+    if (file.read(reinterpret_cast<uint8_t*>(&legacy.sample), sizeof(legacy.sample)) != sizeof(legacy.sample) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.sourceSequence), sizeof(legacy.sourceSequence)) != sizeof(legacy.sourceSequence) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.crc32), sizeof(legacy.crc32)) != sizeof(legacy.crc32))
+      return false;
+    out.sourceSequence = legacy.sourceSequence;
+    out.schemaVersion = 0;
+    out.firmwareVersion = 0;
+    out.sample = legacy.sample;
+    out.crc32 = legacy.crc32;
+    recordSize = sizeof(LegacyDiskRecordV2);
   } else {
     LegacyDiskRecord legacy{};
     std::memcpy(reinterpret_cast<uint8_t*>(&legacy), prefix, prefixLen);
@@ -43,6 +59,8 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
         file.read(reinterpret_cast<uint8_t*>(&legacy.crc32), sizeof(legacy.crc32)) != sizeof(legacy.crc32))
       return false;
     out.sourceSequence = 0;
+    out.schemaVersion = 0;
+    out.firmwareVersion = 0;
     out.sample = legacy.sample;
     out.crc32 = legacy.crc32;
     recordSize = sizeof(LegacyDiskRecord);
@@ -50,7 +68,7 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
   const uint32_t expected = crc32(
       reinterpret_cast<const uint8_t*>(&out),
       offsetof(DiskRecord, crc32));
-  // Legacy CRC covers the legacy record layout, not the widened v2 record.
+  // Legacy CRCs cover their historical record layout, not the widened V3 record.
   if (version == LEGACY_VERSION) {
     LegacyDiskRecord legacy{};
     std::memcpy(reinterpret_cast<uint8_t*>(&legacy), reinterpret_cast<const uint8_t*>(&out),
@@ -58,7 +76,16 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
     legacy.sample = out.sample;
     legacy.crc32 = out.crc32;
     if (legacy.crc32 != crc32(reinterpret_cast<const uint8_t*>(&legacy),
-                                           offsetof(LegacyDiskRecord, crc32))) return false;
+                               offsetof(LegacyDiskRecord, crc32))) return false;
+  } else if (version == LEGACY_VERSION_V2) {
+    LegacyDiskRecordV2 legacy{};
+    std::memcpy(reinterpret_cast<uint8_t*>(&legacy), reinterpret_cast<const uint8_t*>(&out),
+                offsetof(LegacyDiskRecordV2, sample));
+    legacy.sample = out.sample;
+    legacy.sourceSequence = out.sourceSequence;
+    legacy.crc32 = out.crc32;
+    if (legacy.crc32 != crc32(reinterpret_cast<const uint8_t*>(&legacy),
+                               offsetof(LegacyDiskRecordV2, crc32))) return false;
   } else if (out.crc32 != expected) {
     return false;
   }
@@ -273,8 +300,7 @@ bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requi
     ++drops_;
     return false;
   }
-  (void)schemaVersion;
-  (void)firmwareVersion;
+  // Preserve provenance metadata in the durable record; legacy records remain readable.
   const uint32_t id = sampleId(sample);
   for (size_t i = 0; i < count_; ++i)
     if (entries_[i].valid && entries_[i].sampleId == id) return true;
@@ -297,6 +323,8 @@ bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requi
   record.payloadLen = sizeof(SensorReader::SensorSample);
   record.priority = priority;
   record.sourceSequence = sourceSequence;
+  record.schemaVersion = schemaVersion;
+  record.firmwareVersion = firmwareVersion;
   record.sample = sample;
 
   size_t currentBytes = 0;
@@ -360,6 +388,8 @@ bool SensorSpool::peek(Pending& out) const {
   out.source = entry.source;
   out.priority = entry.priority;
   out.sourceSequence = entry.sourceSequence;
+  out.schemaVersion = record.schemaVersion;
+  out.firmwareVersion = record.firmwareVersion;
   return true;
 }
 

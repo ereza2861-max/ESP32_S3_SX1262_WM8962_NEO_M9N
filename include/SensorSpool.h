@@ -23,6 +23,8 @@ public:
     uint8_t source = LOCAL_BLE;
     uint8_t priority = 0;
     uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = 0;
   };
 
   bool begin();
@@ -46,8 +48,10 @@ private:
   static constexpr char PATH[] = "/SENSOR/SPOOL.Q";
   static constexpr char TMP_PATH[] = "/SENSOR/SPOOL.TMP";
   static constexpr uint32_t MAGIC = 0x53504C51UL; // "SPLQ"
-  static constexpr uint8_t VERSION = 2;
+  // V3 adds schema/firmware metadata; V1 and V2 readers remain supported.
+  static constexpr uint8_t VERSION = 3;
   static constexpr uint8_t LEGACY_VERSION = 1;
+  static constexpr uint8_t LEGACY_VERSION_V2 = 2;
   static constexpr uint8_t TYPE_DATA = 1;
   static constexpr uint8_t TYPE_ACK = 2;
 
@@ -64,6 +68,8 @@ private:
     uint16_t priority = 0;
     SensorReader::SensorSample sample{};
     uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = 0;
     uint32_t crc32 = 0;
   };
 #pragma pack(pop)
@@ -82,11 +88,31 @@ private:
     SensorReader::SensorSample sample{};
     uint32_t crc32 = 0;
   };
+
+  struct LegacyDiskRecordV2 {
+    uint32_t magic = MAGIC;
+    uint8_t version = LEGACY_VERSION_V2;
+    uint8_t type = 0;
+    uint8_t flags = 0;
+    uint8_t source = LOCAL_BLE;
+    uint32_t recordId = 0;
+    uint32_t sampleId = 0;
+    uint16_t payloadLen = 0;
+    uint16_t priority = 0;
+    SensorReader::SensorSample sample{};
+    uint32_t sourceSequence = 0;
+    uint32_t crc32 = 0;
+  };
 #pragma pack(pop)
-  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecord) + sizeof(uint32_t),
-                "sensor spool record layout changed");
+  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecordV2) + sizeof(uint8_t) + sizeof(uint32_t),
+                "sensor spool v3 record layout changed");
+  static_assert(sizeof(LegacyDiskRecordV2) == sizeof(LegacyDiskRecord) + sizeof(uint32_t),
+                "sensor spool v2 record layout changed");
   static_assert(std::is_trivially_copyable<SensorReader::SensorSample>::value, "sensor sample must be wire-copyable");
   static_assert(sizeof(DiskRecord) <= 128, "sensor spool record unexpectedly large");
+  // Current limits leave enough SD space for the complete indexed record budget.
+  static_assert(MAX_RECORDS * sizeof(DiskRecord) <= MAX_BYTES,
+                "sensor spool record capacity exceeds byte budget");
 
   struct IndexEntry {
     uint32_t recordId = 0;

@@ -36,7 +36,10 @@ public:
   bool publishSensorData(uint32_t nodeId, const char* nodeName,
                          uint16_t sensorId, const char* sensorName,
                          const char* unit, float value, uint8_t quality,
-                         int16_t rssi, uint64_t timestampMs);
+                         int16_t rssi, uint64_t timestampMs,
+                          uint32_t sourceSequence = 0,
+                          uint8_t schemaVersion = 0,
+                          uint32_t firmwareVersion = 0);
   // F1-TODO-3: Service certificate rotation readiness without contacting a backend.
   void serviceRotation();
   // F1-TODO-6: Verify a candidate certificate/CA pair without persisting it.
@@ -88,6 +91,9 @@ private:
     uint8_t quality = 0;
     int16_t rssi = -127;
     uint64_t timestampMs = 0;
+    uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = 0;
     char nodeName[25] = {};
     char sensorName[25] = {};
     char unit[13] = {};

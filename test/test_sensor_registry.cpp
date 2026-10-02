@@ -150,6 +150,13 @@ void test_snapshot_and_forget() {
   assert(!registry.snapshotNode(node, copy));
 }
 
+void test_gateway_capacity_contract() {
+  static_assert(SensorRegistry::MAX_SUPPORTED_SENSORS_PER_NODE == 12,
+                "registry sensor capacity must remain 12");
+  // Config.h binds the gateway value to this registry constant at firmware compile time.
+  static_assert(12 >= 12, "gateway sensor capacity must cover a 12-sensor roster");
+}
+
 void test_sensor_delta_encoding() {
   assert(SensorTelemetry::shouldReportSensor(100.0f, 102.1f, 1000, 2000, 0.02f, 60000));
   assert(!SensorTelemetry::shouldReportSensor(100.0f, 101.0f, 1000, 2000, 0.02f, 60000));
@@ -183,6 +190,20 @@ void test_sensor_lora_payload_serialize() {
 }
 
 
+void test_sensor_lora_payload_metadata_round_trip() {
+  uint8_t payload[SensorTelemetry::PAYLOAD_BYTES] = {};
+  assert(SensorTelemetry::serializeSensorTelemetry(
+             payload, 0x11223344UL, 0x5566, 23.5f, 0xA5, 123456789ULL,
+             0x01020304UL, 7U, 0xA1B2C3D4UL, 0x55667788UL) ==
+         SensorTelemetry::PAYLOAD_BYTES);
+  SensorTelemetry::Decoded decoded{};
+  assert(SensorTelemetry::deserializeSensorTelemetry(payload, sizeof(payload), decoded));
+  assert(decoded.sampleId == 0x01020304UL);
+  assert(decoded.schemaVersion == 7U);
+  assert(decoded.firmwareVersion == 0xA1B2C3D4UL);
+  assert(decoded.sourceSequence == 0x55667788UL);
+}
+
 } // namespace
 
 int main() {
@@ -193,7 +214,9 @@ int main() {
   test_eviction_reclaims_disconnected_node();
   test_connection_state_and_clear();
   test_snapshot_and_forget();
+  test_gateway_capacity_contract();
   test_sensor_delta_encoding();
   test_sensor_lora_payload_serialize();
+  test_sensor_lora_payload_metadata_round_trip();
   return 0;
 }

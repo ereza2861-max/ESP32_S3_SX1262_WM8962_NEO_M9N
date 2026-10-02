@@ -408,7 +408,8 @@ constexpr uint32_t TASK_WDT_TIMEOUT_MS = 10000;
 #define SENSOR_MAX_NODES 2
 #endif
 #ifndef SENSOR_MAX_SENSORS_PER_NODE
-#define SENSOR_MAX_SENSORS_PER_NODE 8
+// Gateway capacity matches the largest existing Sensor Node profile (12).
+#define SENSOR_MAX_SENSORS_PER_NODE 12
 #endif
 #ifndef SENSOR_SCAN_INTERVAL_MS
 #define SENSOR_SCAN_INTERVAL_MS 5000UL
@@ -481,6 +482,9 @@ static_assert(SENSOR_MAX_NODES >= 1 && SENSOR_MAX_NODES <= 3,
               "SENSOR_MAX_NODES must be 1..3 with the default NimBLE connection budget");
 static_assert(SENSOR_MAX_SENSORS_PER_NODE >= 1 && SENSOR_MAX_SENSORS_PER_NODE <= 16,
               "SENSOR_MAX_SENSORS_PER_NODE must be 1..16");
+// Queue depth is intentionally unchanged; it already covers a full 12-sensor node burst.
+static_assert(SENSOR_LORA_QUEUE_DEPTH >= SENSOR_MAX_SENSORS_PER_NODE,
+              "SENSOR_LORA_QUEUE_DEPTH must cover one full sensor roster");
 static_assert(SENSOR_SCAN_WINDOW_MS > 0 && SENSOR_SCAN_WINDOW_MS <= SENSOR_SCAN_INTERVAL_MS,
               "SENSOR_SCAN_WINDOW_MS must be <= SENSOR_SCAN_INTERVAL_MS");
 static_assert(SENSOR_MTU >= 23 && SENSOR_MTU <= 247,

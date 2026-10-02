@@ -16,8 +16,9 @@ DESCRIPTOR_UUID = "7f2a0000-7b2a-4a6e-9a9f-1b7f7e000003"
 VALUE_UUID = "7f2a0000-7b2a-4a6e-9a9f-1b7f7e000004"
 PROTOCOL_VERSION = 1
 DESCRIPTOR_REQUEST_LIST = 0x01
-DESCRIPTOR_RESPONSE_BYTES = 67
-SENSOR_VALUE_BYTES = 15
+DESCRIPTOR_RESPONSE_BYTES = 68
+SENSOR_VALUE_BYTES = 20
+MAX_SENSORS_PER_NODE = 12
 
 NODE_NAME = os.getenv("FIELDRADIO_SENSOR_NAME", "FieldRadio-Sensor-C3")
 NODE_ADDRESS = os.getenv("FIELDRADIO_SENSOR_ADDRESS", "").strip()
@@ -75,10 +76,12 @@ def parse_descriptor(raw: bytes) -> dict:
     datatype = raw[44]
     period_ms = int.from_bytes(raw[61:65], "little")
     flags = int.from_bytes(raw[65:67], "little")
+    schema_version = raw[67]
     return {
         "magic": magic, "version": version, "index": index, "total": total,
         "id": sid, "type": dtype, "name": name, "unit": unit,
         "datatype": datatype, "periodMs": period_ms, "flags": flags,
+        "schemaVersion": schema_version,
     }
 
 
@@ -95,7 +98,7 @@ async def discover_descriptors(client: BleakClient) -> list[dict]:
     assert first["magic"] == 0x5344, f"Bad descriptor magic: {first['magic']:#x}"
     assert first["version"] == PROTOCOL_VERSION, f"Unsupported protocol version {first['version']}"
     assert first["index"] == 0
-    assert 1 <= first["total"] <= 16
+    assert 1 <= first["total"] <= MAX_SENSORS_PER_NODE
     descriptors.append(first)
 
     for index in range(1, first["total"]):

@@ -8,6 +8,11 @@
 #include <freertos/queue.h>
 #include <atomic>
 
+// Keep the runtime registry and compile-time gateway capacity on one value.
+static_assert(Config::SENSOR_MAX_SENSORS_PER_NODE_VALUE ==
+                  SensorRegistry::MAX_SUPPORTED_SENSORS_PER_NODE,
+              "gateway sensor capacity constants must remain synchronized");
+
 // BLE sensor transport terminates here; radio/MQTT forwarding is queued so BLE
 // callbacks never perform network or radio I/O.
 class SensorReader {

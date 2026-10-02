@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cstdint>
 #include <deque>
+// Queue depth remains 16 by frozen decision; a single 12-sensor roster fits without changing it.
+static_assert(16 >= 12, "sensor queue depth must cover a 12-sensor roster");
 
 enum class Policy { DROP_NEWEST, DROP_OLDEST };
 

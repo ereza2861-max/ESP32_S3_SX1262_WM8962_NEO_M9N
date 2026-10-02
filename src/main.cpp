@@ -907,7 +907,8 @@ static void taskSensorForward(void*) {
                                    pending.sample.sensorId, pending.sample.sensorName,
                                    pending.sample.unit, pending.sample.value,
                                    pending.sample.quality, pending.sample.rssi,
-                                   pending.sample.timestampMs)) {
+                                   pending.sample.timestampMs, pending.sourceSequence,
+                                   pending.schemaVersion, pending.firmwareVersion)) {
           (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_MQTT);
         }
       }
@@ -939,8 +940,8 @@ static void taskSensorForward(void*) {
                                      pending.sample.timestampMs,
                                      pending.sampleId,
                                      pending.sourceSequence,
-                                     1,
-                                     SensorProtocol::FIRMWARE_VERSION)) {
+                                     pending.schemaVersion,
+                                     pending.firmwareVersion)) {
           (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_LORA);
           if (state) {
             state->nodeId = pending.sample.nodeId;

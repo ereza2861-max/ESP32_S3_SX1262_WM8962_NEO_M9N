@@ -15,7 +15,8 @@ using TickType_t = uint32_t;
 class SensorRegistry {
 public:
   static constexpr size_t MAX_SUPPORTED_NODES = 8;
-  static constexpr size_t MAX_SUPPORTED_SENSORS_PER_NODE = 16;
+  // Gateway registry capacity is frozen at the largest existing C3 profile roster: 12.
+  static constexpr size_t MAX_SUPPORTED_SENSORS_PER_NODE = 12;
 
   struct Node {
     SensorProtocol::BleAddress address{};

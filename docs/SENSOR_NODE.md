@@ -120,10 +120,13 @@ node must not create a second protocol copy.
 
 - Service: `7f2a0000-7b2a-4a6e-9a9f-1b7f7e000001`
 - Descriptor request: WRITE/WRITE_NR, 3 bytes `{version, op, index}`
-- Descriptor data: READ, 67 bytes `SensorDescriptorResponse`
-- Sensor value: NOTIFY, 15 bytes `SensorValue`
+- Descriptor data: READ, 68 bytes `SensorDescriptorResponse`
+- Sensor value: NOTIFY, 20 bytes `SensorValue`
 
 The gateway's BLE Sensor Reader is the corresponding central/GATT client.
+The gateway registry supports **12 sensors per sensor node**, matching the
+largest existing C3 profile roster; the C3 profiles are not reduced to fit an
+older gateway limit.
 
 ## Runtime and deep sleep
 

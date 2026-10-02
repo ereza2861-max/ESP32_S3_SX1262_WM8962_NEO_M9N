@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-10-02 — Audit contract fixes
+- Raised gateway sensor capacity to 12 and synchronized the registry/queue invariants.
+- Persisted SensorSpool schema/firmware metadata in V3 records with V1/V2 compatibility.
+- Forwarded source sequence, schema version, and firmware version through existing LoRa telemetry and MQTT JSON.
+- Fixed the `sendSensorTelemetry()` 9-argument definition mismatch.
+- Updated active BLE documentation/HIL checks to the canonical 68-byte descriptor and 20-byte sensor-value contract.
+- Added native/host contract tests for metadata propagation and capacity invariants.
+
+
 ## 2026-09-30 — FRAM → MRAM storage reconstruction
 - Migrated ReplayStore from the obsolete I2C FRAM backend to native Everspin MR25H256 SPI MRAM.
 - Migrated PersistentConfig runtime storage to MRAM A/B slots with commit-last atomicity and an `MRM1` migration marker.

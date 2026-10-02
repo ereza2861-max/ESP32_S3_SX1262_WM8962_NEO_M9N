@@ -5773,14 +5773,19 @@ void LoRaManager::serviceFragmentTx() {
 bool LoRaManager::sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,
                                         float value, uint8_t quality,
                                         uint64_t timestampMs,
-                                        uint32_t sampleId) {
+                                        uint32_t sampleId,
+                                        uint32_t sourceSequence,
+                                        uint8_t schemaVersion,
+                                        uint32_t firmwareVersion) {
   RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(20));
   if (!radioGuard.ok()) return false;
   if (!ready_ || nodeId == 0 || sensorId == 0 || !isfinite(value)) return false;
 
   uint8_t payload[Config::SENSOR_LORA_MAX_PAYLOAD] = {};
   if (SensorTelemetry::serializeSensorTelemetry(payload, nodeId, sensorId, value,
-                                                  quality, timestampMs, sampleId) !=
+                                                  quality, timestampMs, sampleId,
+                                                  schemaVersion, firmwareVersion,
+                                                  sourceSequence) !=
       Config::SENSOR_LORA_MAX_PAYLOAD) return false;
   // Keep the sensor record as an opaque binary payload. transmitHopped() adds
   // the authenticated routing envelope and consumes the normal duty budget.

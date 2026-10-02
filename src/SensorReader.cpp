@@ -7,6 +7,11 @@
 #include "BlePeerStore.h"
 #include <freertos/queue.h>
 
+static_assert(sizeof(SensorProtocol::SensorDescriptorResponse) == 68,
+              "BLE descriptor response contract must remain 68 bytes");
+static_assert(sizeof(SensorProtocol::SensorValue) == 20,
+              "BLE sensor value contract must remain 20 bytes");
+
 #if SENSOR_READER_ENABLED
 #include <NimBLEDevice.h>
 #include <NimBLEClient.h>
@@ -631,7 +636,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     return false;
   }
   const NimBLEAttValue response = slot->descriptor->readValue();
-  if (response.size() < 67U) {
+  if (response.size() < sizeof(SensorProtocol::SensorDescriptorResponse)) {
     cleanupSlot(*slot, true);
     return false;
   }
@@ -656,7 +661,7 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
       return false;
     }
     const NimBLEAttValue item = slot->descriptor->readValue();
-    if (item.size() < 67U) {
+    if (item.size() < sizeof(SensorProtocol::SensorDescriptorResponse)) {
       cleanupSlot(*slot, true);
       return false;
     }

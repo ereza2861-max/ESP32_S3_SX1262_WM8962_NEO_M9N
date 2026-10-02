@@ -881,7 +881,10 @@ bool MqttClientManager::publish(const String& topic, const String& payload, bool
 bool MqttClientManager::publishSensorData(uint32_t nodeId, const char* nodeName,
                                             uint16_t sensorId, const char* sensorName,
                                             const char* unit, float value, uint8_t quality,
-                                            int16_t rssi, uint64_t timestampMs) {
+                                            int16_t rssi, uint64_t timestampMs,
+                                            uint32_t sourceSequence,
+                                            uint8_t schemaVersion,
+                                            uint32_t firmwareVersion) {
   if (!sensorQueue_ || nodeId == 0 || sensorId == 0 || !nodeName || !sensorName ||
       !unit || !std::isfinite(value)) return false;
   SensorSample sample{};
@@ -891,6 +894,9 @@ bool MqttClientManager::publishSensorData(uint32_t nodeId, const char* nodeName,
   sample.quality = quality;
   sample.rssi = rssi;
   sample.timestampMs = timestampMs;
+  sample.sourceSequence = sourceSequence;
+  sample.schemaVersion = schemaVersion;
+  sample.firmwareVersion = firmwareVersion;
   std::strncpy(sample.nodeName, nodeName, sizeof(sample.nodeName) - 1);
   std::strncpy(sample.sensorName, sensorName, sizeof(sample.sensorName) - 1);
   std::strncpy(sample.unit, unit, sizeof(sample.unit) - 1);
@@ -1055,6 +1061,12 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
   payload += valueText;
   payload += ",\"sample_id\":";
   payload += String(static_cast<unsigned long>(SensorSpool::sampleId(sample)));
+  payload += ",\"source_sequence\":";
+  payload += String(static_cast<unsigned long>(sample.sourceSequence));
+  payload += ",\"schema_version\":";
+  payload += String(static_cast<unsigned>(sample.schemaVersion));
+  payload += ",\"firmware_version\":";
+  payload += String(static_cast<unsigned long>(sample.firmwareVersion));
   payload += ",\"quality\":";
   payload += String(static_cast<unsigned>(sample.quality));
   payload += ",\"rssi\":";
