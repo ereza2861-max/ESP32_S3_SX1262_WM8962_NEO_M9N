@@ -36,7 +36,7 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
                                 uint16_t sensorId, float value, uint8_t quality,
                                 uint64_t timestampMs, uint32_t sampleId,
                                 uint8_t schemaVersion, uint32_t firmwareVersion,
-                                uint32_t sourceSequence) {
+                                uint32_t sourceSequence, uint32_t originNodeId) {
   if (!out || nodeId == 0 || sensorId == 0 || !std::isfinite(value)) return 0;
   std::memset(out, 0, PAYLOAD_BYTES);
   out[0] = MAGIC;
@@ -51,6 +51,7 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
   out[PADDING_SCHEMA_VERSION_OFFSET] = schemaVersion;
   putU32(out + PADDING_FIRMWARE_VERSION_OFFSET, firmwareVersion);
   putU32(out + PADDING_SOURCE_SEQUENCE_OFFSET, sourceSequence);
+  putU32(out + PADDING_ORIGIN_NODE_ID_OFFSET, originNodeId);
   return PAYLOAD_BYTES;
 }
 

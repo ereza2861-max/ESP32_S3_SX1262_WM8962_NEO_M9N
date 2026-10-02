@@ -46,3 +46,18 @@ The repository includes native certificate/CSR/expiry tests and an HIL procedure
 for certificate NVS A/B power-loss validation. Target ESP32-S3 build validation
 must still be executed in the PlatformIO/CI environment because PlatformIO is
 not installed in this audit runtime.
+
+
+## Audit response status — 2026-10-02
+
+The audit-response patch closes the source-level blocker defects and the locked
+functional/security decisions from `auditreport.md`. The C3 build description
+is canonicalized to `sensor_node_esp32c3/platformio.ini`; the former root C3
+environment was removed because PlatformIO treated its project-local `src_dir`
+and `include_dir` settings as misleading root-environment configuration.
+
+Source-level implementations now include persistent sensor calibration
+migration, high-water source sequences, MRAM application deduplication,
+authenticated sensor-origin handling, LoRa sensor batch ACKs, persist-first
+BLE commands, explicit charger-state semantics, placeholder-profile disable
+flags, and a persistent watchdog maintenance latch.

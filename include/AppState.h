@@ -145,6 +145,7 @@ struct RuntimeState {
   float batteryMinV = NAN;
   float batteryMaxV = NAN;
   bool batteryChargeProbable = false;
+  BatteryChargerState chargerState = BatteryChargerState::UNKNOWN;
   String lastMessage;
   MessageHistoryEntry messageHistory[Config::MESSAGE_HISTORY_SIZE] = {};
   size_t messageHistoryNext = 0;

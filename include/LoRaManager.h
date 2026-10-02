@@ -10,6 +10,8 @@
 #include "RfDetector.h"
 #include "RadioArbiter.h"
 #include "LoRaEcdhRekey.h"
+#include "SensorBatchAck.h"
+#include "SensorDedupStore.h"
 #include "SensorProtocol.h"
 
 struct ChannelScanResult {
@@ -95,6 +97,13 @@ public:
   uint32_t forwardQueued() const;
   uint32_t forwardLastDropMs() const { return forwardLastDropMs_; }
   bool popRemoteSensorTelemetry(RemoteSensorTelemetry& out);
+  struct SensorBatchAckRecord {
+    uint32_t nodeId = 0;
+    uint16_t sensorId = 0;
+    uint32_t baseSequence = 0;
+    uint32_t bitmap = 0;
+  };
+  bool popSensorBatchAck(SensorBatchAckRecord& out);
   uint32_t fragmentEvictions() const { return fragmentEvictions_; }
   uint32_t fragmentDrops() const { return fragmentDrops_; }
   uint64_t dutyBudgetUs() const { return dutyTokensUs_; }
@@ -123,6 +132,10 @@ private:
   SemaphoreHandle_t textStateMutex_ = nullptr;
   SemaphoreHandle_t remoteSensorMutex_ = nullptr;
   static constexpr size_t REMOTE_SENSOR_QUEUE_DEPTH = Config::SENSOR_LORA_QUEUE_DEPTH;
+  static constexpr size_t SENSOR_BATCH_ACK_QUEUE_DEPTH = 16;
+  bool queueSensorBatchAck(uint32_t nodeId, uint16_t sensorId, uint32_t sourceSequence);
+  void serviceSensorBatchAck();
+  bool handleSensorBatchAck(const uint8_t* payload, size_t len);
   static LoRaManager* instance_;
   static void onDio1();
   struct ForwardPacket {
@@ -316,6 +329,12 @@ private:
   RemoteSensorTelemetry remoteSensorQueue_[REMOTE_SENSOR_QUEUE_DEPTH]{};
   size_t remoteSensorHead_ = 0;
   size_t remoteSensorCount_ = 0;
+  SensorBatchAckRecord sensorBatchAckQueue_[SENSOR_BATCH_ACK_QUEUE_DEPTH]{};
+  size_t sensorBatchAckHead_ = 0;
+  size_t sensorBatchAckCount_ = 0;
+  SensorBatchAckRecord pendingSensorAcks_[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
+  size_t pendingSensorAckCount_ = 0;
+  uint32_t pendingSensorAckSinceMs_ = 0;
   uint32_t forwardRetryPersistId_ = 0;
   uint16_t fragmentMessageId_ = 0;
   struct VoiceTxSlot {
@@ -399,6 +418,7 @@ private:
   size_t dedupNext_ = 0;
   ReplayEntry replayCache_[Config::LORA_REPLAY_SOURCE_CACHE_SIZE] = {};
   ReplayStore replayStore_;
+  SensorDedupStore sensorDedupStore_;
   RfDetector rfDetector_;
   bool replayStateLoaded_ = false;
   uint32_t radioRecoveryAttempts_ = 0;

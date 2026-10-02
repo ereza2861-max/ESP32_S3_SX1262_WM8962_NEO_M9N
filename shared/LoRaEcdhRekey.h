@@ -1,7 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#include "Config.h"
+#include "ConfigContract.h"
 
 /*
  * X25519/ECDH rekey protocol implementation.
@@ -23,8 +23,8 @@
 
 namespace LoRaEcdhRekey {
 
-constexpr size_t PUBLIC_KEY_BYTES = Config::LORA_ECDH_PUBLIC_KEY_BYTES;
-constexpr size_t BEACON_BYTES = Config::LORA_ECDH_BEACON_BYTES;
+constexpr size_t PUBLIC_KEY_BYTES = ConfigContract::LORA_ECDH_PUBLIC_KEY_BYTES;
+constexpr size_t BEACON_BYTES = ConfigContract::LORA_ECDH_BEACON_BYTES;
 constexpr size_t SHARED_SECRET_BYTES = 32;
 constexpr size_t AES_KEY_BYTES = 16;
 constexpr size_t HMAC_KEY_BYTES = 32;
@@ -32,24 +32,24 @@ constexpr size_t SESSION_KEY_BYTES = AES_KEY_BYTES + HMAC_KEY_BYTES;
 constexpr char HKDF_DOMAIN_SEPARATOR[] = "FieldRadio-ECDH-Rekey-v1";
 
 inline uint32_t epochNumber(uint32_t epochSec) {
-  return epochSec / Config::LORA_REKEY_PERIOD_SEC;
+  return epochSec / ConfigContract::LORA_REKEY_PERIOD_SEC;
 }
 
 inline bool sessionEpochForDelta(uint32_t epochSec, uint8_t keyEpochDelta,
                                  uint32_t& keyEpochSec) {
   keyEpochSec = 0;
   if (epochSec == 0 ||
-      (keyEpochDelta != Config::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT &&
-       keyEpochDelta != Config::LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS))
+      (keyEpochDelta != ConfigContract::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT &&
+       keyEpochDelta != ConfigContract::LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS))
     return false;
 
   const uint32_t epoch = epochNumber(epochSec);
-  if (keyEpochDelta == Config::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT) {
+  if (keyEpochDelta == ConfigContract::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT) {
     keyEpochSec = epochSec;
     return true;
   }
   if (epoch == 0) return false;
-  keyEpochSec = (epoch - 1U) * Config::LORA_REKEY_PERIOD_SEC;
+  keyEpochSec = (epoch - 1U) * ConfigContract::LORA_REKEY_PERIOD_SEC;
   return true;
 }
 
@@ -76,8 +76,8 @@ inline uint32_t getLe32(const uint8_t* src) {
 
 inline size_t encodeBeacon(const Beacon& beacon, uint8_t* out, size_t capacity) {
   if (!out || capacity < BEACON_BYTES || !beacon.valid) return 0;
-  out[0] = Config::LORA_ECDH_BEACON_MAGIC;
-  out[1] = Config::LORA_ECDH_PROTOCOL_VERSION;
+  out[0] = ConfigContract::LORA_ECDH_BEACON_MAGIC;
+  out[1] = ConfigContract::LORA_ECDH_PROTOCOL_VERSION;
   putLe32(out + 2, beacon.epochSec);
   for (size_t i = 0; i < PUBLIC_KEY_BYTES; ++i) {
     out[6 + i] = beacon.ephemeralPublic[i];
@@ -89,8 +89,8 @@ inline size_t encodeBeacon(const Beacon& beacon, uint8_t* out, size_t capacity) 
 inline bool decodeBeacon(const uint8_t* data, size_t length, Beacon& out) {
   out = Beacon{};
   if (!data || length < BEACON_BYTES ||
-      data[0] != Config::LORA_ECDH_BEACON_MAGIC ||
-      data[1] != Config::LORA_ECDH_PROTOCOL_VERSION ||
+      data[0] != ConfigContract::LORA_ECDH_BEACON_MAGIC ||
+      data[1] != ConfigContract::LORA_ECDH_PROTOCOL_VERSION ||
       getLe32(data + 2) == 0) {
     return false;
   }
@@ -139,7 +139,7 @@ inline bool epochWithinSkew(uint32_t localEpochSec, uint32_t peerEpochSec) {
 inline bool ecdhBeaconWireAllowed(uint8_t wireVersion, uint8_t type) {
   // G10: before V5 is implemented, only the authenticated V3 ECDH beacon
   // remains on-air when the feature is enabled.
-  return wireVersion == 3U && type == Config::LORA_TYPE_NEIGHBOR_BEACON;
+  return wireVersion == 3U && type == ConfigContract::LORA_TYPE_NEIGHBOR_BEACON;
 }
 
 inline bool epochWithinRetention(uint32_t localEpochSec,
@@ -148,14 +148,14 @@ inline bool epochWithinRetention(uint32_t localEpochSec,
   const uint32_t delta = localEpochSec >= peerEpochSec
       ? localEpochSec - peerEpochSec
       : peerEpochSec - localEpochSec;
-  return delta <= Config::LORA_ECDH_KEY_RETENTION_SEC;
+  return delta <= ConfigContract::LORA_ECDH_KEY_RETENTION_SEC;
 }
 
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
 
 class KeyMaterial {
 public:
-  static constexpr size_t KEY_BYTES = LORA_ECDH_PUBLIC_KEY_BYTES;
+  static constexpr size_t KEY_BYTES = PUBLIC_KEY_BYTES;
 
   KeyMaterial() = default;
   ~KeyMaterial();

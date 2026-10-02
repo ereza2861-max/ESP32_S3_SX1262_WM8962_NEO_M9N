@@ -130,3 +130,17 @@ custom EST CA provisioning and trust-anchor use, EST auth modes 1/2, encrypted-N
 credential persistence, bootstrap-token cleanup, rotated certificate history,
 bounded PEM encoding, mock-server isolation/authentication, configuration
 concurrency coverage, and the merged HIL power-loss procedure.
+
+
+## Audit response disposition — 2026-10-02
+
+Closed in source: GAP-I-01, GAP-I-02, GAP-I-03, GAP-R-03, GAP-S-01,
+GAP-X-01, GAP-X-02, GAP-SEC-03, GAP-D-01, GAP-D-02, GAP-D-03 and the
+locked Q-A01/Q-A02/Q-B01/Q-B02/Q-C01/Q-C02/Q-C03/Q-D01/Q-E01/Q-E02/Q-F01
+decisions.
+
+Deferred as evidence-only or hardware-dependent: physical PCB validation,
+RF/HIL interoperability, Secure Boot/Flash Encryption/eFuse manufacturing
+evidence, brownout/power-loss hardware evidence, and electrical validation of
+the GPIO3 mux and sensor fixtures. These cannot be proven by a source patch
+without inventing hardware evidence.

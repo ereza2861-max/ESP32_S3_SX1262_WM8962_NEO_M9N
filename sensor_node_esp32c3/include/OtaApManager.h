@@ -38,6 +38,7 @@ class OtaApManager {
 public:
   static constexpr uint32_t OTA_AP_WINDOW_MS = 10UL * 60UL * 1000UL;  // 10 min
   using ProfileChangeCallback = bool (*)(uint8_t profile);
+  using RecoveryClearCallback = bool (*)();
 
   OtaApManager() = default;
 
@@ -69,6 +70,9 @@ public:
   void setProfileChangeCallback(ProfileChangeCallback callback) {
     profileChangeCallback_ = callback;
   }
+  void setRecoveryClearCallback(RecoveryClearCallback callback) {
+    recoveryClearCallback_ = callback;
+  }
 
 private:
   bool startAp();
@@ -80,6 +84,7 @@ private:
   void handleUploadDone();
   void handleStatus();
   void handleProfile();
+  void handleRecoveryClear();
   bool checkOtaPassword(const String& supplied);
   bool checkSessionToken(const String& supplied) const;
   String sessionToken_;
@@ -92,4 +97,5 @@ private:
   // Green-field OTA has no station-mode credential path.
   String otaPassword_;
   ProfileChangeCallback profileChangeCallback_ = nullptr;
+  RecoveryClearCallback recoveryClearCallback_ = nullptr;
 };

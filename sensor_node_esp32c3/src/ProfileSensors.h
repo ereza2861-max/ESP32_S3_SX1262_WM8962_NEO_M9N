@@ -31,7 +31,8 @@ public:
   // registeredCount().
   bool begin(ProfileConfig::Profile profile,
              SensorDriverRegistry& drivers,
-             SensorRegistry& registry);
+             SensorRegistry& registry,
+             bool placeholderDisabled = true);
 
   // Number of sensors actually registered by the last begin() call.
   size_t registeredCount() const { return registeredCount_; }

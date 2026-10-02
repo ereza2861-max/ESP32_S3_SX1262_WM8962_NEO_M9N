@@ -138,6 +138,8 @@ struct CommandRequest {
   uint32_t argument = 0;
 };
 
+constexpr uint16_t COMMAND_ERROR_PERSISTENCE_FAILED = 12;
+
 struct CommandResponse {
   uint8_t commandId = 0;
   uint32_t sequence = 0;

@@ -898,8 +898,11 @@ bool SensorReader::requestRefreshNode(size_t nodeIndex) {
 
 uint32_t SensorReader::peerMacFailures() const { return gPeerMacFailures.load(std::memory_order_relaxed); }
 
-bool SensorReader::isEnabled() const { return config.sensorReaderEnabled; }
-  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+bool SensorReader::isEnabled() const {
+  RuntimeConfig config{};
+  if (!configSnapshot(config)) return false;
+  return config.sensorReaderEnabled;
+}
 
 bool SensorReader::hasConnectedNode() const {
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
@@ -1195,8 +1198,6 @@ bool SensorReader::requestForgetNode(size_t) { return false; }
 bool SensorReader::requestRefreshNode(size_t) { return false; }
 void SensorReader::task() {}
 bool SensorReader::isEnabled() const { return false; }
-  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 bool SensorReader::hasConnectedNode() const { return false; }
-  RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 
 #endif

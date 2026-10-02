@@ -39,7 +39,8 @@ public:
                          int16_t rssi, uint64_t timestampMs,
                           uint32_t sourceSequence = 0,
                           uint8_t schemaVersion = 0,
-                          uint32_t firmwareVersion = 0);
+                          uint32_t firmwareVersion = 0,
+                          uint32_t originNodeId = 0);
   // F1-TODO-3: Service certificate rotation readiness without contacting a backend.
   void serviceRotation();
   // F1-TODO-6: Verify a candidate certificate/CA pair without persisting it.
@@ -94,6 +95,7 @@ private:
     uint32_t sourceSequence = 0;
     uint8_t schemaVersion = 0;
     uint32_t firmwareVersion = 0;
+    uint32_t originNodeId = 0;
     char nodeName[25] = {};
     char sensorName[25] = {};
     char unit[13] = {};

@@ -25,15 +25,19 @@ public:
     uint32_t sourceSequence = 0;
     uint8_t schemaVersion = 0;
     uint32_t firmwareVersion = 0;
+    uint32_t originNodeId = 0;
   };
 
   bool begin();
   bool append(const SensorReader::SensorSample& sample, uint8_t requiredMask,
                uint8_t source = LOCAL_BLE, uint8_t priority = 0,
                uint32_t sourceSequence = 0, uint8_t schemaVersion = 0,
-               uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION);
+               uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION,
+               uint32_t originNodeId = 0);
   bool peek(Pending& out) const;
   bool markDelivered(uint32_t sampleId, uint8_t delivery);
+  bool markDeliveredBySourceSequence(uint32_t nodeId, uint16_t sensorId,
+                                     uint32_t sourceSequence, uint32_t originNodeId = 0);
   bool clear();
   bool flush();
   size_t depth() const { return count_; }
@@ -49,9 +53,10 @@ private:
   static constexpr char TMP_PATH[] = "/SENSOR/SPOOL.TMP";
   static constexpr uint32_t MAGIC = 0x53504C51UL; // "SPLQ"
   // V3 adds schema/firmware metadata; V1 and V2 readers remain supported.
-  static constexpr uint8_t VERSION = 3;
+  static constexpr uint8_t VERSION = 4;
   static constexpr uint8_t LEGACY_VERSION = 1;
   static constexpr uint8_t LEGACY_VERSION_V2 = 2;
+  static constexpr uint8_t LEGACY_VERSION_V3 = 3;
   static constexpr uint8_t TYPE_DATA = 1;
   static constexpr uint8_t TYPE_ACK = 2;
 
@@ -70,6 +75,7 @@ private:
     uint32_t sourceSequence = 0;
     uint8_t schemaVersion = 0;
     uint32_t firmwareVersion = 0;
+    uint32_t originNodeId = 0;
     uint32_t crc32 = 0;
   };
 #pragma pack(pop)
@@ -103,9 +109,28 @@ private:
     uint32_t sourceSequence = 0;
     uint32_t crc32 = 0;
   };
+
+  struct LegacyDiskRecordV3 {
+    uint32_t magic = MAGIC;
+    uint8_t version = LEGACY_VERSION_V3;
+    uint8_t type = 0;
+    uint8_t flags = 0;
+    uint8_t source = LOCAL_BLE;
+    uint32_t recordId = 0;
+    uint32_t sampleId = 0;
+    uint16_t payloadLen = 0;
+    uint16_t priority = 0;
+    SensorReader::SensorSample sample{};
+    uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = 0;
+    uint32_t crc32 = 0;
+  };
 #pragma pack(pop)
-  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecordV2) + sizeof(uint8_t) + sizeof(uint32_t),
+  static_assert(sizeof(LegacyDiskRecordV3) == sizeof(LegacyDiskRecordV2) + sizeof(uint8_t) + sizeof(uint32_t),
                 "sensor spool v3 record layout changed");
+  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecordV3) + sizeof(uint32_t),
+                "sensor spool v4 record layout changed");
   static_assert(sizeof(LegacyDiskRecordV2) == sizeof(LegacyDiskRecord) + sizeof(uint32_t),
                 "sensor spool v2 record layout changed");
   static_assert(std::is_trivially_copyable<SensorReader::SensorSample>::value, "sensor sample must be wire-copyable");
@@ -123,6 +148,7 @@ private:
     uint8_t source = LOCAL_BLE;
     uint8_t priority = 0;
     uint32_t sourceSequence = 0;
+    uint32_t originNodeId = 0;
     uint32_t recordSize = sizeof(DiskRecord);
     bool valid = false;
   };

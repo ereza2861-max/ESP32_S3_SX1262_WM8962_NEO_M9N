@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "ConfigContract.h"
 #if __has_include("sdkconfig.h")
 #include "sdkconfig.h"
 #endif
@@ -114,7 +115,8 @@ constexpr uint32_t LORA_LBT_BACKOFF_MAX_MS = 100;
 // Protocol v2 adds authenticated source ID and TTL/hop-limit metadata.
 // v1 packets remain receivable, but cannot be safely forwarded because they
 // do not carry forwarding metadata.
-constexpr uint8_t LORA_PROTOCOL_VERSION = 2;
+constexpr uint8_t LORA_PROTOCOL_VERSION = 6;
+constexpr uint8_t LORA_PROTOCOL_VERSION_LEGACY = 2;
 constexpr uint8_t LORA_TYPE_TEXT = 0;
 constexpr uint8_t LORA_TYPE_VOICE = 1;
 constexpr uint8_t LORA_TYPE_SOS = 2;
@@ -226,6 +228,16 @@ constexpr size_t LORA_ECDH_PUBLIC_KEY_BYTES = 32;
 constexpr size_t LORA_ECDH_BEACON_BYTES =
     1U + 1U + sizeof(uint32_t) +
     LORA_ECDH_PUBLIC_KEY_BYTES + LORA_ECDH_PUBLIC_KEY_BYTES;
+// Keep the shared/native ECDH contract synchronized with the gateway configuration.
+static_assert(LORA_REKEY_PERIOD_SEC == ConfigContract::LORA_REKEY_PERIOD_SEC, "ECDH rekey period drift");
+static_assert(LORA_ECDH_PUBLIC_KEY_BYTES == ConfigContract::LORA_ECDH_PUBLIC_KEY_BYTES, "ECDH key size drift");
+static_assert(LORA_ECDH_BEACON_BYTES == ConfigContract::LORA_ECDH_BEACON_BYTES, "ECDH beacon size drift");
+static_assert(LORA_ECDH_BEACON_MAGIC == ConfigContract::LORA_ECDH_BEACON_MAGIC, "ECDH beacon magic drift");
+static_assert(LORA_ECDH_PROTOCOL_VERSION == ConfigContract::LORA_ECDH_PROTOCOL_VERSION, "ECDH protocol version drift");
+static_assert(LORA_ECDH_KEY_EPOCH_DELTA_CURRENT == ConfigContract::LORA_ECDH_KEY_EPOCH_DELTA_CURRENT, "ECDH current delta drift");
+static_assert(LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS == ConfigContract::LORA_ECDH_KEY_EPOCH_DELTA_PREVIOUS, "ECDH previous delta drift");
+static_assert(LORA_ECDH_KEY_RETENTION_SEC == ConfigContract::LORA_ECDH_KEY_RETENTION_SEC, "ECDH retention drift");
+static_assert(LORA_TYPE_NEIGHBOR_BEACON == ConfigContract::LORA_TYPE_NEIGHBOR_BEACON, "ECDH beacon type drift");
 
 // Replay persistence backend. MRAM is authoritative once detected; NVS is
 // retained only as the pre-authority fallback/migration source.
@@ -241,6 +253,18 @@ constexpr ReplayStoreBackend REPLAY_STORE_BACKEND =
 static_assert(FIELDRADIO_REPLAY_BACKEND == 0 || FIELDRADIO_REPLAY_BACKEND == 1,
               "FIELDRADIO_REPLAY_BACKEND must be 0 (MRAM) or 1 (NVS journal)");
 constexpr uint8_t REPLAY_STORE_VERSION = 1;
+constexpr uint16_t SENSOR_DEDUP_MRAM_BANK0_ADDR = 0x0820;
+constexpr uint16_t SENSOR_DEDUP_MRAM_BANK1_ADDR = 0x0A20;
+constexpr uint16_t SENSOR_DEDUP_MRAM_SLOT_BYTES = 32;
+constexpr uint8_t SENSOR_DEDUP_BANK_COUNT = 2;
+constexpr size_t SENSOR_DEDUP_SLOT_COUNT = 16;
+static_assert(SENSOR_DEDUP_MRAM_BANK0_ADDR +
+              SENSOR_DEDUP_SLOT_COUNT * SENSOR_DEDUP_MRAM_SLOT_BYTES <=
+              SENSOR_DEDUP_MRAM_BANK1_ADDR, "sensor dedup banks overlap");
+static_assert(SENSOR_DEDUP_MRAM_BANK1_ADDR +
+              SENSOR_DEDUP_SLOT_COUNT * SENSOR_DEDUP_MRAM_SLOT_BYTES <=
+              PERSISTENT_CONFIG_MRAM_SLOT_A, "sensor dedup overlaps persistent config");
+
 constexpr uint32_t MRAM_SIZE_BYTES = 32768UL;
 constexpr uint16_t REPLAY_MRAM_HEADER_ADDR = 0x0000;
 constexpr uint16_t REPLAY_MRAM_HEADER_BYTES = 16;
@@ -313,14 +337,19 @@ constexpr uint16_t LORAWAN_MAX_DWELL_MS = 400;
 constexpr uint32_t LORAWAN_RX2_FREQ_HZ_AS923_2 = 921400000UL;
 constexpr uint8_t LORAWAN_RX2_DR_AS923_2 = 2;
 constexpr bool LORA_USE_AES_GCM = true;
-constexpr uint8_t LORA_PROTOCOL_VERSION_GCM = 4;
+constexpr uint8_t LORA_PROTOCOL_VERSION_GCM = 6;
+constexpr uint8_t LORA_PROTOCOL_VERSION_GCM_LEGACY = 4;
 constexpr uint8_t LORA_TYPE_FRAG_DATA = 7;
 constexpr uint8_t LORA_TYPE_FRAG_ACK = 8;
 constexpr uint8_t LORA_TYPE_SENSOR_TELEMETRY = 9;
+constexpr uint8_t LORA_TYPE_SENSOR_BATCH_ACK = 10;
 constexpr uint32_t SENSOR_REPORT_PERIOD_MS = 60000UL;
 constexpr float SENSOR_REPORT_DELTA_THRESHOLD = 0.02f;
 constexpr size_t SENSOR_LORA_MAX_PAYLOAD = 40;
 constexpr size_t SENSOR_LORA_QUEUE_DEPTH = 16;
+constexpr uint16_t SENSOR_SOURCE_SEQUENCE_BLOCK = 256;
+constexpr size_t SENSOR_BATCH_ACK_MAX_RECORDS = 12;
+constexpr uint32_t SENSOR_BATCH_ACK_FLUSH_MS = 250UL;
 constexpr uint8_t LORA_FRAGMENT_WINDOW_SIZE = 8;
 constexpr uint32_t LORA_FRAGMENT_ACK_TIMEOUT_MS = 1500UL;
 

@@ -350,6 +350,124 @@ bool LoRaManager::popRemoteSensorTelemetry(RemoteSensorTelemetry& out) {
   return true;
 }
 
+bool LoRaManager::popSensorBatchAck(SensorBatchAckRecord& out) {
+  if (!remoteSensorMutex_ || xSemaphoreTake(remoteSensorMutex_, 0) != pdTRUE) return false;
+  if (sensorBatchAckCount_ == 0) {
+    xSemaphoreGive(remoteSensorMutex_);
+    return false;
+  }
+  out = sensorBatchAckQueue_[sensorBatchAckHead_];
+  sensorBatchAckHead_ = (sensorBatchAckHead_ + 1U) % SENSOR_BATCH_ACK_QUEUE_DEPTH;
+  --sensorBatchAckCount_;
+  xSemaphoreGive(remoteSensorMutex_);
+  return true;
+}
+
+bool LoRaManager::queueSensorBatchAck(uint32_t nodeId, uint16_t sensorId,
+                                      uint32_t sourceSequence) {
+  if (!nodeId || !sensorId || !sourceSequence || !remoteSensorMutex_) return false;
+  if (xSemaphoreTake(remoteSensorMutex_, pdMS_TO_TICKS(5)) != pdTRUE) return false;
+  for (size_t i = 0; i < pendingSensorAckCount_; ++i) {
+    auto& ack = pendingSensorAcks_[i];
+    if (ack.nodeId != nodeId || ack.sensorId != sensorId) continue;
+    if (sourceSequence >= ack.baseSequence &&
+        sourceSequence - ack.baseSequence < 32U) {
+      ack.bitmap |= 1UL << (sourceSequence - ack.baseSequence);
+      xSemaphoreGive(remoteSensorMutex_);
+      return true;
+    }
+    if (sourceSequence > ack.baseSequence) break;
+  }
+  if (pendingSensorAckCount_ >= Config::SENSOR_BATCH_ACK_MAX_RECORDS) {
+    xSemaphoreGive(remoteSensorMutex_);
+    serviceSensorBatchAck();
+    if (xSemaphoreTake(remoteSensorMutex_, pdMS_TO_TICKS(5)) != pdTRUE) return false;
+  }
+  if (pendingSensorAckCount_ >= Config::SENSOR_BATCH_ACK_MAX_RECORDS) {
+    xSemaphoreGive(remoteSensorMutex_);
+    return false;
+  }
+  auto& ack = pendingSensorAcks_[pendingSensorAckCount_++];
+  ack = {};
+  ack.nodeId = nodeId;
+  ack.sensorId = sensorId;
+  ack.baseSequence = sourceSequence;
+  ack.bitmap = 1U;
+  if (pendingSensorAckSinceMs_ == 0) pendingSensorAckSinceMs_ = millis();
+  const bool flush = pendingSensorAckCount_ >= 4;
+  xSemaphoreGive(remoteSensorMutex_);
+  if (flush) serviceSensorBatchAck();
+  return true;
+}
+
+void LoRaManager::serviceSensorBatchAck() {
+  if (!remoteSensorMutex_ || xSemaphoreTake(remoteSensorMutex_, pdMS_TO_TICKS(5)) != pdTRUE) return;
+  const bool due = pendingSensorAckCount_ != 0 &&
+                   (pendingSensorAckCount_ >= 4 ||
+                    static_cast<uint32_t>(millis() - pendingSensorAckSinceMs_) >=
+                        Config::SENSOR_BATCH_ACK_FLUSH_MS);
+  if (!due) {
+    xSemaphoreGive(remoteSensorMutex_);
+    return;
+  }
+  SensorBatchAckRecord pending[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
+  const size_t total = pendingSensorAckCount_;
+  const uint32_t destination = pendingSensorAcks_[0].nodeId;
+  size_t count = 0;
+  for (size_t i = 0; i < total; ++i) {
+    if (pendingSensorAcks_[i].nodeId == destination)
+      pending[count++] = pendingSensorAcks_[i];
+  }
+  size_t kept = 0;
+  for (size_t i = 0; i < total; ++i) {
+    if (pendingSensorAcks_[i].nodeId != destination)
+      pendingSensorAcks_[kept++] = pendingSensorAcks_[i];
+  }
+  pendingSensorAckCount_ = kept;
+  pendingSensorAckSinceMs_ = kept ? millis() : 0;
+  xSemaphoreGive(remoteSensorMutex_);
+
+  uint8_t payload[Config::LORA_MAX_PACKET] = {};
+  SensorBatchAck::Record wire[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
+  for (size_t i = 0; i < count; ++i) {
+    wire[i].nodeId = pending[i].nodeId;
+    wire[i].sensorId = pending[i].sensorId;
+    wire[i].baseSequence = pending[i].baseSequence;
+    wire[i].bitmap = pending[i].bitmap;
+  }
+  const size_t len = SensorBatchAck::encode(wire, count, payload, sizeof(payload));
+  if (!len) return;
+  const String binary(reinterpret_cast<const char*>(payload), len);
+  (void)transmitHopped(binary, Config::LORA_TYPE_SENSOR_BATCH_ACK, destination);
+}
+
+bool LoRaManager::handleSensorBatchAck(const uint8_t* payload, size_t len) {
+  SensorBatchAck::Record records[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
+  size_t count = 0;
+  if (!SensorBatchAck::decode(payload, len, records,
+                              Config::SENSOR_BATCH_ACK_MAX_RECORDS, count))
+    return false;
+  if (!remoteSensorMutex_ || xSemaphoreTake(remoteSensorMutex_, pdMS_TO_TICKS(5)) != pdTRUE)
+    return false;
+  for (size_t i = 0; i < count; ++i) {
+    SensorBatchAckRecord item{};
+    item.nodeId = records[i].nodeId;
+    item.sensorId = records[i].sensorId;
+    item.baseSequence = records[i].baseSequence;
+    item.bitmap = records[i].bitmap;
+    if (sensorBatchAckCount_ >= SENSOR_BATCH_ACK_QUEUE_DEPTH) {
+      sensorBatchAckHead_ = (sensorBatchAckHead_ + 1U) % SENSOR_BATCH_ACK_QUEUE_DEPTH;
+      --sensorBatchAckCount_;
+    }
+    const size_t tail = (sensorBatchAckHead_ + sensorBatchAckCount_) %
+                        SENSOR_BATCH_ACK_QUEUE_DEPTH;
+    sensorBatchAckQueue_[tail] = item;
+    ++sensorBatchAckCount_;
+  }
+  xSemaphoreGive(remoteSensorMutex_);
+  return true;
+}
+
 bool LoRaManager::loadKey(uint8_t key[16]) const {
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (!key || config.loraKeyHex.length() != 32) return false;
@@ -1322,7 +1440,8 @@ bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& s
   seq = static_cast<uint16_t>(static_cast<uint8_t>(packet[3])) |
         (static_cast<uint16_t>(static_cast<uint8_t>(packet[4])) << 8);
 
-  if (version == Config::LORA_PROTOCOL_VERSION_GCM && Config::LORA_USE_AES_GCM) {
+  if ((version == Config::LORA_PROTOCOL_VERSION_GCM ||
+       version == Config::LORA_PROTOCOL_VERSION_GCM_LEGACY) && Config::LORA_USE_AES_GCM) {
     if (packet.length() < PACKET_HEADER_V4 + 16) return false;
     uint8_t nonce[12] = {};
     memcpy(nonce, packet.c_str() + 5, sizeof(nonce));
@@ -1347,7 +1466,8 @@ bool LoRaManager::decryptPacket(const String& packet, uint8_t& type, uint16_t& s
 
   // Legacy CTR/HMAC decoding is retained only for internal V3 hopping paths.
   size_t headerLen = 0;
-  if (version == Config::LORA_PROTOCOL_VERSION) {
+  if (version == Config::LORA_PROTOCOL_VERSION ||
+      version == Config::LORA_PROTOCOL_VERSION_LEGACY) {
     headerLen = PACKET_HEADER_V2;
     memcpy(&sourceId, packet.c_str() + PACKET_HEADER_V1, sizeof(sourceId));
     ttl = static_cast<uint8_t>(packet[PACKET_HEADER_V1 + sizeof(sourceId)]);
@@ -2813,6 +2933,8 @@ bool LoRaManager::begin() {
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   if (config.ecdhRekeyPolicy == 1 && !productionSecurityEnabled()) {
+    configTxnAudit(ConfigTxnEvent::EcdhRejectedSecurity, configGeneration(),
+                   "Secure Boot and Flash Encryption are both required");
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "ECDH rekey requires production Secure Boot + Flash Encryption";
     return false;
@@ -2869,6 +2991,11 @@ bool LoRaManager::begin() {
   if (!mutex_ || !seqMutex_ || !textStateMutex_ || !captureMutex_ ||
       !remoteSensorMutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
   const bool replayStoreOk = replayStore_.begin();
+  const bool sensorDedupOk = sensorDedupStore_.begin();
+  if (!sensorDedupOk) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "Sensor telemetry dedup persistence unavailable";
+  }
   if (!replayStoreOk) {
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "Replay persistence unavailable";
@@ -3235,6 +3362,7 @@ void LoRaManager::task() {
 
   if (!pending) {
     xSemaphoreGive(mutex_);
+    serviceSensorBatchAck();
     if (!isPttOrRecording() &&
         static_cast<int32_t>(millis() - forwardRetryNotBeforeMs_) >= 0 &&
         millis() - lastForwardTxMs_ >= Config::LORA_FORWARD_RATE_LIMIT_MS) {
@@ -3356,9 +3484,11 @@ void LoRaManager::task() {
     // attempted, but before any routing/decryption buffer is mutated.
     (void)capturePacket(msg, rssi, snr, rxAuthenticated);
     const bool isV2 = authenticated &&
-                     static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION;
+                     (static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION ||
+                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION_LEGACY);
     const bool isV4 = authenticated &&
-                     static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION_GCM;
+                     (static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION_GCM ||
+                      static_cast<uint8_t>(msg[1]) == Config::LORA_PROTOCOL_VERSION_GCM_LEGACY);
     const bool isV3 = authenticatedV3;
     const bool isV5 = authenticatedV5;
     uint32_t routeDestination = 0;
@@ -3578,11 +3708,21 @@ void LoRaManager::task() {
     }
 
     if (rxAuthenticated && addressedToUs &&
+        type == Config::LORA_TYPE_SENSOR_BATCH_ACK) {
+      (void)handleSensorBatchAck(appPayload, appPayloadLen);
+    }
+
+    if (rxAuthenticated && addressedToUs &&
         type == Config::LORA_TYPE_SENSOR_TELEMETRY &&
         appPayloadLen == SensorTelemetry::PAYLOAD_BYTES) {
       SensorTelemetry::Decoded decoded{};
       if (SensorTelemetry::deserializeSensorTelemetry(
               appPayload, appPayloadLen, decoded)) {
+        const bool routedOrigin = hasRouteExtension && decoded.nodeId != rxSourceId;
+        const bool telemetryIdentityValid = routedOrigin || decoded.nodeId == rxSourceId;
+        const bool telemetryDedupAvailable =
+            decoded.sourceSequence == 0 || sensorDedupStore_.healthy();
+        if (telemetryIdentityValid && telemetryDedupAvailable) {
         static uint32_t seenSource[Config::LORA_DEDUP_CACHE_SIZE] = {};
         static uint32_t seenSample[Config::LORA_DEDUP_CACHE_SIZE] = {};
         static uint32_t seenMs[Config::LORA_DEDUP_CACHE_SIZE] = {};
@@ -3590,7 +3730,12 @@ void LoRaManager::task() {
         uint32_t identity = decoded.sourceSequence != 0
             ? decoded.sourceSequence : decoded.sampleId;
         if (identity == 0) identity = hashPayload(appPayload, appPayloadLen);
-        bool duplicate = false;
+        const bool persistentDuplicate =
+            decoded.sourceSequence != 0 &&
+            sensorDedupStore_.seenOrUpdate(
+                decoded.nodeId, decoded.sensorId, decoded.sourceSequence,
+                decoded.schemaVersion, decoded.firmwareVersion);
+        bool duplicate = persistentDuplicate;
         for (size_t i = 0; i < Config::LORA_DEDUP_CACHE_SIZE; ++i) {
           if (seenSource[i] == rxSourceId && seenSample[i] == identity &&
               seenMs[i] != 0 &&
@@ -3617,7 +3762,8 @@ void LoRaManager::task() {
             const size_t tail =
                 (remoteSensorHead_ + remoteSensorCount_) % REMOTE_SENSOR_QUEUE_DEPTH;
             RemoteSensorTelemetry& queued = remoteSensorQueue_[tail];
-            queued.nodeId = decoded.nodeId;
+            queued.nodeId = rxSourceId;
+            queued.originNodeId = decoded.nodeId != rxSourceId ? decoded.nodeId : 0;
             queued.sensorId = decoded.sensorId;
             queued.value = decoded.value;
             queued.quality = decoded.quality;
@@ -3629,6 +3775,16 @@ void LoRaManager::task() {
             queued.rssi = rssi;
             ++remoteSensorCount_;
             xSemaphoreGive(remoteSensorMutex_);
+          }
+        }
+        (void)queueSensorBatchAck(rxSourceId, decoded.sensorId,
+                                  decoded.sourceSequence);
+        } else {
+          StateLock lock(gState);
+          if (lock.ok()) {
+            gState.lastError = !telemetryIdentityValid
+                ? "LoRa sensor identity mismatch"
+                : "Sensor telemetry dedup persistence unavailable";
           }
         }
       }
@@ -3721,6 +3877,8 @@ void LoRaManager::task() {
     fragmentAckPending_ = false;
     (void)sendFragmentAck(ackSource, messageId, baseIndex, bitmap, ackHop);
   }
+
+  serviceSensorBatchAck();
 
   // Forwarding is deliberately serialized outside the receive critical
   // section. Voice/PTT keeps priority; one queued packet is attempted per task
@@ -4000,8 +4158,10 @@ bool LoRaManager::transmit(const String& text, bool alreadyEncrypted) {
       return false;
     const uint8_t wireVersion = static_cast<uint8_t>(packet[1]);
     if (wireVersion != Config::LORA_PROTOCOL_VERSION &&
+        wireVersion != Config::LORA_PROTOCOL_VERSION_LEGACY &&
         wireVersion != LORA_PROTOCOL_VERSION_HOP &&
         wireVersion != Config::LORA_PROTOCOL_VERSION_GCM &&
+        wireVersion != Config::LORA_PROTOCOL_VERSION_GCM_LEGACY &&
         wireVersion != Config::LORA_PROTOCOL_VERSION_ECDH)
       return false;
     txType = static_cast<uint8_t>(packet[2]);
@@ -4956,6 +5116,8 @@ bool LoRaManager::applyConfig() {
 bool LoRaManager::applyConfig(const RuntimeConfig& config) {
 #if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
   if (config.ecdhRekeyPolicy == 1 && !productionSecurityEnabled()) {
+    configTxnAudit(ConfigTxnEvent::EcdhRejectedSecurity, configGeneration(),
+                   "Secure Boot and Flash Encryption are both required");
     StateLock lock(gState);
     if (lock.ok()) gState.lastError = "ECDH rekey requires production Secure Boot + Flash Encryption";
     return false;

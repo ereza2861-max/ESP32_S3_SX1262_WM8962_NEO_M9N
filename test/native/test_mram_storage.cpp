@@ -18,11 +18,26 @@ void test_mram_replay_area_fits() {
                    Config::REPLAY_MRAM_SLOT_BYTES <= 0x1000);
 }
 
+void test_sensor_dedup_banks_are_disjoint() {
+  TEST_ASSERT_EQUAL_HEX16(0x0820, Config::SENSOR_DEDUP_MRAM_BANK0_ADDR);
+  TEST_ASSERT_EQUAL_HEX16(0x0A20, Config::SENSOR_DEDUP_MRAM_BANK1_ADDR);
+  TEST_ASSERT_EQUAL_UINT16(32, Config::SENSOR_DEDUP_MRAM_SLOT_BYTES);
+  TEST_ASSERT_EQUAL_UINT32(16, Config::SENSOR_DEDUP_SLOT_COUNT);
+}
+
 void setup() {
   UNITY_BEGIN();
   RUN_TEST(test_mram_address_map);
   RUN_TEST(test_mram_replay_area_fits);
+  RUN_TEST(test_sensor_dedup_banks_are_disjoint);
   UNITY_END();
 }
 
 void loop() {}
+
+void test_sensor_dedup_banks_are_disjoint() {
+  TEST_ASSERT_EQUAL_HEX16(0x0820, Config::SENSOR_DEDUP_MRAM_BANK0_ADDR);
+  TEST_ASSERT_EQUAL_HEX16(0x0A20, Config::SENSOR_DEDUP_MRAM_BANK1_ADDR);
+  TEST_ASSERT_EQUAL_UINT16(32, Config::SENSOR_DEDUP_MRAM_SLOT_BYTES);
+  TEST_ASSERT_EQUAL_UINT32(16, Config::SENSOR_DEDUP_SLOT_COUNT);
+}

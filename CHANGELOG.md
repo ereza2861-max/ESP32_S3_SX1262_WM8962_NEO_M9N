@@ -1,3 +1,7 @@
+## 2026-10-02 — Audit response
+
+Closed the locked audit-response source defects and functional decisions: native ECDH header boundary, SensorReader config snapshots, cppcheck CI gating, sensor identity binding, batch ACK delivery, C3 calibration/versioning and source-sequence persistence, MRAM sensor deduplication, persist-first BLE commands, ECDH security audit logging, charger-state semantics, placeholder-profile disabling, watchdog maintenance latch, and current six-profile HIL documentation.
+
 # Changelog
 
 ## 2026-10-02 — Audit contract fixes

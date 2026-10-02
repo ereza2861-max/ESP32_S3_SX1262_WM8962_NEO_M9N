@@ -27,7 +27,7 @@ String nodeName;
 String otaPassword;
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
-constexpr uint8_t BOOT_LOOP_THRESHOLD = 5;
+constexpr uint8_t BOOT_LOOP_THRESHOLD = 3;\nconstexpr char WDT_FAULT_LATCH_KEY[] = "wdt_fault_latched";
 bool recoveryMode = false;
 bool bootLoopCleared = false;
 bool bleResetRequested = false;
@@ -38,7 +38,10 @@ bool updateBootLoopCount(bool reset) {
   uint32_t count = bootPrefs.getUInt("boot_loop_count", 0);
   if (reset) count = 0;
   else if (count < UINT32_MAX) ++count;
-  const bool ok = bootPrefs.putUInt("boot_loop_count", count) > 0;
+  bool latchOk = true;
+  if (!reset && count >= BOOT_LOOP_THRESHOLD)
+    latchOk = bootPrefs.putBool(WDT_FAULT_LATCH_KEY, true);
+  const bool ok = bootPrefs.putUInt("boot_loop_count", count) > 0 && latchOk;
   bootPrefs.end();
   return ok;
 }
@@ -49,6 +52,23 @@ uint32_t bootLoopCount() {
   const uint32_t count = bootPrefs.getUInt("boot_loop_count", 0);
   bootPrefs.end();
   return count;
+}
+
+bool watchdogFaultLatched() {
+  Preferences prefs;
+  if (!prefs.begin("sensor", true)) return false;
+  const bool latched = prefs.getBool(WDT_FAULT_LATCH_KEY, false);
+  prefs.end();
+  return latched;
+}
+
+bool clearWatchdogFaultLatch() {
+  Preferences prefs;
+  if (!prefs.begin("sensor", false)) return false;
+  const bool ok = prefs.putBool(WDT_FAULT_LATCH_KEY, false) &&
+                  prefs.putUInt("boot_loop_count", 0) > 0;
+  prefs.end();
+  return ok;
 }
 
 void watchdogInit() {
@@ -121,6 +141,8 @@ void printHelp() {
   Serial.println("  ota password <secret>   stage OTA password (min 12 chars)");
   Serial.println("  ota save                save OTA provisioning and reboot");
   Serial.println("  save                    save provisioning and reboot");
+  Serial.println("  profile enable <0-5>   enable a validated profile roster");
+  Serial.println("  profile disable <0-5>  disable an unvalidated profile roster");
   Serial.println("  recovery clear         clear boot-loop recovery and reboot");
 }
 void loadProvisioning() {
@@ -220,8 +242,33 @@ void handleCommand(String line) {
   if (line == "help") { printHelp(); return; }
   if (line == "show") { showProvisioning(); return; }
   if (line == "save") { saveProvisioning(); return; }
+  if (line.startsWith("profile enable ")) {
+    const int raw = line.substring(15).toInt();
+    if (raw >= 0 && raw < ProfileConfig::PROFILE_COUNT &&
+        profileManager.setProfilePlaceholderDisabled(
+            static_cast<ProfileConfig::Profile>(raw), false)) {
+      Serial.printf("OK: profile %d enabled; reboot required\n", raw);
+    } else {
+      Serial.println("ERROR: profile enable failed");
+    }
+    return;
+  }
+  if (line.startsWith("profile disable ")) {
+    const int raw = line.substring(16).toInt();
+    if (raw >= 0 && raw < ProfileConfig::PROFILE_COUNT &&
+        profileManager.setProfilePlaceholderDisabled(
+            static_cast<ProfileConfig::Profile>(raw), true)) {
+      Serial.printf("OK: profile %d disabled; reboot required\n", raw);
+    } else {
+      Serial.println("ERROR: profile disable failed");
+    }
+    return;
+  }
   if (line == "recovery clear") {
-    (void)updateBootLoopCount(true);
+    if (!clearWatchdogFaultLatch()) {
+      Serial.println("ERROR: recovery latch clear failed");
+      return;
+    }
     Serial.println("OK: boot-loop recovery cleared; rebooting");
     delay(100);
     ESP.restart();
@@ -275,7 +322,9 @@ void setup() {
   profileManager.setLongPressCallback(onLongPressToggleAp);
 
   const bool rosterOk =
-      profileSensors.begin(profileManager.activeProfile(), driverRegistry, registry);
+      profileSensors.begin(profileManager.activeProfile(), driverRegistry, registry,
+                           profileManager.profilePlaceholderDisabled(
+                               profileManager.activeProfile()));
   if (!rosterOk) {
     Serial.println("WARN: active profile roster is incomplete");
   }
@@ -289,12 +338,13 @@ void setup() {
   }
 
   otaApManager.setProfileChangeCallback(onWebProfileChange);
+  otaApManager.setRecoveryClearCallback(clearWatchdogFaultLatch);
   otaApManager.begin();
   bleServer.setCommandHandler(onBleCommand);
   showProvisioning();
   printHelp();
   const uint32_t loopCount = bootLoopCount();
-  if (loopCount > BOOT_LOOP_THRESHOLD) {
+  if (loopCount >= BOOT_LOOP_THRESHOLD || watchdogFaultLatched()) {
     recoveryMode = true;
     Serial.printf("RECOVERY: boot_loop_count=%lu; BLE disabled, OTA AP window only\n",
                   static_cast<unsigned long>(loopCount));

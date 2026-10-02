@@ -92,6 +92,7 @@ void configTxnAudit(ConfigTxnEvent event, uint32_t generation,
     case ConfigTxnEvent::RolledBack: name = "RolledBack"; break;
     case ConfigTxnEvent::JournalCleared: name = "JournalCleared"; break;
     case ConfigTxnEvent::Recovered: name = "Recovered"; break;
+    case ConfigTxnEvent::EcdhRejectedSecurity: name = "ECDH_REJECTED_SECURITY"; break;
   }
   Serial.printf("[CFG-TXN] event=%s gen=%lu detail=%s\n",
                 name, static_cast<unsigned long>(generation),

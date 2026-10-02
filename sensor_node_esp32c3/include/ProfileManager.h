@@ -39,6 +39,8 @@ public:
 
   // Changes and persists the runtime profile.
   bool setProfile(ProfileConfig::Profile profile);
+  bool profilePlaceholderDisabled(ProfileConfig::Profile profile) const;
+  bool setProfilePlaceholderDisabled(ProfileConfig::Profile profile, bool disabled);
 
   // Registers the callback fired once per confirmed 1.5 s button long press.
   // The callback runs from task() context; it must not block.

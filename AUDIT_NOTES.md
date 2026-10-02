@@ -17,3 +17,10 @@
 - The audit's other decision-required items (MQTT durability policy, calibration
   lifecycle, placeholder drivers, PCB fabrication evidence, and production HIL
   gates) were not changed because D1–D10 do not freeze decisions for them.
+
+
+## Historical protocol-size references
+
+The old `67/15` sensor-size wording is **[HISTORICAL]** only. The active wire
+contract is defined by `shared/SensorProtocol.h`; its descriptor/value static
+asserts are the source of truth.

@@ -6,7 +6,7 @@
 // FieldRadio ESP32-C3 Sensor Node — profile configuration.
 //
 // ARCHITECTURAL DECISION:
-//   - 4 profiles are selected by runtime configuration persisted in NVS and changed through WebUI.
+//   - 6 profiles are selected by runtime configuration persisted in NVS and changed through WebUI.
 //   - There is no physical profile selector. GPIO0 and GPIO5 are reserved for the
 //     CD74HC4051 selector used to route the GPIO3 shared sensor path.
 //   - Pin map is NOT PHYSICALLY VALIDATED. It is a source-level contract only.

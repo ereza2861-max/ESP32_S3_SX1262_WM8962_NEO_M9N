@@ -171,3 +171,17 @@ correct/wrong passkey tests require a real host pairing helper rather than an
 invented Python callback.
 
 These are deliberate test prerequisites, not skipped tests.
+
+
+## Current C3 profile fixture contract (2026-10-02)
+
+The active ESP32-C3 architecture has six runtime profiles (0..5), selected from
+NVS and rebooted after a profile change. The older default fixture description
+that assumed a fixed BME280 + GPIO4/GPIO5 roster is **[HISTORICAL]** and must not
+be used as the current hardware fixture definition.
+
+Current profile and GPIO truth is `sensor_node_esp32c3/include/ProfileConfig.h`.
+Placeholder profiles are shipped with their runtime `profilePlaceholderDisabled`
+NVS flag set until the corresponding hardware is validated. A validated profile
+can be enabled from the sensor-node serial recovery console with
+`profile enable <0-5>`.

@@ -266,3 +266,26 @@ behavior, and ECDH beacon protocol remain unchanged.
 ## F001-F005 decision closure
 
 See `docs/DECISIONS_F001_F005.md` for the locked decision contract and additive implementation boundary. Production-security acceptance remains OPEN until physical provisioning/eFuse/HIL evidence exists.
+
+
+## Audit-response decisions — 2026-10-02
+
+- Sensor telemetry identity: direct frames require payload `nodeId` to equal the
+  authenticated envelope source; routed origin is carried separately.
+- Remote telemetry delivery: bounded bitmap batch ACK, protocol generation 6,
+  with legacy decoder paths retained.
+- C3 calibration: legacy `s%04X`/`o%04X` keys remain readable; versioned
+  `calib.v1.<sensorId>` blobs are validated by CRC.
+- C3 source sequence: NVS high-water allocation in blocks of 256.
+- Gateway application dedup: MRAM dual-bank/CRC store is separate from the
+  LoRa replay store.
+- BLE command persistence: sequence is committed before command execution;
+  error 12 means persistence failed.
+- ECDH activation is rejected unless Secure Boot and Flash Encryption are both
+  enabled, with an explicit `ECDH_REJECTED_SECURITY` audit event.
+- Charger status is explicitly `UNKNOWN`, `CHARGE_PROBABLE`, or
+  `DISCHARGE_PROBABLE`; firmware never exposes a boolean `CHARGING=true`.
+- Unvalidated C3 profile rosters remain registered but disabled until explicitly
+  enabled after hardware validation.
+- Three consecutive watchdog boot failures latch maintenance mode; recovery is
+  available through authenticated OTA recovery-clear or serial recovery.

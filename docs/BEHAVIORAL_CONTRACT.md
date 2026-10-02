@@ -86,3 +86,16 @@ reject replayed commands.
 Sensor values may carry a source sequence under `FLAG_HAS_SOURCE_SEQUENCE`.
 The gateway uses `(sourceId, sourceSequence)` for LoRa telemetry deduplication
 when present and falls back to `sampleId` for legacy telemetry.
+
+
+## Sensor telemetry delivery contract — audit response
+
+Remote sensor telemetry uses authenticated envelope identity as the MQTT topic
+identity. A routed application origin is preserved separately as
+`origin_node_id` when it differs. Direct telemetry whose payload `nodeId` does
+not match the authenticated LoRa source is rejected.
+
+Remote telemetry is acknowledged with `LORA_TYPE_SENSOR_BATCH_ACK`. ACK records
+use a bounded bitmap window over `(nodeId, sensorId, sourceSequence)`. The
+sender keeps the LoRa delivery bit pending until the authenticated ACK is
+consumed from the durable sensor spool path.

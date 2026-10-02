@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <cstdio>
 
 namespace {
 
@@ -77,6 +78,30 @@ bool ProfileManager::saveProfileToNvs() {
   return ok;
 }
 
+bool ProfileManager::profilePlaceholderDisabled(ProfileConfig::Profile profile) const {
+  const uint8_t index = static_cast<uint8_t>(profile);
+  if (index >= ProfileConfig::PROFILE_COUNT) return true;
+  Preferences prefs;
+  if (!prefs.begin("sensor", true)) return true;
+  char key[8] = {};
+  std::snprintf(key, sizeof(key), "phd%u", static_cast<unsigned>(index));
+  const bool disabled = prefs.getBool(key, true);
+  prefs.end();
+  return disabled;
+}
+
+bool ProfileManager::setProfilePlaceholderDisabled(ProfileConfig::Profile profile, bool disabled) {
+  const uint8_t index = static_cast<uint8_t>(profile);
+  if (index >= ProfileConfig::PROFILE_COUNT) return false;
+  Preferences prefs;
+  if (!prefs.begin("sensor", false)) return false;
+  char key[8] = {};
+  std::snprintf(key, sizeof(key), "phd%u", static_cast<unsigned>(index));
+  const bool ok = prefs.putBool(key, disabled);
+  prefs.end();
+  return ok;
+}
+
 bool ProfileManager::setProfile(ProfileConfig::Profile profile) {
   if (static_cast<uint8_t>(profile) >= ProfileConfig::PROFILE_COUNT) {
     Serial.println("ERROR: requested profile is out of range");
@@ -88,6 +113,15 @@ bool ProfileManager::setProfile(ProfileConfig::Profile profile) {
 
 bool ProfileManager::begin() {
   loadProfileFromNvs();
+  Preferences prefs;
+  if (prefs.begin("sensor", false)) {
+    for (uint8_t i = 0; i < ProfileConfig::PROFILE_COUNT; ++i) {
+      char key[8] = {};
+      std::snprintf(key, sizeof(key), "phd%u", static_cast<unsigned>(i));
+      if (!prefs.isKey(key)) (void)prefs.putBool(key, true);
+    }
+    prefs.end();
+  }
 
   pinMode(ProfileConfig::BUTTON_PIN, INPUT_PULLUP);
   lastRawButtonLevel_ = digitalRead(ProfileConfig::BUTTON_PIN) == HIGH;

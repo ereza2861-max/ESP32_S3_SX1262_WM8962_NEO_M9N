@@ -14,6 +14,7 @@ struct DriverConfig {
   uint8_t dataWidth = 0;
   uint32_t periodMs = 1000;
   uint16_t flags = 0;
+  static constexpr uint16_t FLAG_PLACEHOLDER_DISABLED = 1U << 15;
 
   // Multi-instance profile fields distinguish devices that share a bus
   // (e.g. 3× DS18B20 on one OneWire, 3× TEROS 12 on one RS-485).

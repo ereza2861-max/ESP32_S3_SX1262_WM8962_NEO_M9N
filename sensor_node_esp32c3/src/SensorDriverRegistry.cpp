@@ -789,11 +789,67 @@ bool selectGpio3MuxForConfig(const DriverConfig& config) {
 
 }  // namespace
 
-bool SensorDriverRegistry::loadCalibration(uint16_t sensorId, float& scale, float& offset) {
+namespace {
+constexpr uint32_t CALIBRATION_MAGIC = 0x43414C31UL; // "CAL1"
+constexpr uint8_t CALIBRATION_VERSION = 1;
+struct CalibrationBlobV1 {
+  uint32_t magic = CALIBRATION_MAGIC;
+  uint8_t version = CALIBRATION_VERSION;
+  uint16_t sensorId = 0;
+  uint8_t reserved = 0;
+  float scale = 1.0f;
+  float offset = 0.0f;
+  uint32_t crc = 0;
+} __attribute__((packed));
+
+uint32_t calibrationCrc(const CalibrationBlobV1& blob) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(&blob);
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < offsetof(CalibrationBlobV1, crc); ++i) {
+    crc ^= p[i];
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
+  }
+  return ~crc;
+}
+
+void calibrationKey(uint16_t sensorId, char key[16]) {
+  std::snprintf(key, 16, "calib.v1.%04X", static_cast<unsigned>(sensorId));
+}
+}
+
+bool SensorDriverRegistry::loadCalibration(uint16_t sensorId, float& scale,
+                                            float& offset, bool& invalid) {
   scale = 1.0f;
   offset = 0.0f;
+  invalid = false;
   Preferences prefs;
   if (!prefs.begin("calib", true)) return false;
+
+  char blobKey[16] = {};
+  calibrationKey(sensorId, blobKey);
+  CalibrationBlobV1 blob{};
+  const bool hasBlob = prefs.isKey(blobKey);
+  bool blobValid = false;
+  if (hasBlob &&
+      prefs.getBytes(blobKey, &blob, sizeof(blob)) == sizeof(blob)) {
+    blobValid = blob.magic == CALIBRATION_MAGIC &&
+                blob.version == CALIBRATION_VERSION &&
+                blob.sensorId == sensorId &&
+                std::isfinite(blob.scale) && std::isfinite(blob.offset) &&
+                blob.scale != 0.0f &&
+                blob.crc == calibrationCrc(blob);
+  }
+  if (blobValid) {
+    scale = blob.scale;
+    offset = blob.offset;
+    prefs.end();
+    return true;
+  }
+  if (hasBlob) invalid = true;
+
+  // Legacy factory keys remain readable so migration never discards the last
+  // known-good calibration while a versioned blob is repaired.
   char scaleKey[16] = {};
   char offsetKey[16] = {};
   std::snprintf(scaleKey, sizeof(scaleKey), "s%04X", static_cast<unsigned>(sensorId));
@@ -802,20 +858,67 @@ bool SensorDriverRegistry::loadCalibration(uint16_t sensorId, float& scale, floa
   const bool hasOffset = prefs.isKey(offsetKey);
   if (hasScale) scale = prefs.getFloat(scaleKey, 1.0f);
   if (hasOffset) offset = prefs.getFloat(offsetKey, 0.0f);
+  const bool legacyValid = (hasScale || hasOffset) &&
+                           std::isfinite(scale) && std::isfinite(offset) &&
+                           scale != 0.0f;
   prefs.end();
-  if (!std::isfinite(scale) || !std::isfinite(offset) || scale == 0.0f) {
+  if (!legacyValid) {
     scale = 1.0f;
     offset = 0.0f;
     return false;
   }
-  return hasScale || hasOffset;
+  if (!blobValid) {
+    CalibrationBlobV1 migrated{};
+    migrated.sensorId = sensorId;
+    migrated.scale = scale;
+    migrated.offset = offset;
+    migrated.crc = calibrationCrc(migrated);
+    Preferences writePrefs;
+    if (writePrefs.begin("calib", false)) {
+      (void)writePrefs.putBytes(blobKey, &migrated, sizeof(migrated));
+      writePrefs.end();
+    }
+  }
+  return true;
+}
+
+bool SensorDriverRegistry::allocateSourceSequenceBlock(uint16_t sensorId,
+                                                     uint32_t& firstSequence) {
+  firstSequence = 0;
+  if (sensorId == 0) return false;
+  Preferences prefs;
+  if (!prefs.begin("seq", false)) return false;
+  char key[12] = {};
+  std::snprintf(key, sizeof(key), "seqh%04X", static_cast<unsigned>(sensorId));
+  const uint32_t highWater = prefs.getUInt(key, 1);
+  if (highWater == 0 || highWater > UINT32_MAX - Config::SENSOR_SOURCE_SEQUENCE_BLOCK) {
+    prefs.end();
+    return false;
+  }
+  const uint32_t nextHighWater = highWater + Config::SENSOR_SOURCE_SEQUENCE_BLOCK;
+  const bool ok = prefs.putUInt(key, nextHighWater) == sizeof(uint32_t);
+  prefs.end();
+  if (!ok) return false;
+  firstSequence = highWater;
+  return true;
 }
 
 bool SensorDriverRegistry::rebuild(SensorRegistry& registry) {
   registry.clear();
   for (size_t i = 0; i < count_; ++i) {
+    const uint32_t previousSourceSequence = entries_[i].sourceSequence;
     delete entries_[i].driver;
     entries_[i].driver = createDriver(entries_[i].config);
+    if (previousSourceSequence != 0) entries_[i].sourceSequence = previousSourceSequence;
+    else {
+      uint32_t firstSequence = 0;
+      if (!allocateSourceSequenceBlock(entries_[i].config.sensorId, firstSequence) ||
+          firstSequence == 0) {
+        clear(registry);
+        return false;
+      }
+      entries_[i].sourceSequence = firstSequence - 1U;
+    }
     if (!entries_[i].driver || !validConfig(entries_[i].config) ||
         !selectGpio3MuxForConfig(entries_[i].config) ||
         !entries_[i].driver->begin(entries_[i].config)) {
@@ -825,13 +928,20 @@ bool SensorDriverRegistry::rebuild(SensorRegistry& registry) {
     SensorProtocol::SensorDescriptor descriptor = entries_[i].driver->descriptor();
     descriptor.flags |= SensorProtocol::FLAG_HAS_SCHEMA_VERSION;
     descriptor.schemaVersion = 1;
+    if (entries_[i].config.flags & DriverConfig::FLAG_PLACEHOLDER_DISABLED)
+      descriptor.flags &= static_cast<uint16_t>(~SensorProtocol::FLAG_ENABLED);
     float scale = 1.0f;
     float offset = 0.0f;
+    bool calibrationInvalid = false;
     if (loadCalibration(descriptor.id, scale, offset)) {
       descriptor.scale = scale;
       descriptor.offset = offset;
       descriptor.flags |= SensorProtocol::FLAG_CALIBRATED;
+      if (calibrationInvalid) descriptor.flags |= SensorProtocol::FLAG_DEGRADED;
+    } else if (calibrationInvalid) {
+      descriptor.flags |= SensorProtocol::FLAG_DEGRADED;
     }
+    entries_[i].calibrationDegraded = calibrationInvalid;
     entries_[i].descriptor = descriptor;
     entries_[i].lastSampleMs = 0;
     entries_[i].consecutiveReadFailures = 0;
@@ -962,11 +1072,18 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
     if (entry.lastSampleMs != 0 &&
         static_cast<uint32_t>(nowMs - entry.lastSampleMs) < entry.config.periodMs) continue;
     entry.lastSampleMs = nowMs;
-    if (++entry.sourceSequence == 0) entry.sourceSequence = 1;
+    if (entry.sourceSequence == UINT32_MAX) {
+      Serial.printf("SENSOR: source sequence exhausted id=0x%04X\n",
+                    static_cast<unsigned>(entry.config.sensorId));
+      ok = false;
+      continue;
+    }
+    ++entry.sourceSequence;
     float value = 0.0f;
     uint8_t quality = SensorProtocol::QUALITY_STALE;
     Gpio3TransactionGuard gpio3Guard(entry.config);
     const bool readOk = entry.driver->read(value, quality);
+    if (entry.calibrationDegraded) quality = SensorProtocol::QUALITY_STALE;
     if (!readOk) {
       if (entry.consecutiveReadFailures < 0xFF) ++entry.consecutiveReadFailures;
       if (entry.consecutiveReadFailures >= 3) {
@@ -981,7 +1098,8 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
       if (!std::isfinite(value)) value = 0.0f;
     } else {
       entry.consecutiveReadFailures = 0;
-      entry.descriptor.flags &= static_cast<uint16_t>(~SensorProtocol::FLAG_DEGRADED);
+      if (!entry.calibrationDegraded)
+        entry.descriptor.flags &= static_cast<uint16_t>(~SensorProtocol::FLAG_DEGRADED);
       (void)registry.registerSensor(entry.descriptor);
       value = value * entry.descriptor.scale + entry.descriptor.offset;
     }

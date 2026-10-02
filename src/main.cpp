@@ -577,10 +577,14 @@ static void updateBattery(uint32_t now) {
         isfinite(previousBatteryV) &&
         voltage >= Config::BATTERY_RECHARGE_START_V &&
         voltage > previousBatteryV + 0.003f;
+    gState.chargerState = gState.batteryChargeProbable
+        ? BatteryChargerState::CHARGE_PROBABLE
+        : BatteryChargerState::DISCHARGE_PROBABLE;
     previousBatteryV = voltage;
   } else {
     gState.batteryPercent = -1;
     gState.batteryChargeProbable = false;
+    gState.chargerState = BatteryChargerState::UNKNOWN;
   }
 #endif
   persistBatteryHealth(now);
@@ -896,6 +900,17 @@ static void taskSensorForward(void*) {
       }
     }
 
+    // Consume authenticated batch ACKs before retrying undelivered LoRa samples.
+    LoRaManager::SensorBatchAckRecord batchAck{};
+    while (lora.popSensorBatchAck(batchAck)) {
+      for (uint8_t bit = 0; bit < 32; ++bit) {
+        if (!(batchAck.bitmap & (1UL << bit))) continue;
+        const uint32_t sequence = batchAck.baseSequence + bit;
+        (void)sensorSpool.markDeliveredBySourceSequence(
+            batchAck.nodeId, batchAck.sensorId, sequence);
+      }
+    }
+
     // Drain the persistent spool independently of the RAM queue. A downstream
     // outage therefore leaves only the undelivered bit set and does not lose
     // samples already accepted by the BLE reader.
@@ -934,7 +949,11 @@ static void taskSensorForward(void*) {
               Config::SENSOR_REPORT_DELTA_THRESHOLD,
               Config::SENSOR_REPORT_PERIOD_MS);
         }
+        static uint32_t lastLoraAttemptMs = 0;
         if (reportDue &&
+            (lastLoraAttemptMs == 0 ||
+             static_cast<uint32_t>(millis() - lastLoraAttemptMs) >=
+                 Config::SENSOR_BATCH_ACK_FLUSH_MS) &&
             lora.sendSensorTelemetry(pending.sample.nodeId, pending.sample.sensorId,
                                      pending.sample.value, pending.sample.quality,
                                      pending.sample.timestampMs,
@@ -942,7 +961,7 @@ static void taskSensorForward(void*) {
                                      pending.sourceSequence,
                                      pending.schemaVersion,
                                      pending.firmwareVersion)) {
-          (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_LORA);
+          lastLoraAttemptMs = millis();
           if (state) {
             state->nodeId = pending.sample.nodeId;
             state->sensorId = pending.sample.sensorId;

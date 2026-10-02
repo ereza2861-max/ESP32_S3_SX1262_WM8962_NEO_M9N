@@ -4,6 +4,7 @@
 #include <Wire.h>
 
 namespace {
+bool gProfilePlaceholderDisabled = true;
 
 // Builds a DriverConfig for a profile sensor. All Profile 0 sensors are
 // declared here so that the roster is auditable in one place.
@@ -13,6 +14,8 @@ DriverConfig makeConfig(uint8_t driverType, uint16_t sensorId,
   c.driverType = driverType;
   c.sensorId = sensorId;
   c.periodMs = periodMs;
+  if (gProfilePlaceholderDisabled)
+    c.flags |= DriverConfig::FLAG_PLACEHOLDER_DISABLED;
   return c;
 }
 
@@ -29,7 +32,9 @@ bool addDriver(SensorDriverRegistry& drivers, SensorRegistry& registry,
 
 bool ProfileSensors::begin(ProfileConfig::Profile profile,
                            SensorDriverRegistry& drivers,
-                           SensorRegistry& registry) {
+                           SensorRegistry& registry,
+                           bool placeholderDisabled) {
+  gProfilePlaceholderDisabled = placeholderDisabled;
   registeredCount_ = 0;
   expectedCount_ = ProfileConfig::expectedSensorCount(profile);
 

@@ -129,7 +129,8 @@ enum class ConfigTxnEvent : uint8_t {
   ApplyFailed,
   RolledBack,
   JournalCleared,
-  Recovered
+  Recovered,
+  EcdhRejectedSecurity
 };
 
 void configTxnAudit(ConfigTxnEvent event, uint32_t generation,

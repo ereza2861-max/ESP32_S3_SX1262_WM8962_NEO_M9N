@@ -179,12 +179,20 @@ void BleSensorServer::handleCommand(NimBLECharacteristic* characteristic,
     return;
   }
 
+  // Persist the command sequence before invoking any side effect. A failed
+  // NVS write must fail closed so reboot cannot replay an already executed command.
+  if (prefs.putUInt(key, request.sequence) != sizeof(uint32_t)) {
+    response.result = 1;
+    response.errorCode = SensorProtocol::COMMAND_ERROR_PERSISTENCE_FAILED;
+    prefs.end();
+    commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
+    commandResponse_->notify();
+    return;
+  }
+
   if (!commandHandler_(request, response)) {
     response.result = 1;
     if (response.errorCode == 0) response.errorCode = 2;
-  }
-  if (response.result == 0) {
-    (void)prefs.putUInt(key, request.sequence);
   }
   prefs.end();
   commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));

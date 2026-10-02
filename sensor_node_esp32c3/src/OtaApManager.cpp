@@ -157,6 +157,7 @@ bool OtaApManager::startAp() {
               [this]() { handleUploadDone(); },
               [this]() { handleUpload(); });
   gServer->on("/profile", HTTP_POST, [this]() { handleProfile(); });
+  gServer->on("/recovery/clear", HTTP_POST, [this]() { handleRecoveryClear(); });
   const char* headerKeys[] = {
       PROFILE_CABLES_HEADER, PROFILE_PASSWORD_HEADER, PROFILE_SESSION_HEADER};
   gServer->collectHeaders(headerKeys, 3);
@@ -295,6 +296,25 @@ void OtaApManager::handleProfile() {
   gServer->send(200, "application/json",
                 "{\"ok\":true,\"rebooting\":true}");
   delay(100);
+  ESP.restart();
+}
+
+void OtaApManager::handleRecoveryClear() {
+  if (!recoveryClearCallback_) {
+    gServer->send(503, "application/json", "{\"ok\":false,\"error\":\"unavailable\"}");
+    return;
+  }
+  const String supplied = gServer->header(PROFILE_PASSWORD_HEADER);
+  if (!checkOtaPassword(supplied)) {
+    gServer->send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+    return;
+  }
+  if (!recoveryClearCallback_()) {
+    gServer->send(500, "application/json", "{\"ok\":false,\"error\":\"persist_failed\"}");
+    return;
+  }
+  gServer->send(200, "application/json", "{\"ok\":true,\"reboot\":true}");
+  delay(50);
   ESP.restart();
 }
 
