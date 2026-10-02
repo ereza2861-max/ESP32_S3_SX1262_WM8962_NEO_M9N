@@ -30,12 +30,17 @@ public:
   void clear(SensorRegistry& registry);
   bool sample(SensorRegistry& registry, uint32_t nowMs);
   size_t count() const { return count_; }
+  uint32_t minimumPeriodMs() const;
+  bool setSamplingPeriod(uint16_t sensorId, uint32_t periodMs, SensorRegistry& registry);
 
 private:
   struct Entry {
     DriverConfig config{};
     SensorDriver* driver = nullptr;
     uint32_t lastSampleMs = 0;
+    uint32_t sourceSequence = 0;
+    uint8_t consecutiveReadFailures = 0;
+    SensorProtocol::SensorDescriptor descriptor{};
   };
 
   Entry entries_[MAX_DRIVERS]{};
@@ -44,4 +49,5 @@ private:
   static SensorDriver* createDriver(const DriverConfig& config);
   static bool validConfig(const DriverConfig& config);
   bool rebuild(SensorRegistry& registry);
+  static bool loadCalibration(uint16_t sensorId, float& scale, float& offset);
 };

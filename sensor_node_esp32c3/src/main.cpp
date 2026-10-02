@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include "Config.h"
 #include "ProfileManager.h"
 #include "OtaApManager.h"
@@ -26,6 +27,43 @@ String nodeName;
 String otaPassword;
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
+constexpr uint8_t BOOT_LOOP_THRESHOLD = 5;
+bool recoveryMode = false;
+bool bootLoopCleared = false;
+bool bleResetRequested = false;
+
+bool updateBootLoopCount(bool reset) {
+  Preferences bootPrefs;
+  if (!bootPrefs.begin("sensor", false)) return false;
+  uint32_t count = bootPrefs.getUInt("boot_loop_count", 0);
+  if (reset) count = 0;
+  else if (count < UINT32_MAX) ++count;
+  const bool ok = bootPrefs.putUInt("boot_loop_count", count) > 0;
+  bootPrefs.end();
+  return ok;
+}
+
+uint32_t bootLoopCount() {
+  Preferences bootPrefs;
+  if (!bootPrefs.begin("sensor", true)) return 0;
+  const uint32_t count = bootPrefs.getUInt("boot_loop_count", 0);
+  bootPrefs.end();
+  return count;
+}
+
+void watchdogInit() {
+  esp_task_wdt_config_t cfg{};
+  cfg.timeout_ms = 10000;
+  cfg.idle_core_mask = 1U << 0;
+  cfg.trigger_panic = true;
+  esp_err_t err = esp_task_wdt_reconfigure(&cfg);
+  if (err == ESP_ERR_INVALID_STATE) err = esp_task_wdt_init(&cfg);
+  if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+    (void)esp_task_wdt_add(nullptr);
+  } else {
+    Serial.printf("WARN: sensor Task WDT setup failed: %s\n", esp_err_to_name(err));
+  }
+}
 
 bool validOtaPassword(const String& value) {
   if (value.length() < OTA_PASSWORD_MIN_LEN ||
@@ -83,6 +121,7 @@ void printHelp() {
   Serial.println("  ota password <secret>   stage OTA password (min 12 chars)");
   Serial.println("  ota save                save OTA provisioning and reboot");
   Serial.println("  save                    save provisioning and reboot");
+  Serial.println("  recovery clear         clear boot-loop recovery and reboot");
 }
 void loadProvisioning() {
   if (!prefs.begin("sensor", false)) {
@@ -124,6 +163,28 @@ void showProvisioning() {
   Serial.println("ota=managed-by-OtaApManager");
 }
 
+bool onBleCommand(const SensorProtocol::CommandRequest& request,
+                  SensorProtocol::CommandResponse& response) {
+  switch (request.commandId) {
+    case SensorProtocol::COMMAND_SET_SAMPLING_PERIOD:
+      if (request.sensorId == 0 ||
+          !driverRegistry.setSamplingPeriod(request.sensorId, request.argument, registry)) {
+        response.errorCode = 10;
+        return false;
+      }
+      return true;
+    case SensorProtocol::COMMAND_REQUEST_DESCRIPTOR_REFRESH:
+      bleServer.refreshDescriptorCache();
+      return true;
+    case SensorProtocol::COMMAND_REQUEST_SENSOR_RESET:
+      bleResetRequested = true;
+      return true;
+    default:
+      response.errorCode = 11;
+      return false;
+  }
+}
+
 void onRfidTagDetected(const uint8_t*, uint8_t) {
   if (!registry.updateValue(ProfileConfig::SENSOR_ID_RFID_EVENT, 1.0f,
                             SensorProtocol::QUALITY_VALID)) {
@@ -147,7 +208,9 @@ bool registerRfidDescriptor() {
   descriptor.periodMs = ProfileConfig::RFID_POLL_INTERVAL_MS;
   descriptor.flags = SensorProtocol::FLAG_ENABLED |
                     SensorProtocol::FLAG_EVENT_DRIVEN |
-                    SensorProtocol::FLAG_READ_ONLY;
+                    SensorProtocol::FLAG_READ_ONLY |
+                    SensorProtocol::FLAG_HAS_SCHEMA_VERSION;
+  descriptor.schemaVersion = 1;
   return registry.registerSensor(descriptor);
 }
 
@@ -157,6 +220,13 @@ void handleCommand(String line) {
   if (line == "help") { printHelp(); return; }
   if (line == "show") { showProvisioning(); return; }
   if (line == "save") { saveProvisioning(); return; }
+  if (line == "recovery clear") {
+    (void)updateBootLoopCount(true);
+    Serial.println("OK: boot-loop recovery cleared; rebooting");
+    delay(100);
+    ESP.restart();
+    return;
+  }
   if (line == "ota save") {
     if (!validOtaPassword(otaPassword)) {
       Serial.println("ERROR: provision an OTA password (12..64 printable ASCII characters) first");
@@ -197,6 +267,8 @@ void handleCommand(String line) {
 void setup() {
   Serial.begin(SensorNodeConfig::SERIAL_BAUD);
   delay(200);
+  watchdogInit();
+  (void)updateBootLoopCount(false);
   Serial.println("FieldRadio ESP32-C3 BLE Sensor Node");
   loadProvisioning();
   profileManager.begin();
@@ -218,31 +290,73 @@ void setup() {
 
   otaApManager.setProfileChangeCallback(onWebProfileChange);
   otaApManager.begin();
+  bleServer.setCommandHandler(onBleCommand);
   showProvisioning();
   printHelp();
+  const uint32_t loopCount = bootLoopCount();
+  if (loopCount > BOOT_LOOP_THRESHOLD) {
+    recoveryMode = true;
+    Serial.printf("RECOVERY: boot_loop_count=%lu; BLE disabled, OTA AP window only\n",
+                  static_cast<unsigned long>(loopCount));
+    otaApManager.beginRecoveryWindow();
+  }
+  if (recoveryMode) return;
   if (!bleServer.begin(nodeName, registry)) {
-    Serial.println("FATAL: BLE server initialization failed");
-    while (true) delay(1000);
+    Serial.println("FATAL: BLE server initialization failed; entering recovery cycle");
+    otaApManager.beginRecoveryWindow();
+    for (;;) {
+      esp_task_wdt_reset();
+      otaApManager.task();
+      if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
+      delay(100);
+    }
   }
 }
 
 void loop() {
   static uint32_t lastSampleMs = 0;
+  static bool firstSuccessfulLoop = false;
+  const uint32_t minPeriodMs = driverRegistry.minimumPeriodMs();
+  const uint32_t tickMs = max<uint32_t>(
+      SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS, minPeriodMs);
   const uint32_t now = millis();
-  if (now - lastSampleMs >= SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS) {
+  bool sampleOk = true;
+  if (now - lastSampleMs >= tickMs) {
     lastSampleMs = now;
-    // The driver registry is the authoritative sampling scheduler: each
-    // descriptor periodMs is checked per driver. This loop is only its tick.
-    (void)driverRegistry.sample(registry, now);
+    // The driver registry owns per-sensor periodMs scheduling. The loop tick
+    // is never shorter than the configured base period or registered minimum.
+    sampleOk = driverRegistry.sample(registry, now);
   }
+  if (sampleOk && bleServer.isRunning() && !firstSuccessfulLoop) {
+    firstSuccessfulLoop = true;
+    // Successful BLE initialization plus one successful scheduler pass clears
+    // the persistent boot-loop guard.
+    if (!bootLoopCleared) {
+      (void)updateBootLoopCount(true);
+      bootLoopCleared = true;
+    }
+  }
+  if (recoveryMode) {
+    esp_task_wdt_reset();
+    otaApManager.task();
+    if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
+    delay(50);
+    return;
+  }
+  esp_task_wdt_reset();
   profileManager.task();
   otaApManager.task();
   bleServer.task();
   rfidReader.task();
+  if (bleResetRequested) {
+    delay(100);
+    ESP.restart();
+  }
 
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     handleCommand(line);
   }
+  esp_task_wdt_reset();
   delay(5);
 }

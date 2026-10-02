@@ -1,4 +1,5 @@
 #include "SensorDriverRegistry.h"
+#include <Preferences.h>
 #include "Config.h"
 #include "ProfileConfig.h"
 #include <Adafruit_BME280.h>
@@ -788,6 +789,28 @@ bool selectGpio3MuxForConfig(const DriverConfig& config) {
 
 }  // namespace
 
+bool SensorDriverRegistry::loadCalibration(uint16_t sensorId, float& scale, float& offset) {
+  scale = 1.0f;
+  offset = 0.0f;
+  Preferences prefs;
+  if (!prefs.begin("calib", true)) return false;
+  char scaleKey[16] = {};
+  char offsetKey[16] = {};
+  std::snprintf(scaleKey, sizeof(scaleKey), "s%04X", static_cast<unsigned>(sensorId));
+  std::snprintf(offsetKey, sizeof(offsetKey), "o%04X", static_cast<unsigned>(sensorId));
+  const bool hasScale = prefs.isKey(scaleKey);
+  const bool hasOffset = prefs.isKey(offsetKey);
+  if (hasScale) scale = prefs.getFloat(scaleKey, 1.0f);
+  if (hasOffset) offset = prefs.getFloat(offsetKey, 0.0f);
+  prefs.end();
+  if (!std::isfinite(scale) || !std::isfinite(offset) || scale == 0.0f) {
+    scale = 1.0f;
+    offset = 0.0f;
+    return false;
+  }
+  return hasScale || hasOffset;
+}
+
 bool SensorDriverRegistry::rebuild(SensorRegistry& registry) {
   registry.clear();
   for (size_t i = 0; i < count_; ++i) {
@@ -795,12 +818,27 @@ bool SensorDriverRegistry::rebuild(SensorRegistry& registry) {
     entries_[i].driver = createDriver(entries_[i].config);
     if (!entries_[i].driver || !validConfig(entries_[i].config) ||
         !selectGpio3MuxForConfig(entries_[i].config) ||
-        !entries_[i].driver->begin(entries_[i].config) ||
-        !registry.registerSensor(entries_[i].driver->descriptor())) {
+        !entries_[i].driver->begin(entries_[i].config)) {
       clear(registry);
       return false;
     }
+    SensorProtocol::SensorDescriptor descriptor = entries_[i].driver->descriptor();
+    descriptor.flags |= SensorProtocol::FLAG_HAS_SCHEMA_VERSION;
+    descriptor.schemaVersion = 1;
+    float scale = 1.0f;
+    float offset = 0.0f;
+    if (loadCalibration(descriptor.id, scale, offset)) {
+      descriptor.scale = scale;
+      descriptor.offset = offset;
+      descriptor.flags |= SensorProtocol::FLAG_CALIBRATED;
+    }
+    entries_[i].descriptor = descriptor;
     entries_[i].lastSampleMs = 0;
+    entries_[i].consecutiveReadFailures = 0;
+    if (!registry.registerSensor(descriptor)) {
+      clear(registry);
+      return false;
+    }
   }
   return true;
 }
@@ -924,18 +962,30 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
     if (entry.lastSampleMs != 0 &&
         static_cast<uint32_t>(nowMs - entry.lastSampleMs) < entry.config.periodMs) continue;
     entry.lastSampleMs = nowMs;
+    if (++entry.sourceSequence == 0) entry.sourceSequence = 1;
     float value = 0.0f;
     uint8_t quality = SensorProtocol::QUALITY_STALE;
     Gpio3TransactionGuard gpio3Guard(entry.config);
     const bool readOk = entry.driver->read(value, quality);
     if (!readOk) {
-      Serial.printf("SENSOR: read failed id=0x%04X driver=%u quality=%u\n",
+      if (entry.consecutiveReadFailures < 0xFF) ++entry.consecutiveReadFailures;
+      if (entry.consecutiveReadFailures >= 3) {
+        entry.descriptor.flags |= SensorProtocol::FLAG_DEGRADED;
+        (void)registry.registerSensor(entry.descriptor);
+      }
+      Serial.printf("SENSOR: read failed id=0x%04X driver=%u quality=%u failures=%u\n",
                     static_cast<unsigned>(entry.config.sensorId),
                     static_cast<unsigned>(entry.config.driverType),
-                    static_cast<unsigned>(quality));
+                    static_cast<unsigned>(quality),
+                    static_cast<unsigned>(entry.consecutiveReadFailures));
       if (!std::isfinite(value)) value = 0.0f;
+    } else {
+      entry.consecutiveReadFailures = 0;
+      entry.descriptor.flags &= static_cast<uint16_t>(~SensorProtocol::FLAG_DEGRADED);
+      (void)registry.registerSensor(entry.descriptor);
+      value = value * entry.descriptor.scale + entry.descriptor.offset;
     }
-    if (!registry.updateValue(entry.config.sensorId, value, quality)) {
+    if (!registry.updateValue(entry.config.sensorId, value, quality, entry.sourceSequence)) {
       Serial.printf("SENSOR: registry update failed id=0x%04X\n",
                     static_cast<unsigned>(entry.config.sensorId));
       ok = false;
@@ -944,3 +994,20 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
   return ok;
 }
 
+uint32_t SensorDriverRegistry::minimumPeriodMs() const {
+  uint32_t minimum = UINT32_MAX;
+  for (size_t i = 0; i < count_; ++i)
+    if (entries_[i].config.periodMs != 0 && entries_[i].config.periodMs < minimum) minimum = entries_[i].config.periodMs;
+  return minimum == UINT32_MAX ? 0 : minimum;
+}
+
+bool SensorDriverRegistry::setSamplingPeriod(uint16_t sensorId, uint32_t periodMs,
+                                              SensorRegistry& registry) {
+  if (sensorId == 0 || periodMs == 0 || periodMs > 86400000UL) return false;
+  for (size_t i = 0; i < count_; ++i) {
+    if (entries_[i].config.sensorId != sensorId) continue;
+    entries_[i].config.periodMs = periodMs;
+    return rebuild(registry);
+  }
+  return false;
+}

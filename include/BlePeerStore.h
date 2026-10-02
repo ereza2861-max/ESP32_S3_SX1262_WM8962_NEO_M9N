@@ -9,7 +9,8 @@ namespace BlePeerStore {
 constexpr uint32_t MAGIC = 0x42504531UL; // "BPE1", retained across format versions
 constexpr uint8_t VERSION = 2;
 constexpr size_t V1_BYTES = 64;
-constexpr size_t V2_BYTES = 90;
+constexpr size_t V2_BYTES = 94;
+constexpr size_t V2_LEGACY_BYTES = 90;
 constexpr size_t MAC_BYTES = 16;
 
 #pragma pack(push, 1)
@@ -34,6 +35,23 @@ struct PeerRecordV2 {
   char name[SensorProtocol::MAX_NODE_NAME_BYTES]{};
   uint32_t updatedEpoch = 0;
   uint8_t irk[16]{};
+  uint32_t lastCommandSequence = 0;
+  uint8_t mac[MAC_BYTES]{};
+  uint32_t crc32 = 0;
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+struct PeerRecordV2Legacy {
+  uint32_t magic = MAGIC;
+  uint8_t version = VERSION;
+  uint8_t reserved[3]{};
+  uint8_t passkey[4]{};
+  SensorProtocol::BleAddress identity{};
+  SensorProtocol::BleAddress lastRpa{};
+  char name[SensorProtocol::MAX_NODE_NAME_BYTES]{};
+  uint32_t updatedEpoch = 0;
+  uint8_t irk[16]{};
   uint8_t mac[MAC_BYTES]{};
   uint32_t crc32 = 0;
 };
@@ -41,11 +59,13 @@ struct PeerRecordV2 {
 
 static_assert(sizeof(PeerRecordV1) == V1_BYTES, "legacy peer record layout changed");
 static_assert(sizeof(PeerRecordV2) == V2_BYTES, "peer v2 record layout changed");
+static_assert(sizeof(PeerRecordV2Legacy) == V2_LEGACY_BYTES, "legacy peer v2 layout changed");
 
 bool deriveMasterKey(const char* loraKeyHex, uint8_t out[16]);
 uint32_t crc32(const uint8_t* data, size_t len);
 bool sealV2(PeerRecordV2& record, const char* loraKeyHex);
 bool openV2(PeerRecordV2& record, const char* loraKeyHex);
+bool openV2Legacy(PeerRecordV2Legacy& record, const char* loraKeyHex);
 bool migrateV1(const PeerRecordV1& legacy, PeerRecordV2& out, const char* loraKeyHex);
 bool validV1(const PeerRecordV1& legacy);
 uint32_t passkey(const PeerRecordV2& record);

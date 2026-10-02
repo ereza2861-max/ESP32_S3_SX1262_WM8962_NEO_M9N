@@ -15,7 +15,7 @@ bool SensorRegistry::registerSensor(const SensorProtocol::SensorDescriptor& desc
   return true;
 }
 
-bool SensorRegistry::updateValue(uint16_t id, float value, uint8_t quality) {
+bool SensorRegistry::updateValue(uint16_t id, float value, uint8_t quality, uint32_t sourceSequence) {
   if (id == 0 || !std::isfinite(value)) return false;
   const int index = find(id);
   if (index < 0) return false;
@@ -24,6 +24,8 @@ bool SensorRegistry::updateValue(uint16_t id, float value, uint8_t quality) {
   sample.value = value;
   sample.timestamp = 0;
   sample.quality = quality;
+  sample.flags = sourceSequence ? SensorProtocol::FLAG_HAS_SOURCE_SEQUENCE : 0;
+  sample.sourceSequence = sourceSequence;
   values_[index] = sample;
   valueValid_[index] = true;
   return true;

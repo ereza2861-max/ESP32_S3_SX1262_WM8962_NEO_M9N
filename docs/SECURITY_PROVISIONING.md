@@ -73,3 +73,14 @@ removing existing storage namespaces:
 Production provisioning must use the secure production profile. Development/HIL
 profiles may be used for validation, but they are not production-security
 acceptance evidence.
+
+## Sensor OTA session policy
+
+Firmware uploads to the ESP32-C3 OTA WebUI require the provisioned OTA password
+and the current `X-OTA-Session` value. The session is checked when the upload
+starts and again when the upload completion handler accepts the resulting image.
+The existing profile endpoint retains `X-Profile-Cables-Changed: true` in
+addition to its password/session authentication.
+
+This policy is an additive authorization check; it does not change the existing
+OTA AP transport or introduce a new library.

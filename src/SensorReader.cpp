@@ -31,12 +31,24 @@ struct ClientSlot {
   NimBLERemoteCharacteristic* request = nullptr;
   NimBLERemoteCharacteristic* descriptor = nullptr;
   NimBLERemoteCharacteristic* value = nullptr;
+  NimBLERemoteCharacteristic* command = nullptr;
+  NimBLERemoteCharacteristic* commandResponse = nullptr;
   size_t nodeIndex = 0;
   bool inUse = false;
   bool descriptorRefreshRequested = false;
+  uint32_t pendingCommandSequence = 0;
+  uint8_t pendingCommandId = 0;
+  uint8_t pendingCommandRetries = 0;
+  uint32_t pendingCommandSentMs = 0;
+  SensorProtocol::CommandRequest pendingCommand{};
+  bool commandPending = false;
+  SensorProtocol::CommandResponse lastCommandResponse{};
+  bool commandResponseReady = false;
+  bool commandCompleted = false;
 };
 
 SensorReader* gReader = nullptr;
+extern ClientSlot gSlots[SensorRegistry::MAX_SUPPORTED_NODES];
 extern MqttClientManager mqtt;
 
 struct PairingFailure {
@@ -219,31 +231,52 @@ bool peerStoreLoad(PeerRecord out[PEER_MAX]) {
     return true;
   }
 
-  if (bytes != BlePeerStore::V2_BYTES * PEER_MAX) {
+  const bool legacyV2 = bytes == BlePeerStore::V2_LEGACY_BYTES * PEER_MAX;
+  if (!legacyV2 && bytes != BlePeerStore::V2_BYTES * PEER_MAX) {
     prefs.end();
     return false;
   }
 
+  const size_t recordBytes = legacyV2 ? BlePeerStore::V2_LEGACY_BYTES : BlePeerStore::V2_BYTES;
   uint8_t blob[BlePeerStore::V2_BYTES * PEER_MAX] = {};
-  const size_t got = prefs.getBytes("peers", blob, sizeof(blob));
+  const size_t got = prefs.getBytes("peers", blob, recordBytes * PEER_MAX);
   prefs.end();
-  if (got != sizeof(blob)) return false;
+  if (got != recordBytes * PEER_MAX) return false;
 
+  bool migrated = false;
   for (size_t i = 0; i < PEER_MAX; ++i) {
     PeerRecord record{};
-    std::memcpy(&record, blob + i * BlePeerStore::V2_BYTES, sizeof(record));
-    if (record.magic != BlePeerStore::MAGIC) continue;
-    if (record.crc32 != BlePeerStore::crc32(
-            reinterpret_cast<const uint8_t*>(&record),
-            offsetof(BlePeerStore::PeerRecordV2, crc32))) {
-      continue;
-    }
-    if (!BlePeerStore::openV2(record, config.loraKeyHex.c_str())) {
-      gPeerMacFailures.fetch_add(1, std::memory_order_relaxed);
-      continue;
+    if (legacyV2) {
+      BlePeerStore::PeerRecordV2Legacy legacy{};
+      std::memcpy(&legacy, blob + i * recordBytes, sizeof(legacy));
+      if (legacy.magic != BlePeerStore::MAGIC ||
+          !BlePeerStore::openV2Legacy(legacy, config.loraKeyHex.c_str())) {
+        if (legacy.magic == BlePeerStore::MAGIC)
+          gPeerMacFailures.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      record.magic = BlePeerStore::MAGIC;
+      record.version = BlePeerStore::VERSION;
+      std::memcpy(record.passkey, legacy.passkey, sizeof(record.passkey));
+      record.identity = legacy.identity;
+      record.lastRpa = legacy.lastRpa;
+      std::memcpy(record.name, legacy.name, sizeof(record.name));
+      record.updatedEpoch = legacy.updatedEpoch;
+      std::memcpy(record.irk, legacy.irk, sizeof(record.irk));
+      // Legacy v2 is decrypted above; re-seal below with the expanded layout.
+      migrated = true;
+    } else {
+      std::memcpy(&record, blob + i * recordBytes, sizeof(record));
+      if (record.magic != BlePeerStore::MAGIC ||
+          !BlePeerStore::openV2(record, config.loraKeyHex.c_str())) {
+        if (record.magic == BlePeerStore::MAGIC)
+          gPeerMacFailures.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
     }
     out[i] = record;
   }
+  if (migrated) (void)peerStoreSave(out);
   return true;
 }
 
@@ -370,7 +403,12 @@ void notifyCallback(NimBLERemoteCharacteristic* characteristic,
     std::strncpy(sample.unit, liveDescriptor.unit, sizeof(sample.unit) - 1);
     // BLE callbacks must remain non-blocking: network/MQTT work is performed
     // by taskSensorForward after this sample has been queued.
-    (void)gReader->enqueueSensorForLoRa(sample);
+    (void)gReader->enqueueSensorForLoRa(
+        sample,
+        (value.flags & SensorProtocol::FLAG_HAS_SOURCE_SEQUENCE) ? value.sourceSequence : 0,
+        (liveDescriptor.flags & SensorProtocol::FLAG_HAS_SCHEMA_VERSION)
+            ? liveDescriptor.schemaVersion : 0,
+        SensorProtocol::FIRMWARE_VERSION);
     return;
   }
 }
@@ -397,6 +435,12 @@ bool writeDescriptorRequest(ClientSlot& slot, const uint8_t request[3]) {
   if (slot.request->canWrite()) return slot.request->writeValue(request, 3, true);
   if (slot.request->canWriteNoResponse()) return slot.request->writeValue(request, 3, false);
   return false;
+}
+
+bool writeSensorCommand(ClientSlot& slot, const SensorProtocol::CommandRequest& request) {
+  if (!slot.command || !slot.command->canWrite()) return false;
+  return slot.command->writeValue(reinterpret_cast<const uint8_t*>(&request),
+                                  sizeof(request), true);
 }
 
 bool connectDevice(const NimBLEAdvertisedDevice* device) {
@@ -550,6 +594,9 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
   slot->request = service->getCharacteristic(NimBLEUUID(SensorProtocol::DESCRIPTOR_REQUEST_UUID));
   slot->descriptor = service->getCharacteristic(NimBLEUUID(SensorProtocol::DESCRIPTOR_DATA_UUID));
   slot->value = service->getCharacteristic(NimBLEUUID(SensorProtocol::SENSOR_VALUE_UUID));
+  slot->command = service->getCharacteristic(NimBLEUUID(SensorProtocol::COMMAND_UUID));
+  slot->commandResponse = service->getCharacteristic(
+      NimBLEUUID(SensorProtocol::COMMAND_RESPONSE_UUID));
   if (!slot->request || !slot->descriptor || !slot->value ||
       (!slot->request->canWrite() && !slot->request->canWriteNoResponse()) ||
       !slot->descriptor->canRead() ||
@@ -560,6 +607,18 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     return false;
   }
 
+  if (slot->command && slot->commandResponse) {
+    if (!slot->command->canWrite() ||
+        (!slot->commandResponse->canRead() &&
+         !slot->commandResponse->canNotify() &&
+         !slot->commandResponse->canIndicate())) {
+      slot->command = nullptr;
+      slot->commandResponse = nullptr;
+    } else if (slot->commandResponse->canNotify() || slot->commandResponse->canIndicate()) {
+      (void)slot->commandResponse->subscribe(
+          slot->commandResponse->canNotify(), &gCommandResponseCallbacks);
+    }
+  }
   slot->nodeIndex = nodeIndex;
   slot->inUse = true;
   gReader->registry().markConnected(nodeIndex, true, millis());
@@ -572,13 +631,14 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
     return false;
   }
   const NimBLEAttValue response = slot->descriptor->readValue();
-  if (response.size() != sizeof(SensorProtocol::SensorDescriptorResponse)) {
+  if (response.size() < 67U) {
     cleanupSlot(*slot, true);
     return false;
   }
 
   SensorProtocol::SensorDescriptorResponse first{};
-  std::memcpy(&first, response.data(), sizeof(first));
+  std::memset(&first, 0, sizeof(first));
+  std::memcpy(&first, response.data(), response.size() < sizeof(first) ? response.size() : sizeof(first));
   if (first.magic != SensorProtocol::DESCRIPTOR_MAGIC ||
       first.version != SensorProtocol::PROTOCOL_VERSION || first.index != 0 ||
       first.total == 0 || first.total > Config::SENSOR_MAX_SENSORS_PER_NODE_VALUE ||
@@ -596,12 +656,13 @@ bool connectDevice(const NimBLEAdvertisedDevice* device) {
       return false;
     }
     const NimBLEAttValue item = slot->descriptor->readValue();
-    if (item.size() != sizeof(SensorProtocol::SensorDescriptorResponse)) {
+    if (item.size() < 67U) {
       cleanupSlot(*slot, true);
       return false;
     }
     SensorProtocol::SensorDescriptorResponse decoded{};
-    std::memcpy(&decoded, item.data(), sizeof(decoded));
+    std::memcpy(&decoded, item.data(),
+                item.size() < sizeof(decoded) ? item.size() : sizeof(decoded));
     if (decoded.magic != SensorProtocol::DESCRIPTOR_MAGIC ||
         decoded.version != SensorProtocol::PROTOCOL_VERSION ||
         decoded.index != index || decoded.total != first.total ||
@@ -652,7 +713,7 @@ bool SensorReader::begin(const String& gatewayName) {
   gScan->setInterval(config.sensorScanIntervalMs);
   gScan->setWindow(config.sensorScanWindowMs);
   gScan->setMaxResults(static_cast<uint8_t>(config.sensorMaxNodes));
-  sensorQueue_ = xQueueCreateStatic(Config::SENSOR_LORA_QUEUE_DEPTH, sizeof(SensorSample),
+  sensorQueue_ = xQueueCreateStatic(Config::SENSOR_LORA_QUEUE_DEPTH, sizeof(QueuedSample),
                                     sensorQueueStorage_, &sensorQueueStruct_);
   if (!sensorQueue_) return false;
   gReader = this;
@@ -675,6 +736,26 @@ void SensorReader::task() {
   gScan->setInterval(config.sensorScanIntervalMs);
   gScan->setWindow(config.sensorScanWindowMs);
   gScan->setMaxResults(static_cast<uint8_t>(maxNodes));
+
+  const uint32_t nowMs = millis();
+  for (auto& slot : gSlots) {
+    if (!slot.inUse || !slot.commandPending) continue;
+    if (slot.commandResponseReady) {
+      slot.commandPending = false;
+      continue;
+    }
+    if (static_cast<uint32_t>(nowMs - slot.pendingCommandSentMs) < 1000U) continue;
+    if (slot.pendingCommandRetries >= 3) {
+      slot.commandPending = false;
+      continue;
+    }
+    if (writeSensorCommand(slot, slot.pendingCommand)) {
+      ++slot.pendingCommandRetries;
+      slot.pendingCommandSentMs = nowMs;
+    } else {
+      slot.commandPending = false;
+    }
+  }
 
   // A runtime reduction of maxNodes must also release slots above the new
   // limit; otherwise connected clients can remain alive outside the configured
@@ -736,31 +817,56 @@ void SensorReader::task() {
   vTaskDelay(pdMS_TO_TICKS( max<uint32_t>(100, config.sensorScanIntervalMs / 2U) ));
 }
 
-bool SensorReader::enqueueSensorForLoRa(const SensorSample& sample) {
+bool SensorReader::enqueueSensorForLoRa(const SensorSample& sample,
+                                           uint32_t sourceSequence,
+                                           uint8_t schemaVersion,
+                                           uint32_t firmwareVersion) {
   if (!sensorQueue_) return false;
-  if (xQueueSend(sensorQueue_, &sample, 0) == pdTRUE) return true;
+  QueuedSample queued{};
+  queued.sample = sample;
+  queued.sourceSequence = sourceSequence;
+  queued.schemaVersion = schemaVersion;
+  queued.firmwareVersion = firmwareVersion;
+  if (xQueueSend(sensorQueue_, &queued, 0) == pdTRUE) return true;
   if (queuePolicy() == SampleQueuePolicy::DROP_OLDEST) {
-    SensorSample discarded{};
+    QueuedSample discarded{};
     if (xQueueReceive(sensorQueue_, &discarded, 0) == pdTRUE) {
       droppedSamples_.fetch_add(1, std::memory_order_relaxed);
-      if (xQueueSend(sensorQueue_, &sample, 0) == pdTRUE) return true;
+      if (xQueueSend(sensorQueue_, &queued, 0) == pdTRUE) return true;
     }
-    // The queue was still full after the removal attempt, or the replacement
-    // send failed. Count the incoming sample only if it was not accepted.
     droppedSamples_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
-  // DROP_NEWEST discards exactly the incoming sample.
   droppedSamples_.fetch_add(1, std::memory_order_relaxed);
   return false;
 }
 
-bool SensorReader::popSensorForLoRa(SensorSample& sample, TickType_t timeout) {
-  return sensorQueue_ && xQueueReceive(sensorQueue_, &sample, timeout) == pdTRUE;
+bool SensorReader::popSensorForLoRa(SensorSample& sample, TickType_t timeout,
+                                     uint32_t* sourceSequence,
+                                     uint8_t* schemaVersion,
+                                     uint32_t* firmwareVersion) {
+  if (!sensorQueue_) return false;
+  QueuedSample queued{};
+  if (xQueueReceive(sensorQueue_, &queued, timeout) != pdTRUE) return false;
+  sample = queued.sample;
+  if (sourceSequence) *sourceSequence = queued.sourceSequence;
+  if (schemaVersion) *schemaVersion = queued.schemaVersion;
+  if (firmwareVersion) *firmwareVersion = queued.firmwareVersion;
+  return true;
 }
 
-bool SensorReader::peekSensorForLoRa(SensorSample& sample) const {
-  return sensorQueue_ && xQueuePeek(sensorQueue_, &sample, 0) == pdTRUE;
+bool SensorReader::peekSensorForLoRa(SensorSample& sample,
+                                     uint32_t* sourceSequence,
+                                     uint8_t* schemaVersion,
+                                     uint32_t* firmwareVersion) const {
+  if (!sensorQueue_) return false;
+  QueuedSample queued{};
+  if (xQueuePeek(sensorQueue_, &queued, 0) != pdTRUE) return false;
+  sample = queued.sample;
+  if (sourceSequence) *sourceSequence = queued.sourceSequence;
+  if (schemaVersion) *schemaVersion = queued.schemaVersion;
+  if (firmwareVersion) *firmwareVersion = queued.firmwareVersion;
+  return true;
 }
 
 bool SensorReader::snapshotNodes(SensorNodeSnapshot* out, size_t capacity, size_t& count) const {
@@ -799,6 +905,81 @@ bool SensorReader::hasConnectedNode() const {
   return false;
 }
 
+
+bool SensorReader::sendSensorCommand(size_t nodeIndex, uint8_t commandId,
+                                         uint16_t sensorId, uint32_t argument) {
+  if (nodeIndex >= SensorRegistry::MAX_SUPPORTED_NODES || commandId == 0) return false;
+  ClientSlot* slot = nullptr;
+  for (auto& candidate : gSlots) {
+    if (candidate.inUse && candidate.nodeIndex == nodeIndex) {
+      slot = &candidate;
+      break;
+    }
+  }
+  if (!slot || !slot->command || !slot->commandResponse) return false;
+  SensorRegistry::Node node{};
+  if (!registry_.snapshotNode(nodeIndex, node)) return false;
+  if (!peerMutexLock()) return false;
+  PeerRecord peers[PEER_MAX]{};
+  bool ok = peerStoreLoad(peers);
+  if (!ok) {
+    peerMutexUnlock();
+    return false;
+  }
+  size_t peerIndex = PEER_MAX;
+  for (size_t i = 0; i < PEER_MAX; ++i) {
+    if (peers[i].magic == BlePeerStore::MAGIC &&
+        peers[i].identity == node.address) {
+      peerIndex = i;
+      break;
+    }
+  }
+  if (peerIndex == PEER_MAX) {
+    peerMutexUnlock();
+    return false;
+  }
+  uint32_t sequence = peers[peerIndex].lastCommandSequence;
+  if (++sequence == 0) sequence = 1;
+  peers[peerIndex].lastCommandSequence = sequence;
+  ok = peerStoreSave(peers);
+  peerMutexUnlock();
+  if (!ok) return false;
+
+  SensorProtocol::CommandRequest request{};
+  request.commandId = commandId;
+  request.sequence = sequence;
+  request.sensorId = sensorId;
+  request.argument = argument;
+  slot->pendingCommand = request;
+  slot->pendingCommandSequence = sequence;
+  slot->pendingCommandId = commandId;
+  slot->pendingCommandRetries = 0;
+  slot->pendingCommandSentMs = millis();
+  slot->commandResponseReady = false;
+  slot->commandCompleted = false;
+  if (!writeSensorCommand(*slot, request)) {
+    slot->commandPending = false;
+    return false;
+  }
+  slot->pendingCommandRetries = 1;
+  slot->commandPending = true;
+  return true;
+}
+
+bool SensorReader::getSensorCommandResponse(
+    size_t nodeIndex, SensorProtocol::CommandResponse& out) const {
+  if (nodeIndex >= SensorRegistry::MAX_SUPPORTED_NODES) return false;
+  const ClientSlot* slot = nullptr;
+  for (const auto& candidate : gSlots) {
+    if (candidate.inUse && candidate.nodeIndex == nodeIndex) {
+      slot = &candidate;
+      break;
+    }
+  }
+  if (!slot || !slot->commandCompleted) return false;
+  out = slot->lastCommandResponse;
+  return true;
+}
 
 bool SensorReader::setPeerPasskey(const SensorProtocol::BleAddress& address, uint32_t passkey) {
   if (address.bytes[0] == 0 && address.bytes[1] == 0 && address.bytes[2] == 0 &&
@@ -987,10 +1168,13 @@ String SensorReader::peersJson() const {
 
 bool SensorReader::begin(const String&) { return false; }
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
-bool SensorReader::enqueueSensorForLoRa(const SensorSample&) { return false; }
+bool SensorReader::enqueueSensorForLoRa(const SensorSample&, uint32_t, uint8_t, uint32_t) { return false; }
 uint32_t SensorReader::droppedSamples() const { return 0; }
 uint8_t SensorReader::queueDepth() const { return 0; }
 uint32_t SensorReader::peerMacFailures() const { return 0; }
+bool SensorReader::sendSensorCommand(size_t, uint8_t, uint16_t, uint32_t) { return false; }
+bool SensorReader::getSensorCommandResponse(
+    size_t, SensorProtocol::CommandResponse&) const { return false; }
 bool SensorReader::setPeerPasskey(const SensorProtocol::BleAddress&, uint32_t) { return false; }
 bool SensorReader::setPeerIrk(const SensorProtocol::BleAddress&, const uint8_t[16]) { return false; }
 bool SensorReader::forgetPeerPasskey(const SensorProtocol::BleAddress&) { return false; }
@@ -998,8 +1182,8 @@ bool SensorReader::getPeerPasskey(const SensorProtocol::BleAddress&, uint32_t&) 
 bool SensorReader::resolvePeerIdentity(const SensorProtocol::BleAddress& a, const char*, SensorProtocol::BleAddress& i, bool& r) const { i = a; r = false; return false; }
 bool SensorReader::recordPeerRpa(const SensorProtocol::BleAddress&, const SensorProtocol::BleAddress&) { return false; }
 String SensorReader::peersJson() const { return "[]"; }
-bool SensorReader::popSensorForLoRa(SensorSample&, TickType_t) { return false; }
-bool SensorReader::peekSensorForLoRa(SensorSample&) const { return false; }
+bool SensorReader::popSensorForLoRa(SensorSample&, TickType_t, uint32_t*, uint8_t*, uint32_t*) { return false; }
+bool SensorReader::peekSensorForLoRa(SensorSample&, uint32_t*, uint8_t*, uint32_t*) const { return false; }
 bool SensorReader::snapshotNodes(SensorNodeSnapshot*, size_t, size_t& count) const { count = 0; return false; }
 bool SensorReader::snapshotNode(size_t, SensorRegistry::Node&) const { return false; }
 bool SensorReader::requestForgetNode(size_t) { return false; }

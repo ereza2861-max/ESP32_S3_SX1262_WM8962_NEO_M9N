@@ -4,7 +4,7 @@
 
 int main() {
   static_assert(BlePeerStore::V1_BYTES == 64, "legacy layout changed");
-  static_assert(BlePeerStore::V2_BYTES == 90, "v2 layout must include the explicit 16-byte IRK");
+  static_assert(BlePeerStore::V2_BYTES == 94, "v2 layout must include the explicit 16-byte IRK");
 
   const char* loraKey = "00112233445566778899aabbccddeeff";
   BlePeerStore::PeerRecordV2 record{};

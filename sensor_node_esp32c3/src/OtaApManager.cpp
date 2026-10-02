@@ -105,6 +105,21 @@ bool OtaApManager::begin() {
   return true;
 }
 
+bool OtaApManager::beginRecoveryWindow() {
+  if (otaPassword_.isEmpty()) {
+    loadState();
+  }
+  if (otaPassword_.isEmpty()) {
+    Serial.println("RECOVERY: OTA AP unavailable; provision OTA password over serial");
+    return false;
+  }
+  if (!apEnabled_ && !startAp()) {
+    Serial.println("RECOVERY: OTA AP start failed");
+    return false;
+  }
+  return true;
+}
+
 void OtaApManager::loadState() {
   Preferences prefs;
   if (!prefs.begin(NVS_NAMESPACE, true)) return;
@@ -288,10 +303,11 @@ void OtaApManager::handleUpload() {
   HTTPUpload& upload = gServer->upload();
   if (upload.status == UPLOAD_FILE_START) {
     Serial.printf("OTA: WebUI upload start %s\n", upload.filename.c_str());
-    // SECURITY: require OTA password as a form field. Reject early if missing.
+    // SECURITY: require OTA password and the time-bounded OTA session.
     const String supplied = gServer->arg("password");
-    if (!checkOtaPassword(supplied)) {
-      Serial.println("OTA: WebUI upload rejected (bad password)");
+    const String session = gServer->header(PROFILE_SESSION_HEADER);
+    if (!checkOtaPassword(supplied) || !checkSessionToken(session)) {
+      Serial.println("OTA: WebUI upload rejected (bad password or session)");
       upload.status = UPLOAD_FILE_ABORTED;
       return;
     }
@@ -313,6 +329,13 @@ void OtaApManager::handleUpload() {
 
 void OtaApManager::handleUploadDone() {
   if (!gServer) return;
+  const bool authorized =
+      checkOtaPassword(gServer->arg("password")) &&
+      checkSessionToken(gServer->header(PROFILE_SESSION_HEADER));
+  if (!authorized) {
+    gServer->send(401, "text/plain", "ERROR: OTA authentication required");
+    return;
+  }
   const bool ok = !Update.hasError();
   gServer->send(ok ? 200 : 500, "text/plain",
                 ok ? "OK: firmware updated, rebooting" : "ERROR: upload failed");

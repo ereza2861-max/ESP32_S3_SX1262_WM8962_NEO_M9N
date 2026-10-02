@@ -138,6 +138,26 @@ bool cryptSensitive(PeerRecordV2& record, const uint8_t key[16]) {
   std::memset(buffer, 0, sizeof(buffer));
   return true;
 }
+
+bool cryptSensitiveLegacy(PeerRecordV2Legacy& record, const uint8_t key[16]) {
+  uint8_t identity[sizeof(record.identity)] = {};
+  std::memcpy(identity, &record.identity, sizeof(identity));
+  uint8_t digest[32] = {};
+  if (!sha256(identity, sizeof(identity),
+              reinterpret_cast<const uint8_t*>(IV_LABEL), sizeof(IV_LABEL) - 1,
+              digest)) return false;
+  uint8_t iv[16] = {};
+  std::memcpy(iv, digest, sizeof(iv));
+  uint8_t buffer[sizeof(record.passkey) + sizeof(record.lastRpa)] = {};
+  std::memcpy(buffer, record.passkey, sizeof(record.passkey));
+  std::memcpy(buffer + sizeof(record.passkey), &record.lastRpa, sizeof(record.lastRpa));
+  const bool ok = aesCtr(key, iv, buffer, buffer, sizeof(buffer));
+  if (!ok) return false;
+  std::memcpy(record.passkey, buffer, sizeof(record.passkey));
+  std::memcpy(&record.lastRpa, buffer + sizeof(record.passkey), sizeof(record.lastRpa));
+  std::memset(buffer, 0, sizeof(buffer));
+  return true;
+}
 }  // namespace
 
 uint32_t legacyCrc(const uint8_t* data, size_t len) {
@@ -209,6 +229,25 @@ bool openV2(PeerRecordV2& record, const char* loraKeyHex) {
   if (diff != 0) return false;
   if (!cryptSensitive(record, master)) return false;
   const uint32_t key = passkey(record);
+  return key >= 100000U && key <= 999999U;
+}
+
+bool openV2Legacy(PeerRecordV2Legacy& record, const char* loraKeyHex) {
+  if (record.magic != MAGIC || record.version != VERSION) return false;
+  if (record.crc32 != crc32(reinterpret_cast<const uint8_t*>(&record),
+                             offsetof(PeerRecordV2Legacy, crc32))) return false;
+  uint8_t master[16] = {};
+  if (!deriveMasterKey(loraKeyHex, master)) return false;
+  uint8_t expected[32] = {};
+  if (!hmacSha256(master, reinterpret_cast<const uint8_t*>(&record),
+                  offsetof(PeerRecordV2Legacy, mac), expected)) return false;
+  uint8_t diff = 0;
+  for (size_t i = 0; i < MAC_BYTES; ++i) diff |= expected[i] ^ record.mac[i];
+  if (diff != 0 || !cryptSensitiveLegacy(record, master)) return false;
+  const uint32_t key = static_cast<uint32_t>(record.passkey[0]) |
+                       (static_cast<uint32_t>(record.passkey[1]) << 8U) |
+                       (static_cast<uint32_t>(record.passkey[2]) << 16U) |
+                       (static_cast<uint32_t>(record.passkey[3]) << 24U);
   return key >= 100000U && key <= 999999U;
 }
 

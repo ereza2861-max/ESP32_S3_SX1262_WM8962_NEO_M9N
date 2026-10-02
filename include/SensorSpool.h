@@ -5,22 +5,31 @@
 #include <cstdint>
 #include <type_traits>
 
+class File;
+
 class SensorSpool {
 public:
   static constexpr uint8_t DELIVERY_MQTT = 1U << 0;
   static constexpr uint8_t DELIVERY_LORA = 1U << 1;
   static constexpr size_t MAX_RECORDS = 4096;
   static constexpr size_t MAX_BYTES = 1024UL * 1024UL;
+  enum Source : uint8_t { LOCAL_BLE = 0, REMOTE_LORA = 1 };
 
   struct Pending {
     SensorReader::SensorSample sample{};
     uint32_t sampleId = 0;
     uint8_t requiredMask = 0;
     uint8_t deliveredMask = 0;
+    uint8_t source = LOCAL_BLE;
+    uint8_t priority = 0;
+    uint32_t sourceSequence = 0;
   };
 
   bool begin();
-  bool append(const SensorReader::SensorSample& sample, uint8_t requiredMask);
+  bool append(const SensorReader::SensorSample& sample, uint8_t requiredMask,
+               uint8_t source = LOCAL_BLE, uint8_t priority = 0,
+               uint32_t sourceSequence = 0, uint8_t schemaVersion = 0,
+               uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION);
   bool peek(Pending& out) const;
   bool markDelivered(uint32_t sampleId, uint8_t delivery);
   bool clear();
@@ -37,7 +46,8 @@ private:
   static constexpr char PATH[] = "/SENSOR/SPOOL.Q";
   static constexpr char TMP_PATH[] = "/SENSOR/SPOOL.TMP";
   static constexpr uint32_t MAGIC = 0x53504C51UL; // "SPLQ"
-  static constexpr uint8_t VERSION = 1;
+  static constexpr uint8_t VERSION = 2;
+  static constexpr uint8_t LEGACY_VERSION = 1;
   static constexpr uint8_t TYPE_DATA = 1;
   static constexpr uint8_t TYPE_ACK = 2;
 
@@ -47,15 +57,34 @@ private:
     uint8_t version = VERSION;
     uint8_t type = 0;
     uint8_t flags = 0;
-    uint8_t reserved = 0;
+    uint8_t source = LOCAL_BLE;
     uint32_t recordId = 0;
     uint32_t sampleId = 0;
     uint16_t payloadLen = 0;
-    uint16_t reserved2 = 0;
+    uint16_t priority = 0;
+    SensorReader::SensorSample sample{};
+    uint32_t sourceSequence = 0;
+    uint32_t crc32 = 0;
+  };
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+  struct LegacyDiskRecord {
+    uint32_t magic = MAGIC;
+    uint8_t version = LEGACY_VERSION;
+    uint8_t type = 0;
+    uint8_t flags = 0;
+    uint8_t source = LOCAL_BLE;
+    uint32_t recordId = 0;
+    uint32_t sampleId = 0;
+    uint16_t payloadLen = 0;
+    uint16_t priority = 0;
     SensorReader::SensorSample sample{};
     uint32_t crc32 = 0;
   };
 #pragma pack(pop)
+  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecord) + sizeof(uint32_t),
+                "sensor spool record layout changed");
   static_assert(std::is_trivially_copyable<SensorReader::SensorSample>::value, "sensor sample must be wire-copyable");
   static_assert(sizeof(DiskRecord) <= 128, "sensor spool record unexpectedly large");
 
@@ -65,10 +94,15 @@ private:
     uint32_t offset = 0;
     uint8_t requiredMask = 0;
     uint8_t deliveredMask = 0;
+    uint8_t source = LOCAL_BLE;
+    uint8_t priority = 0;
+    uint32_t sourceSequence = 0;
+    uint32_t recordSize = sizeof(DiskRecord);
     bool valid = false;
   };
 
   bool scan();
+  static bool readDiskRecord(File& file, size_t offset, DiskRecord& out, size_t& recordSize);
   bool ensureDirectory() const;
   bool appendRecord(const DiskRecord& record);
   bool compact();

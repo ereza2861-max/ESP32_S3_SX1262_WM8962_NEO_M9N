@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include "Config.h"
 #include "SensorRegistry.h"
+#include "SensorProtocol.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <atomic>
@@ -23,9 +24,9 @@ public:
   size_t nodeCount() const { return registry_.nodeCount(); }
   SensorRegistry& registry() { return registry_; }
   const SensorRegistry& registry() const { return registry_; }
-  bool enqueueSensorForLoRa(const struct SensorSample& sample);
-  bool popSensorForLoRa(struct SensorSample& sample, TickType_t timeout = 0);
-  bool peekSensorForLoRa(struct SensorSample& sample) const;
+  bool enqueueSensorForLoRa(const struct SensorSample& sample, uint32_t sourceSequence = 0, uint8_t schemaVersion = 0, uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION);
+  bool popSensorForLoRa(struct SensorSample& sample, TickType_t timeout = 0, uint32_t* sourceSequence = nullptr, uint8_t* schemaVersion = nullptr, uint32_t* firmwareVersion = nullptr);
+  bool peekSensorForLoRa(struct SensorSample& sample, uint32_t* sourceSequence = nullptr, uint8_t* schemaVersion = nullptr, uint32_t* firmwareVersion = nullptr) const;
   uint32_t droppedSamples() const { return droppedSamples_.load(std::memory_order_relaxed); }
   uint8_t queueDepth() const;
   uint32_t peerMacFailures() const;
@@ -47,6 +48,10 @@ public:
   bool recordPeerRpa(const SensorProtocol::BleAddress& identity,
                      const SensorProtocol::BleAddress& rpa);
   String peersJson() const;
+  bool sendSensorCommand(size_t nodeIndex, uint8_t commandId,
+                         uint16_t sensorId = 0, uint32_t argument = 0);
+  bool getSensorCommandResponse(size_t nodeIndex,
+                                SensorProtocol::CommandResponse& out) const;
 
   // UI-facing copy-out APIs. They never expose registry pointers and hold the
   // registry mutex only for the memcpy-sized snapshot operation.
@@ -72,7 +77,13 @@ private:
   SensorRegistry registry_;
   QueueHandle_t sensorQueue_ = nullptr;
   StaticQueue_t sensorQueueStruct_{};
-  uint8_t sensorQueueStorage_[Config::SENSOR_LORA_QUEUE_DEPTH * sizeof(SensorSample)]{};
+  struct QueuedSample {
+    SensorSample sample{};
+    uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION;
+  };
+  uint8_t sensorQueueStorage_[Config::SENSOR_LORA_QUEUE_DEPTH * sizeof(QueuedSample)]{};
   bool initialized_ = false;
   std::atomic<uint32_t> droppedSamples_{0};
   std::atomic<uint8_t> queuePolicy_{static_cast<uint8_t>(SampleQueuePolicy::DROP_OLDEST)};

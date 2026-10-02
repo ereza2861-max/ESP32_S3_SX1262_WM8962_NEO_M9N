@@ -41,13 +41,16 @@ Charging state is heuristic because Rev-C has no charger STAT input.
 The ESP32-C3 sensor node emits `timestamp=0`. The gateway replaces zero or
 invalid pre-epoch timestamps with gateway wall-clock time and sets
 `QUALITY_TIMESTAMP_GATEWAY` (and `QUALITY_TIMESTAMP_INVALID` when applicable).
-This timestamp is receipt/processing time, not physical measurement time.
+This timestamp is receipt/processing time, not physical measurement time. The
+gateway must set `QUALITY_TIMESTAMP_GATEWAY` whenever it replaces a zero sensor
+timestamp; this rule is independent of transport.
 
 ## Sensor sampling/reporting
 
 `SensorDescriptor.periodMs` is the authoritative driver sampling cadence.
-The sensor-node main loop only provides a scheduler tick. BLE notification is a
-separate fixed one-second reporting cadence in protocol v1.
+The sensor-node main loop computes its tick from the registered descriptors as
+`max(SENSOR_SAMPLE_PERIOD_MS, minimum registered periodMs)`. BLE notification is
+a separate fixed one-second reporting cadence in protocol v1.
 
 ## LoRa sensor telemetry
 
@@ -57,15 +60,29 @@ that type and forwards it to MQTT without an application ACK. Packet
 authentication/replay protection remains the transport security boundary.
 
 The existing 40-byte sensor telemetry payload uses its pre-existing padding
-area for the 32-bit spool `sampleId`; the CRC-covered field layout and
-`shared/SensorProtocol.h` BLE wire structs are unchanged.
+area for the 32-bit spool `sampleId`, schema version, firmware version, and
+source sequence. Zero padding remains the legacy/default representation.
 
 ## OTA/profile security
 
 The ESP32-C3 OTA AP requires the provisioned OTA password and uses a protected
 SoftAP. `POST /profile` additionally requires the OTA password and the
 time-bounded in-memory session token returned by `/status`, plus the existing
-physical-cabling confirmation header.
+physical-cabling confirmation header. Firmware upload requires both
+`X-OTA-Session` and the provisioned OTA password at upload start and completion.
 
 Secure Boot and flash encryption remain manufacturing/provisioning procedures,
 not runtime-enforced features in this patch.
+
+## BLE sensor commands and source sequencing
+
+The BLE command channel is additive: `COMMAND_UUID` is write/encrypted and
+`COMMAND_RESPONSE_UUID` is read/notify/encrypted-gated by the authenticated BLE
+connection. Existing descriptor request/data and sensor-value characteristics
+remain unchanged. Command sequence numbers are persisted per peer on the
+gateway and last accepted sequence numbers are persisted on the sensor node to
+reject replayed commands.
+
+Sensor values may carry a source sequence under `FLAG_HAS_SOURCE_SEQUENCE`.
+The gateway uses `(sourceId, sourceSequence)` for LoRa telemetry deduplication
+when present and falls back to `sampleId` for legacy telemetry.

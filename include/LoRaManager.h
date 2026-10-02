@@ -10,6 +10,7 @@
 #include "RfDetector.h"
 #include "RadioArbiter.h"
 #include "LoRaEcdhRekey.h"
+#include "SensorProtocol.h"
 
 struct ChannelScanResult {
   float freqMHz = 0.0f;
@@ -23,6 +24,18 @@ struct ChannelScanResult {
 
 class LoRaManager {
 public:
+  struct RemoteSensorTelemetry {
+    uint32_t nodeId = 0;
+    uint16_t sensorId = 0;
+    float value = 0.0f;
+    uint8_t quality = 0;
+    uint64_t timestampMs = 0;
+    uint32_t sampleId = 0;
+    uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION;
+    int8_t rssi = -127;
+  };
   LoRaManager();
   bool begin();
   void task();
@@ -39,7 +52,10 @@ public:
   bool sendSensorTelemetry(uint32_t nodeId, uint16_t sensorId,
                            float value, uint8_t quality,
                            uint64_t timestampMs,
-                           uint32_t sampleId = 0);
+                           uint32_t sampleId = 0,
+                           uint32_t sourceSequence = 0,
+                           uint8_t schemaVersion = 0,
+                           uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION);
   bool applyConfig();
   bool applyConfig(const RuntimeConfig& config);
   void updateSourceId();
@@ -78,6 +94,7 @@ public:
   uint32_t replayRejects() const { return replayRejects_; }
   uint32_t forwardQueued() const;
   uint32_t forwardLastDropMs() const { return forwardLastDropMs_; }
+  bool popRemoteSensorTelemetry(RemoteSensorTelemetry& out);
   uint32_t fragmentEvictions() const { return fragmentEvictions_; }
   uint32_t fragmentDrops() const { return fragmentDrops_; }
   uint64_t dutyBudgetUs() const { return dutyTokensUs_; }
@@ -104,6 +121,8 @@ private:
   SemaphoreHandle_t mutex_ = nullptr;
   SemaphoreHandle_t seqMutex_ = nullptr;
   SemaphoreHandle_t textStateMutex_ = nullptr;
+  SemaphoreHandle_t remoteSensorMutex_ = nullptr;
+  static constexpr size_t REMOTE_SENSOR_QUEUE_DEPTH = Config::SENSOR_LORA_QUEUE_DEPTH;
   static LoRaManager* instance_;
   static void onDio1();
   struct ForwardPacket {
@@ -294,6 +313,9 @@ private:
   uint32_t forwardLastDropMs_ = 0;
   uint32_t forwardRetryNotBeforeMs_ = 0;
   uint32_t forwardRetryBackoffMs_ = 100;
+  RemoteSensorTelemetry remoteSensorQueue_[REMOTE_SENSOR_QUEUE_DEPTH]{};
+  size_t remoteSensorHead_ = 0;
+  size_t remoteSensorCount_ = 0;
   uint32_t forwardRetryPersistId_ = 0;
   uint16_t fragmentMessageId_ = 0;
   struct VoiceTxSlot {

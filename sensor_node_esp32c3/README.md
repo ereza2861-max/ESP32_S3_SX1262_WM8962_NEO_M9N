@@ -133,7 +133,7 @@ The following remain NOT VERIFIED:
 
 - Service: `7f2a0000-7b2a-4a6e-9a9f-1b7f7e000001`
 - Descriptor request: WRITE/WRITE_NR, 3 bytes `{version, op, index}`
-- Descriptor data: READ, 67 bytes `SensorDescriptorResponse`
+- Descriptor data: READ, 68 bytes `SensorDescriptorResponse`
 - Sensor value: NOTIFY, 15 bytes `SensorValue`
 
 The node starts link security immediately after connection; descriptor and request access also require encryption. NimBLE-Arduino 2.5.1 is used
@@ -202,7 +202,7 @@ The selected source-level roster is the only sensor set instantiated after boot;
 3. On the gateway/commissioning client, scan for the configured node name and
    service UUID.
 4. Connect and complete passkey pairing.
-5. The gateway requests descriptor index 0, 1, ... and reads each 67-byte response.
+5. The gateway requests descriptor index 0, 1, ... and reads each 68-byte response.
 6. Subscribe to the sensor-value characteristic to receive 15-byte notifications.
 
 If the passkey is lost, erase the node NVS during development and reprovision it.

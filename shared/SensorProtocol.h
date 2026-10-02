@@ -15,6 +15,12 @@ constexpr uint8_t DESCRIPTOR_REQUEST_LIST = 0x01;
 constexpr uint8_t MAX_NAME_BYTES = 24;
 constexpr uint8_t MAX_UNIT_BYTES = 12;
 constexpr uint8_t MAX_NODE_NAME_BYTES = 24;
+constexpr uint32_t FIRMWARE_VERSION = 1;
+constexpr char COMMAND_UUID[] = "7f2a0000-7b2a-4a6e-9a9f-1b7f7e000005";
+constexpr char COMMAND_RESPONSE_UUID[] = "7f2a0000-7b2a-4a6e-9a9f-1b7f7e000006";
+constexpr uint8_t COMMAND_SET_SAMPLING_PERIOD = 1;
+constexpr uint8_t COMMAND_REQUEST_DESCRIPTOR_REFRESH = 2;
+constexpr uint8_t COMMAND_REQUEST_SENSOR_RESET = 3;
 
 // Multi-byte fields use little-endian order and IEEE-754 binary32 floats.
 // Both ESP32-S3 (gateway) and ESP32-C3 (sensor node) are little-endian
@@ -30,11 +36,11 @@ constexpr char SENSOR_VALUE_UUID[] = "7f2a0000-7b2a-4a6e-9a9f-1b7f7e000004";
 // GATT layout v1:
 //   SERVICE_UUID
 //     DESCRIPTOR_REQUEST_UUID : WRITE or WRITE_NR, 3 bytes {version, op, index}
-//     DESCRIPTOR_DATA_UUID    : READ, SensorDescriptorResponse (67 bytes)
-//     SENSOR_VALUE_UUID       : NOTIFY/INDICATE, SensorValue (15 bytes)
+//     DESCRIPTOR_DATA_UUID    : READ, SensorDescriptorResponse (68 bytes)
+//     SENSOR_VALUE_UUID       : NOTIFY/INDICATE, SensorValue (20 bytes)
 // A descriptor is selected by index through the request characteristic. This
 // avoids a large registry read and remains usable with small BLE MTUs because
-// standard GATT long-read/Read-Blob semantics can carry the 67-byte response.
+// standard GATT long-read/Read-Blob semantics can carry the 68-byte response.
 // ESP32-C3 has no PSRAM; keep SENSOR_LORA_QUEUE_DEPTH and
 // MAX_SENSORS_PER_NODE small on that target.
 
@@ -64,8 +70,13 @@ enum SensorFlags : uint16_t {
   FLAG_EVENT_DRIVEN = 1u << 1,
   FLAG_CALIBRATED = 1u << 2,
   FLAG_READ_ONLY = 1u << 3,
+  FLAG_HAS_SOURCE_SEQUENCE = 1u << 4,
+  FLAG_DEGRADED = 1u << 5,
+  FLAG_HAS_SCHEMA_VERSION = 1u << 6,
 };
 
+// If timestamp is zero at gateway receipt, the gateway must replace it with
+// its receipt/processing wall-clock time and set QUALITY_TIMESTAMP_GATEWAY.
 enum SensorQuality : uint8_t {
   QUALITY_VALID = 0,
   QUALITY_STALE = 1u << 0,
@@ -98,6 +109,7 @@ struct SensorDescriptor {
   float max = 0.0f;
   uint32_t periodMs = 1000;
   uint16_t flags = FLAG_ENABLED;
+  uint8_t schemaVersion = 0;
 };
 
 struct SensorDescriptorResponse {
@@ -116,12 +128,27 @@ struct SensorValue {
   float value = 0.0f;
   uint64_t timestamp = 0;
   uint8_t quality = QUALITY_VALID;
+  uint8_t flags = 0;
+  uint32_t sourceSequence = 0;
+};
+struct CommandRequest {
+  uint8_t commandId = 0;
+  uint32_t sequence = 0;
+  uint16_t sensorId = 0;
+  uint32_t argument = 0;
+};
+
+struct CommandResponse {
+  uint8_t commandId = 0;
+  uint32_t sequence = 0;
+  uint8_t result = 0;
+  uint16_t errorCode = 0;
 };
 #pragma pack(pop)
 
-static_assert(sizeof(SensorDescriptor) == 62, "SensorDescriptor wire layout changed");
-static_assert(sizeof(SensorDescriptorResponse) == 67, "SensorDescriptorResponse wire layout changed");
-static_assert(sizeof(SensorValue) == 15, "SensorValue wire layout changed");
+static_assert(sizeof(SensorDescriptor) == 63, "SensorDescriptor wire layout changed");
+static_assert(sizeof(SensorDescriptorResponse) == 68, "SensorDescriptorResponse wire layout changed");
+static_assert(sizeof(SensorValue) == 20, "SensorValue wire layout changed");
 static_assert(std::is_trivially_copyable<SensorDescriptor>::value, "SensorDescriptor must be wire-copyable");
 static_assert(std::is_trivially_copyable<SensorValue>::value, "SensorValue must be wire-copyable");
 

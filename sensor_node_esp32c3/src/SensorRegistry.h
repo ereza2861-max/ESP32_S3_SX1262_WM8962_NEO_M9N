@@ -8,14 +8,14 @@ class SensorRegistry {
 public:
   // driver: raised from 8 to 12 to accommodate Profile 1 (12 sensors) and
   // Profile 3 (9 sensors) without truncation. RAM impact:
-  //   SensorDescriptor (62 B) × 13 = 806 B
-  //   SensorValue (15 B) × 13 = 195 B
+  //   SensorDescriptor (63 B) × 13 = 819 B
+  //   SensorValue (20 B) × 13 = 260 B
   //   valueValid_ (1 B) × 13 = 13 B
-  // Total ≈ 1014 B. Safe for ESP32-C3 (no PSRAM, but 400 KB DRAM).
+  // Total ≈ 1092 B. Safe for ESP32-C3 (no PSRAM, but 400 KB DRAM).
   static constexpr size_t MAX_SENSORS = 15;
 
   bool registerSensor(const SensorProtocol::SensorDescriptor& descriptor);
-  bool updateValue(uint16_t id, float value, uint8_t quality);
+  bool updateValue(uint16_t id, float value, uint8_t quality, uint32_t sourceSequence = 0);
   bool removeSensor(uint16_t id);
   void clear();
 

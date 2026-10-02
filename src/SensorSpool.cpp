@@ -17,7 +17,53 @@ void hashBytes(uint32_t& hash, const uint8_t* data, size_t len) {
     hash *= FNV_PRIME;
   }
 }
-}  // namespace
+}
+
+bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, size_t& recordSize) {
+  if (!file.seek(offset)) return false;
+  const size_t prefixLen = offsetof(DiskRecord, sample);
+  uint8_t prefix[offsetof(DiskRecord, sample)] = {};
+  if (file.read(prefix, prefixLen) != prefixLen) return false;
+  uint8_t version = prefix[offsetof(DiskRecord, version)];
+  if (version != VERSION && version != LEGACY_VERSION) return false;
+  uint32_t magic = 0;
+  std::memcpy(&magic, prefix, sizeof(magic));
+  if (magic != MAGIC) return false;
+  out = {};
+  std::memcpy(reinterpret_cast<uint8_t*>(&out), prefix, prefixLen);
+  if (version == VERSION) {
+    if (file.read(reinterpret_cast<uint8_t*>(&out.sample), sizeof(out.sample)) != sizeof(out.sample) ||
+        file.read(reinterpret_cast<uint8_t*>(&out.crc32), sizeof(out.crc32)) != sizeof(out.crc32))
+      return false;
+    recordSize = sizeof(DiskRecord);
+  } else {
+    LegacyDiskRecord legacy{};
+    std::memcpy(reinterpret_cast<uint8_t*>(&legacy), prefix, prefixLen);
+    if (file.read(reinterpret_cast<uint8_t*>(&legacy.sample), sizeof(legacy.sample)) != sizeof(legacy.sample) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.crc32), sizeof(legacy.crc32)) != sizeof(legacy.crc32))
+      return false;
+    out.sourceSequence = 0;
+    out.sample = legacy.sample;
+    out.crc32 = legacy.crc32;
+    recordSize = sizeof(LegacyDiskRecord);
+  }
+  const uint32_t expected = crc32(
+      reinterpret_cast<const uint8_t*>(&out),
+      offsetof(DiskRecord, crc32));
+  // Legacy CRC covers the legacy record layout, not the widened v2 record.
+  if (version == LEGACY_VERSION) {
+    LegacyDiskRecord legacy{};
+    std::memcpy(reinterpret_cast<uint8_t*>(&legacy), reinterpret_cast<const uint8_t*>(&out),
+                offsetof(LegacyDiskRecord, sample));
+    legacy.sample = out.sample;
+    legacy.crc32 = out.crc32;
+    if (legacy.crc32 != crc32(reinterpret_cast<const uint8_t*>(&legacy),
+                                           offsetof(LegacyDiskRecord, crc32))) return false;
+  } else if (out.crc32 != expected) {
+    return false;
+  }
+  return true;
+}
 
 uint32_t SensorSpool::crc32(const uint8_t* data, size_t len) {
   uint32_t crc = 0xFFFFFFFFU;
@@ -68,20 +114,14 @@ bool SensorSpool::scan() {
   File file = SD.open(PATH, FILE_READ);
   if (!file) return false;
 
-  const size_t recordSize = sizeof(DiskRecord);
-  uint8_t raw[sizeof(DiskRecord)] = {};
   size_t validBytes = 0;
   while (file.available()) {
     const size_t start = static_cast<size_t>(file.position());
-    const size_t n = file.read(raw, recordSize);
-    if (n != recordSize) break;
     DiskRecord record{};
-    std::memcpy(&record, raw, sizeof(record));
-    if (record.magic != MAGIC || record.version != VERSION ||
-        (record.type == TYPE_DATA && record.payloadLen != sizeof(SensorReader::SensorSample)) ||
-        (record.type == TYPE_ACK && record.payloadLen != 0) ||
-        (record.type != TYPE_DATA && record.type != TYPE_ACK) ||
-        record.crc32 != crc32(raw, offsetof(DiskRecord, crc32))) {
+    size_t recordSize = 0;
+    if (!readDiskRecord(file, start, record, recordSize)) break;
+    if (record.payloadLen != (record.type == TYPE_DATA ? sizeof(SensorReader::SensorSample) : 0) ||
+        (record.type != TYPE_DATA && record.type != TYPE_ACK)) {
       break;
     }
     validBytes = start + recordSize;
@@ -89,7 +129,13 @@ bool SensorSpool::scan() {
     if (record.type == TYPE_DATA) {
       if (record.sampleId == 0 || requiredMaskFromFlags(record.flags) == 0) continue;
       if (count_ >= MAX_RECORDS) {
-        for (size_t i = 1; i < count_; ++i) entries_[i - 1] = entries_[i];
+        size_t selected = 0;
+        for (size_t i = 1; i < count_; ++i) {
+          if (entries_[i].priority < entries_[selected].priority ||
+              (entries_[i].priority == entries_[selected].priority &&
+               entries_[i].recordId < entries_[selected].recordId)) selected = i;
+        }
+        for (size_t i = selected + 1; i < count_; ++i) entries_[i - 1] = entries_[i];
         entries_[count_ - 1] = {};
         --count_;
         ++evictions_;
@@ -101,9 +147,12 @@ bool SensorSpool::scan() {
       entry.offset = static_cast<uint32_t>(start);
       entry.requiredMask = requiredMaskFromFlags(record.flags);
       entry.deliveredMask = deliveredMaskFromFlags(record.flags);
+      entry.source = record.source <= REMOTE_LORA ? record.source : LOCAL_BLE;
+      entry.priority = static_cast<uint8_t>(record.priority & 0xFFU);
+      entry.sourceSequence = record.sourceSequence;
+      entry.recordSize = recordSize;
       entry.valid = true;
       if (entry.deliveredMask == entry.requiredMask) --count_;
-      else {}
     } else if (record.type == TYPE_ACK) {
       for (size_t i = 0; i < count_; ++i) {
         if (entries_[i].valid && entries_[i].sampleId == record.sampleId) {
@@ -116,12 +165,12 @@ bool SensorSpool::scan() {
           break;
         }
       }
+    } else {
+      break;
     }
   }
   file.close();
 
-  // A torn final record is discarded. All complete records before it remain
-  // usable because every record has its own CRC32.
   SpiLock truncateLock(pdMS_TO_TICKS(100));
   if (truncateLock.ok() && SD.exists(PATH)) {
     File repair = SD.open(PATH, FILE_WRITE);
@@ -132,7 +181,6 @@ bool SensorSpool::scan() {
   }
   return true;
 }
-
 bool SensorSpool::compact() {
   if (!ensureDirectory()) return false;
   {
@@ -150,13 +198,17 @@ bool SensorSpool::compact() {
     for (size_t i = 0; i < count_; ++i) {
       if (!entries_[i].valid) continue;
       DiskRecord record{};
-      if (!source.seek(entries_[i].offset) ||
-          source.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) != sizeof(record)) {
+      size_t ignoredSize = 0;
+      if (!readDiskRecord(source, entries_[i].offset, record, ignoredSize)) {
         source.close();
         tmp.close();
         SD.remove(TMP_PATH);
         return false;
       }
+      record.version = VERSION;
+      record.source = entries_[i].source;
+      record.priority = entries_[i].priority;
+      record.sourceSequence = entries_[i].sourceSequence;
       record.flags = flagsFor(entries_[i].requiredMask, entries_[i].deliveredMask);
       record.crc32 = crc32(reinterpret_cast<const uint8_t*>(&record),
                             offsetof(DiskRecord, crc32));
@@ -167,6 +219,7 @@ bool SensorSpool::compact() {
         return false;
       }
       entries_[i].offset = newOffset;
+      entries_[i].recordSize = sizeof(record);
       newOffset += sizeof(record);
     }
     source.close();
@@ -180,10 +233,17 @@ bool SensorSpool::compact() {
   }
   return true;
 }
-
 bool SensorSpool::evictOldest() {
   if (count_ == 0) return false;
-  for (size_t i = 1; i < count_; ++i) entries_[i - 1] = entries_[i];
+  size_t selected = 0;
+  for (size_t i = 1; i < count_; ++i) {
+    if (entries_[i].priority < entries_[selected].priority ||
+        (entries_[i].priority == entries_[selected].priority &&
+         entries_[i].recordId < entries_[selected].recordId)) {
+      selected = i;
+    }
+  }
+  for (size_t i = selected + 1; i < count_; ++i) entries_[i - 1] = entries_[i];
   entries_[count_ - 1] = {};
   --count_;
   ++evictions_;
@@ -205,12 +265,16 @@ bool SensorSpool::begin() {
   return true;
 }
 
-bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requiredMask) {
+bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requiredMask,
+                           uint8_t source, uint8_t priority, uint32_t sourceSequence,
+                           uint8_t schemaVersion, uint32_t firmwareVersion) {
   if (!ready_ || requiredMask == 0 || sample.nodeId == 0 || sample.sensorId == 0 ||
-      !std::isfinite(sample.value)) {
+      source > REMOTE_LORA || !std::isfinite(sample.value)) {
     ++drops_;
     return false;
   }
+  (void)schemaVersion;
+  (void)firmwareVersion;
   const uint32_t id = sampleId(sample);
   for (size_t i = 0; i < count_; ++i)
     if (entries_[i].valid && entries_[i].sampleId == id) return true;
@@ -227,9 +291,12 @@ bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requi
   DiskRecord record{};
   record.type = TYPE_DATA;
   record.flags = flagsFor(requiredMask, 0);
+  record.source = source;
   record.recordId = nextRecordId_++;
   record.sampleId = id;
   record.payloadLen = sizeof(SensorReader::SensorSample);
+  record.priority = priority;
+  record.sourceSequence = sourceSequence;
   record.sample = sample;
 
   size_t currentBytes = 0;
@@ -261,6 +328,10 @@ bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requi
   entry.offset = static_cast<uint32_t>(currentBytes);
   entry.requiredMask = requiredMask;
   entry.deliveredMask = 0;
+  entry.source = source;
+  entry.priority = priority;
+  entry.sourceSequence = sourceSequence;
+  entry.recordSize = sizeof(DiskRecord);
   entry.valid = true;
   return true;
 }
@@ -278,17 +349,17 @@ bool SensorSpool::peek(Pending& out) const {
     return false;
   }
   DiskRecord record{};
-  const bool ok = file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record);
+  size_t ignoredSize = 0;
+  const bool ok = readDiskRecord(file, entry.offset, record, ignoredSize);
   file.close();
-  if (!ok || record.magic != MAGIC || record.version != VERSION ||
-      record.type != TYPE_DATA || record.sampleId != entry.sampleId ||
-      record.crc32 != crc32(reinterpret_cast<const uint8_t*>(&record), offsetof(DiskRecord, crc32))) {
-    return false;
-  }
+  if (!ok || record.type != TYPE_DATA || record.sampleId != entry.sampleId) return false;
   out.sample = record.sample;
   out.sampleId = entry.sampleId;
   out.requiredMask = entry.requiredMask;
   out.deliveredMask = entry.deliveredMask;
+  out.source = entry.source;
+  out.priority = entry.priority;
+  out.sourceSequence = entry.sourceSequence;
   return true;
 }
 
@@ -301,6 +372,9 @@ bool SensorSpool::markDelivered(uint32_t id, uint8_t delivery) {
     DiskRecord ack{};
     ack.type = TYPE_ACK;
     ack.flags = flagsFor(entries_[i].requiredMask, delivered);
+    ack.source = entries_[i].source;
+    ack.priority = entries_[i].priority;
+    ack.sourceSequence = entries_[i].sourceSequence;
     ack.recordId = nextRecordId_++;
     ack.sampleId = id;
     ack.payloadLen = 0;

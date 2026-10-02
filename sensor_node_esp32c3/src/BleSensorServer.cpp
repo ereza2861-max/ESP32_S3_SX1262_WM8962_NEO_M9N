@@ -74,8 +74,16 @@ public:
   }
 };
 
+class CommandCallbacks final : public NimBLECharacteristicCallbacks {
+ public:
+  void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
+    if (gServer) gServer->handleCommand(characteristic, connInfo);
+  }
+};
+
 ServerSecurityCallbacks gSecurityCallbacks;
 DescriptorRequestCallbacks gRequestCallbacks;
+CommandCallbacks gCommandCallbacks;
 }  // namespace
 
 bool BleSensorServer::begin(const String& nodeName, SensorRegistry& registry) {
@@ -116,8 +124,17 @@ bool BleSensorServer::begin(const String& nodeName, SensorRegistry& registry) {
       SensorProtocol::SENSOR_VALUE_UUID,
       NIMBLE_PROPERTY::NOTIFY,
       sizeof(SensorProtocol::SensorValue));
-  if (!request_ || !descriptor_ || !value_) return false;
+  command_ = service_->createCharacteristic(
+      SensorProtocol::COMMAND_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC,
+      sizeof(SensorProtocol::CommandRequest));
+  commandResponse_ = service_->createCharacteristic(
+      SensorProtocol::COMMAND_RESPONSE_UUID,
+      NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ_ENC,
+      sizeof(SensorProtocol::CommandResponse));
+  if (!request_ || !descriptor_ || !value_ || !command_ || !commandResponse_) return false;
   request_->setCallbacks(&gRequestCallbacks);
+  command_->setCallbacks(&gCommandCallbacks);
 
   SensorProtocol::SensorDescriptorResponse empty{};
   empty.total = static_cast<uint8_t>(registry_->count());
@@ -129,6 +146,49 @@ bool BleSensorServer::begin(const String& nodeName, SensorRegistry& registry) {
   Serial.printf("BLE sensor node ready: %s, passkey %06lu\n",
                 nodeName_.c_str(), static_cast<unsigned long>(gPasskey));
   return true;
+}
+
+void BleSensorServer::handleCommand(NimBLECharacteristic* characteristic,
+                                      NimBLEConnInfo& connInfo) {
+  if (!characteristic || !commandResponse_ || !commandHandler_ ||
+      !connInfo.isEncrypted() || !connInfo.isAuthenticated()) return;
+  const std::string raw = characteristic->getValue();
+  if (raw.size() != sizeof(SensorProtocol::CommandRequest)) return;
+  SensorProtocol::CommandRequest request{};
+  std::memcpy(&request, raw.data(), sizeof(request));
+  SensorProtocol::CommandResponse response{};
+  response.commandId = request.commandId;
+  response.sequence = request.sequence;
+
+  Preferences prefs;
+  if (!prefs.begin("ble-cmd", false)) return;
+  char key[15] = {};
+  const std::string address = connInfo.getAddress().toString();
+  uint32_t addressHash = 2166136261UL;
+  for (unsigned char c : address) { addressHash ^= c; addressHash *= 16777619UL; }
+  std::snprintf(key, sizeof(key), "seq_%08lX",
+                static_cast<unsigned long>(addressHash));
+  const uint32_t lastSequence = prefs.getUInt(key, 0);
+  if (request.sequence == 0 || request.sequence <= lastSequence) {
+    // A duplicate is an acknowledged replay: do not execute it twice.
+    response.result = request.sequence == lastSequence ? 0 : 1;
+    response.errorCode = request.sequence == lastSequence ? 0 : 1;
+    prefs.end();
+    commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
+    commandResponse_->notify();
+    return;
+  }
+
+  if (!commandHandler_(request, response)) {
+    response.result = 1;
+    if (response.errorCode == 0) response.errorCode = 2;
+  }
+  if (response.result == 0) {
+    (void)prefs.putUInt(key, request.sequence);
+  }
+  prefs.end();
+  commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
+  commandResponse_->notify();
 }
 
 void BleSensorServer::startAdvertising() {

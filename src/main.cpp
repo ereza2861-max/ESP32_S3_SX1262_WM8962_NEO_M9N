@@ -839,10 +839,33 @@ static void taskSensorForward(void*) {
       }
     }
 
+    // Remote LoRa telemetry is admitted to the same durable spool before MQTT.
+    // It is MQTT-only here because the authenticated LoRa copy has already arrived.
+    LoRaManager::RemoteSensorTelemetry remote{};
+    if (sensorSpool.ready() && lora.popRemoteSensorTelemetry(remote)) {
+      SensorReader::SensorSample sample{};
+      sample.nodeId = remote.nodeId;
+      sample.sensorId = remote.sensorId;
+      sample.value = remote.value;
+      sample.quality = remote.quality;
+      sample.timestampMs = remote.timestampMs;
+      sample.rssi = remote.rssi;
+      std::snprintf(sample.nodeName, sizeof(sample.nodeName), "LoRa-remote");
+      std::snprintf(sample.sensorName, sizeof(sample.sensorName), "sensor-%u",
+                    static_cast<unsigned>(remote.sensorId));
+      (void)sensorSpool.append(sample, SensorSpool::DELIVERY_MQTT,
+                               SensorSpool::REMOTE_LORA, 1,
+                               remote.sourceSequence, remote.schemaVersion,
+                               remote.firmwareVersion);
+    }
+
     // First make the RAM queue durable. Peek is intentional: a sample is not
     // consumed from RAM until its persistent spool record exists.
     SensorReader::SensorSample queued{};
-    if (bleSensorReader.sensorReader().peekSensorForLoRa(queued)) {
+    uint32_t queuedSourceSequence = 0;
+    uint8_t queuedSchemaVersion = 0;
+    uint32_t queuedFirmwareVersion = SensorProtocol::FIRMWARE_VERSION;
+    if (bleSensorReader.sensorReader().peekSensorForLoRa(queued, &queuedSourceSequence, &queuedSchemaVersion, &queuedFirmwareVersion)) {
       ReportState* state = nullptr;
       ReportState* freeState = nullptr;
       for (auto& candidate : states) {
@@ -864,9 +887,12 @@ static void taskSensorForward(void*) {
         required |= SensorSpool::DELIVERY_LORA;
       }
 
-      if (sensorSpool.append(queued, required)) {
+      if (sensorSpool.append(queued, required, SensorSpool::LOCAL_BLE, 0,
+                                  queuedSourceSequence, queuedSchemaVersion,
+                                  queuedFirmwareVersion)) {
         SensorReader::SensorSample consumed{};
-        (void)bleSensorReader.sensorReader().popSensorForLoRa(consumed, 0);
+        (void)bleSensorReader.sensorReader().popSensorForLoRa(
+            consumed, 0, nullptr, nullptr, nullptr);
       }
     }
 
@@ -911,7 +937,10 @@ static void taskSensorForward(void*) {
             lora.sendSensorTelemetry(pending.sample.nodeId, pending.sample.sensorId,
                                      pending.sample.value, pending.sample.quality,
                                      pending.sample.timestampMs,
-                                     pending.sampleId)) {
+                                     pending.sampleId,
+                                     pending.sourceSequence,
+                                     1,
+                                     SensorProtocol::FIRMWARE_VERSION)) {
           (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_LORA);
           if (state) {
             state->nodeId = pending.sample.nodeId;

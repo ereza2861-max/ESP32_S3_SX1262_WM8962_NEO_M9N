@@ -45,6 +45,7 @@ public:
   // AP up once. The AP is still bounded by OTA_AP_WINDOW_MS.
   // Returns true if the manager initialized (regardless of AP state).
   bool begin();
+  bool beginRecoveryWindow();
 
   // Non-blocking cooperative task. Handles ArduinoOTA.handle(), WebUI request
   // handling, and the auto-shutdown timer.

@@ -34,7 +34,9 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
 
 size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
                                 uint16_t sensorId, float value, uint8_t quality,
-                                uint64_t timestampMs, uint32_t sampleId) {
+                                uint64_t timestampMs, uint32_t sampleId,
+                                uint8_t schemaVersion, uint32_t firmwareVersion,
+                                uint32_t sourceSequence) {
   if (!out || nodeId == 0 || sensorId == 0 || !std::isfinite(value)) return 0;
   std::memset(out, 0, PAYLOAD_BYTES);
   out[0] = MAGIC;
@@ -45,7 +47,10 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
   out[12] = quality;
   putU64(out + 13, timestampMs);
   putU16(out + 21, crc16Ccitt(out, SERIALIZED_FIELDS_BYTES - 2));
-  putU32(out + 23, sampleId);
+  putU32(out + PADDING_SAMPLE_ID_OFFSET, sampleId);
+  out[PADDING_SCHEMA_VERSION_OFFSET] = schemaVersion;
+  putU32(out + PADDING_FIRMWARE_VERSION_OFFSET, firmwareVersion);
+  putU32(out + PADDING_SOURCE_SEQUENCE_OFFSET, sourceSequence);
   return PAYLOAD_BYTES;
 }
 
@@ -58,7 +63,12 @@ bool deserializeSensorTelemetry(const uint8_t* in, size_t len, Decoded& out) {
   std::memcpy(&out.value, in + 8, sizeof(out.value));
   out.quality = in[12];
   std::memcpy(&out.timestampMs, in + 13, sizeof(out.timestampMs));
-  std::memcpy(&out.sampleId, in + 23, sizeof(out.sampleId));
+  std::memcpy(&out.sampleId, in + PADDING_SAMPLE_ID_OFFSET, sizeof(out.sampleId));
+  out.schemaVersion = in[PADDING_SCHEMA_VERSION_OFFSET];
+  std::memcpy(&out.firmwareVersion, in + PADDING_FIRMWARE_VERSION_OFFSET,
+              sizeof(out.firmwareVersion));
+  std::memcpy(&out.sourceSequence, in + PADDING_SOURCE_SEQUENCE_OFFSET,
+              sizeof(out.sourceSequence));
   return out.nodeId != 0 && out.sensorId != 0 && std::isfinite(out.value);
 }
 

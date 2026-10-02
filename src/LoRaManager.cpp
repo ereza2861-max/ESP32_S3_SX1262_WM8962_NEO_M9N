@@ -204,6 +204,28 @@ uint32_t currentEpochSec() {
   return now > 1700000000 && now < 4102444800 ? static_cast<uint32_t>(now) : 0;
 }
 
+bool productionSecurityEnabled() {
+#if defined(FIELDRADIO_PRODUCTION_BUILD)
+  return true;
+#else
+#if !defined(CONFIG_SECURE_BOOT_V2_ENABLED)
+#define CONFIG_SECURE_BOOT_V2_ENABLED 0
+#endif
+#if !defined(CONFIG_SECURE_FLASH_ENC_ENABLED)
+#define CONFIG_SECURE_FLASH_ENC_ENABLED 0
+#endif
+  return CONFIG_SECURE_BOOT_V2_ENABLED && CONFIG_SECURE_FLASH_ENC_ENABLED;
+#endif
+}
+
+uint64_t gatewaySensorTimestampMs() {
+  const time_t now = time(nullptr);
+  if (now > 1700000000 && now < 4102444800) {
+    return static_cast<uint64_t>(now) * 1000ULL;
+  }
+  return static_cast<uint64_t>(millis());
+}
+
 bool deriveRotatingKey(const uint8_t master[16], uint32_t epochSec, uint8_t out[16]) {
   if (!master || !out || epochSec == 0) return false;
   const uint32_t period = epochSec / Config::LORA_REKEY_PERIOD_SEC;
@@ -313,6 +335,19 @@ uint64_t LoRaManager::dutyMaxBudgetUs() const {
 
 uint32_t LoRaManager::forwardQueued() const {
   return forwardQueue_ ? static_cast<uint32_t>(uxQueueMessagesWaiting(forwardQueue_)) : 0;
+}
+
+bool LoRaManager::popRemoteSensorTelemetry(RemoteSensorTelemetry& out) {
+  if (!remoteSensorMutex_ || xSemaphoreTake(remoteSensorMutex_, 0) != pdTRUE) return false;
+  if (remoteSensorCount_ == 0) {
+    xSemaphoreGive(remoteSensorMutex_);
+    return false;
+  }
+  out = remoteSensorQueue_[remoteSensorHead_];
+  remoteSensorHead_ = (remoteSensorHead_ + 1U) % REMOTE_SENSOR_QUEUE_DEPTH;
+  --remoteSensorCount_;
+  xSemaphoreGive(remoteSensorMutex_);
+  return true;
 }
 
 bool LoRaManager::loadKey(uint8_t key[16]) const {
@@ -2776,11 +2811,19 @@ bool LoRaManager::processEcdhBeacon(uint32_t sourceId, uint32_t packetEpochSec,
 
 bool LoRaManager::begin() {
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  if (config.ecdhRekeyPolicy == 1 && !productionSecurityEnabled()) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH rekey requires production Secure Boot + Flash Encryption";
+    return false;
+  }
+#endif
   instance_ = this;
   mutex_ = xSemaphoreCreateMutex();
   seqMutex_ = xSemaphoreCreateMutex();
   textStateMutex_ = xSemaphoreCreateMutex();
   captureMutex_ = xSemaphoreCreateMutex();
+  remoteSensorMutex_ = xSemaphoreCreateMutex();
   forwardQueue_ = xQueueCreateStatic(FORWARD_QUEUE_DEPTH, sizeof(ForwardPacket),
                                      forwardQueueStorage_, &forwardQueueStruct_);
   sourceId_.store(sourceIdFromCallsign(config.callsign), std::memory_order_release);
@@ -2824,7 +2867,7 @@ bool LoRaManager::begin() {
     }
   }
   if (!mutex_ || !seqMutex_ || !textStateMutex_ || !captureMutex_ ||
-      !forwardQueue_ || !reserveTxSequenceBlock()) return false;
+      !remoteSensorMutex_ || !forwardQueue_ || !reserveTxSequenceBlock()) return false;
   const bool replayStoreOk = replayStore_.begin();
   if (!replayStoreOk) {
     StateLock lock(gState);
@@ -3489,41 +3532,6 @@ void LoRaManager::task() {
         for (auto& slot : voiceRx_)
           if (slot.used && slot.seq == seq) { alreadyQueued = true; break; }
         if (!duplicateV2 && !alreadyQueued) {
-    if (rxAuthenticated && addressedToUs &&
-        type == Config::LORA_TYPE_SENSOR_TELEMETRY &&
-        appPayloadLen == SensorTelemetry::PAYLOAD_BYTES) {
-      SensorTelemetry::Decoded decoded{};
-      if (SensorTelemetry::deserializeSensorTelemetry(
-              appPayload, appPayloadLen, decoded)) {
-        static uint32_t seenSource[Config::LORA_DEDUP_CACHE_SIZE] = {};
-        static uint32_t seenSample[Config::LORA_DEDUP_CACHE_SIZE] = {};
-        static uint32_t seenMs[Config::LORA_DEDUP_CACHE_SIZE] = {};
-        static size_t seenNext = 0;
-        uint32_t identity = decoded.sampleId;
-        if (identity == 0) identity = hashPayload(appPayload, appPayloadLen);
-        bool duplicate = false;
-        for (size_t i = 0; i < Config::LORA_DEDUP_CACHE_SIZE; ++i) {
-          if (seenSource[i] == rxSourceId && seenSample[i] == identity &&
-              seenMs[i] != 0 &&
-              static_cast<uint32_t>(millis() - seenMs[i]) < Config::LORA_DEDUP_TTL_MS) {
-            duplicate = true;
-            break;
-          }
-        }
-        if (!duplicate) {
-          seenSource[seenNext] = rxSourceId;
-          seenSample[seenNext] = identity;
-          seenMs[seenNext] = millis();
-          seenNext = (seenNext + 1U) % Config::LORA_DEDUP_CACHE_SIZE;
-          const String sensorName = String("sensor-") +
-                                    String(static_cast<unsigned>(decoded.sensorId));
-          (void)mqtt.publishSensorData(
-              decoded.nodeId, "LoRa-remote", decoded.sensorId,
-              sensorName.c_str(), "", decoded.value, decoded.quality,
-              rssi, decoded.timestampMs);
-        }
-      }
-    }
           VoiceRxSlot* freeSlot = nullptr;
           for (auto& slot : voiceRx_)
             if (!slot.used) { freeSlot = &slot; break; }
@@ -3567,6 +3575,63 @@ void LoRaManager::task() {
       voiceAckPendingSnr_ = snr;
       voiceAckPending_ = true;
       serviceVoiceReorder();
+    }
+
+    if (rxAuthenticated && addressedToUs &&
+        type == Config::LORA_TYPE_SENSOR_TELEMETRY &&
+        appPayloadLen == SensorTelemetry::PAYLOAD_BYTES) {
+      SensorTelemetry::Decoded decoded{};
+      if (SensorTelemetry::deserializeSensorTelemetry(
+              appPayload, appPayloadLen, decoded)) {
+        static uint32_t seenSource[Config::LORA_DEDUP_CACHE_SIZE] = {};
+        static uint32_t seenSample[Config::LORA_DEDUP_CACHE_SIZE] = {};
+        static uint32_t seenMs[Config::LORA_DEDUP_CACHE_SIZE] = {};
+        static size_t seenNext = 0;
+        uint32_t identity = decoded.sourceSequence != 0
+            ? decoded.sourceSequence : decoded.sampleId;
+        if (identity == 0) identity = hashPayload(appPayload, appPayloadLen);
+        bool duplicate = false;
+        for (size_t i = 0; i < Config::LORA_DEDUP_CACHE_SIZE; ++i) {
+          if (seenSource[i] == rxSourceId && seenSample[i] == identity &&
+              seenMs[i] != 0 &&
+              static_cast<uint32_t>(millis() - seenMs[i]) < Config::LORA_DEDUP_TTL_MS) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) {
+          if (decoded.timestampMs == 0) {
+            decoded.timestampMs = gatewaySensorTimestampMs();
+            decoded.quality |= SensorProtocol::QUALITY_TIMESTAMP_GATEWAY;
+          }
+          seenSource[seenNext] = rxSourceId;
+          seenSample[seenNext] = identity;
+          seenMs[seenNext] = millis();
+          seenNext = (seenNext + 1U) % Config::LORA_DEDUP_CACHE_SIZE;
+          if (remoteSensorMutex_ &&
+              xSemaphoreTake(remoteSensorMutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
+            if (remoteSensorCount_ >= REMOTE_SENSOR_QUEUE_DEPTH) {
+              remoteSensorHead_ = (remoteSensorHead_ + 1U) % REMOTE_SENSOR_QUEUE_DEPTH;
+              --remoteSensorCount_;
+            }
+            const size_t tail =
+                (remoteSensorHead_ + remoteSensorCount_) % REMOTE_SENSOR_QUEUE_DEPTH;
+            RemoteSensorTelemetry& queued = remoteSensorQueue_[tail];
+            queued.nodeId = decoded.nodeId;
+            queued.sensorId = decoded.sensorId;
+            queued.value = decoded.value;
+            queued.quality = decoded.quality;
+            queued.timestampMs = decoded.timestampMs;
+            queued.sampleId = decoded.sampleId;
+            queued.sourceSequence = decoded.sourceSequence;
+            queued.schemaVersion = decoded.schemaVersion;
+            queued.firmwareVersion = decoded.firmwareVersion;
+            queued.rssi = rssi;
+            ++remoteSensorCount_;
+            xSemaphoreGive(remoteSensorMutex_);
+          }
+        }
+      }
     }
 
     if (rxAuthenticated && addressedToUs && type == Config::LORA_TYPE_VOICE_ACK && !duplicateV2) {
@@ -4889,6 +4954,13 @@ bool LoRaManager::applyConfig() {
 }
 
 bool LoRaManager::applyConfig(const RuntimeConfig& config) {
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+  if (config.ecdhRekeyPolicy == 1 && !productionSecurityEnabled()) {
+    StateLock lock(gState);
+    if (lock.ok()) gState.lastError = "ECDH rekey requires production Secure Boot + Flash Encryption";
+    return false;
+  }
+#endif
   RadioArbiterGuard radioGuard(radioArbiter, RadioOwner::LoRaP2P, pdMS_TO_TICKS(50));
   if (!radioGuard.ok()) return false;
   if (!mutex_) return false;
