@@ -49,19 +49,29 @@ bool ProfileManager::loadProfileFromNvs() {
   if (!prefs.begin("sensor", true)) {
     Serial.println("WARN: sensor NVS open failed; using profile 0");
     activeProfile_ = ProfileConfig::Profile::IslandSea;
+    runtimeConfig_ = RuntimeConfig{};
     return false;
   }
 
   const uint8_t raw = prefs.getUChar("profile", 0);
+  ProfileBinding::Tag storedTag{};
+  if (prefs.getBytes("profile_bind", storedTag.data(), storedTag.size()) != storedTag.size()) {
+    storedTag.fill(0);
+  }
   prefs.end();
+
   if (raw >= ProfileConfig::PROFILE_COUNT) {
     Serial.printf("WARN: stored profile value %u invalid; using profile 0\n",
                   static_cast<unsigned>(raw));
     activeProfile_ = ProfileConfig::Profile::IslandSea;
+    runtimeConfig_ = RuntimeConfig{};
+    runtimeConfig_.profileBindingTag = ProfileBinding::firmwareProfileHash();
     return false;
   }
 
   activeProfile_ = static_cast<ProfileConfig::Profile>(raw);
+  runtimeConfig_.profile = activeProfile_;
+  runtimeConfig_.profileBindingTag = storedTag;
   return true;
 }
 
@@ -71,11 +81,18 @@ bool ProfileManager::saveProfileToNvs() {
     Serial.println("ERROR: sensor NVS open failed");
     return false;
   }
-  const bool ok = prefs.putUChar(
+  const ProfileBinding::Tag tag = ProfileBinding::firmwareProfileHash();
+  const bool profileOk = prefs.putUChar(
       "profile", static_cast<uint8_t>(activeProfile_)) == 1;
+  const bool bindOk = prefs.putBytes("profile_bind", tag.data(), tag.size()) == tag.size();
   prefs.end();
-  if (!ok) Serial.println("ERROR: profile NVS write failed");
-  return ok;
+  if (!profileOk || !bindOk) {
+    Serial.println("ERROR: profile/profile_bind NVS write failed");
+    return false;
+  }
+  runtimeConfig_.profile = activeProfile_;
+  runtimeConfig_.profileBindingTag = tag;
+  return true;
 }
 
 bool ProfileManager::profilePlaceholderDisabled(ProfileConfig::Profile profile) const {
@@ -113,6 +130,27 @@ bool ProfileManager::setProfile(ProfileConfig::Profile profile) {
 
 bool ProfileManager::begin() {
   loadProfileFromNvs();
+  const ProfileBinding::Tag expectedTag = ProfileBinding::firmwareProfileHash();
+  if (activeProfile_ != ProfileConfig::Profile::IslandSea &&
+      !ProfileBinding::equal(runtimeConfig_.profileBindingTag, expectedTag)) {
+    Serial.println("AUDIT: PROFILE_BINDING_MISMATCH; forcing profile 0");
+    activeProfile_ = ProfileConfig::Profile::IslandSea;
+    runtimeConfig_.profile = activeProfile_;
+    runtimeConfig_.profileBindingTag = expectedTag;
+    Preferences bindPrefs;
+    if (bindPrefs.begin("sensor", false)) {
+      (void)bindPrefs.putUChar("profile", 0);
+      (void)bindPrefs.putBytes("profile_bind", expectedTag.data(), expectedTag.size());
+      bindPrefs.end();
+    }
+  } else if (ProfileBinding::isZero(runtimeConfig_.profileBindingTag)) {
+    runtimeConfig_.profileBindingTag = expectedTag;
+    Preferences bindPrefs;
+    if (bindPrefs.begin("sensor", false)) {
+      (void)bindPrefs.putBytes("profile_bind", expectedTag.data(), expectedTag.size());
+      bindPrefs.end();
+    }
+  }
   Preferences prefs;
   if (prefs.begin("sensor", false)) {
     for (uint8_t i = 0; i < ProfileConfig::PROFILE_COUNT; ++i) {

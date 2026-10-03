@@ -90,3 +90,16 @@ bounded concurrent slots and persists incomplete state to SD. Conflicting duplic
 fragments are rejected rather than replacing authenticated state. Because the project is
 greenfield, the fragment ACK payload may use this new 8-byte SACK form without a legacy
 fragment-peer compatibility branch.
+
+## Remote sensor telemetry durable-ACK boundary
+
+Authenticated remote sensor telemetry is first placed in the gateway's bounded
+RAM handoff queue. The gateway then calls `RemoteTelemetryBridge`, which performs
+the durable `SensorSpool::append()` before the LoRa batch ACK is queued.
+
+If the SD/spool append fails, the exact remote telemetry item is returned to the
+RAM handoff queue and no ACK is emitted. This makes durable spool admission the
+ACK boundary rather than RAM-queue admission.
+
+`originNodeId` is carried from `RemoteSensorTelemetry` into the durable spool
+record and remains distinct from the immediate transport/source `nodeId`.

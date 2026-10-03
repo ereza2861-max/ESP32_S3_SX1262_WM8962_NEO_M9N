@@ -3787,8 +3787,6 @@ void LoRaManager::task() {
             xSemaphoreGive(remoteSensorMutex_);
           }
         }
-        (void)queueSensorBatchAck(rxSourceId, decoded.sensorId,
-                                  decoded.sourceSequence);
         } else {
           StateLock lock(gState);
           if (lock.ok()) {

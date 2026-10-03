@@ -1,4 +1,5 @@
 #include "MqttClientManager.h"
+#include "MqttAckRouter.h"
 #include "SensorSpool.h"
 #include "Config.h"
 #include "PersistentConfig.h"
@@ -884,7 +885,8 @@ bool MqttClientManager::publishSensorData(uint32_t nodeId, const char* nodeName,
                                             int16_t rssi, uint64_t timestampMs,
                                             uint32_t sourceSequence,
                                             uint8_t schemaVersion,
-                                            uint32_t firmwareVersion) {
+                                            uint32_t firmwareVersion,
+                                            uint32_t originNodeId) {
   if (!sensorQueue_ || nodeId == 0 || sensorId == 0 || !nodeName || !sensorName ||
       !unit || !std::isfinite(value)) return false;
   SensorSample sample{};
@@ -897,6 +899,7 @@ bool MqttClientManager::publishSensorData(uint32_t nodeId, const char* nodeName,
   sample.sourceSequence = sourceSequence;
   sample.schemaVersion = schemaVersion;
   sample.firmwareVersion = firmwareVersion;
+  sample.originNodeId = originNodeId;
   std::strncpy(sample.nodeName, nodeName, sizeof(sample.nodeName) - 1);
   std::strncpy(sample.sensorName, sensorName, sizeof(sample.sensorName) - 1);
   std::strncpy(sample.unit, unit, sizeof(sample.unit) - 1);
@@ -965,7 +968,7 @@ bool MqttClientManager::waitForPubAck(uint16_t packetId, uint32_t timeoutMs) {
   return false;
 }
 
-bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const String& payload) {
+bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const String& payload, uint32_t sampleId) {
   if (mqttTopic.isEmpty() || payload.isEmpty() || mqttTopic.length() > 128 || payload.length() > 2048) {
     return false;
   }
@@ -980,12 +983,14 @@ bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const S
 
   uint16_t packetId = nextPacketId_++;
   if (packetId == 0) packetId = nextPacketId_++;
+  if (!MqttAckRouter::registerPending(packetId, sampleId)) return false;
 
   const auto writeFully = [&transport](const uint8_t* data, size_t len) -> bool {
     return transport.write(data, len) == len;
   };
   const uint8_t fixedHeader = 0x32U;
   if (!writeFully(&fixedHeader, 1) || !writeFully(remaining, remainingLengthBytes)) {
+    MqttAckRouter::forgetPending(packetId);
     client_.disconnect();
     connected_ = false;
     return false;
@@ -1000,16 +1005,19 @@ bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const S
       !writeFully(reinterpret_cast<const uint8_t*>(mqttTopic.c_str()), mqttTopic.length()) ||
       !writeFully(packetIdBytes, sizeof(packetIdBytes)) ||
       !writeFully(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length())) {
+    MqttAckRouter::forgetPending(packetId);
     client_.disconnect();
     connected_ = false;
     return false;
   }
   transport.flush();
   if (!waitForPubAck(packetId, 2000)) {
+    MqttAckRouter::forgetPending(packetId);
     client_.disconnect();
     connected_ = false;
     return false;
   }
+  MqttAckRouter::onPublishSuccess(packetId);
   return true;
 }
 
@@ -1067,6 +1075,8 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
   payload += String(static_cast<unsigned>(sample.schemaVersion));
   payload += ",\"firmware_version\":";
   payload += String(static_cast<unsigned long>(sample.firmwareVersion));
+  payload += ",\"origin_node_id\":";
+  payload += String(static_cast<unsigned long>(sample.originNodeId));
   payload += ",\"quality\":";
   payload += String(static_cast<unsigned>(sample.quality));
   payload += ",\"rssi\":";
@@ -1078,7 +1088,8 @@ bool MqttClientManager::publishSensorSample(const SensorSample& sample) {
   sensorLeaf += String(static_cast<unsigned long>(sample.nodeId));
   sensorLeaf += '/';
   sensorLeaf += String(static_cast<unsigned>(sample.sensorId));
-  return publishSensorSampleQos1(topic(sensorLeaf.c_str()), payload);
+  return publishSensorSampleQos1(topic(sensorLeaf.c_str()), payload,
+                                  SensorSpool::sampleId(sample));
 }
 
 void MqttClientManager::setEnabled(bool enabled) {

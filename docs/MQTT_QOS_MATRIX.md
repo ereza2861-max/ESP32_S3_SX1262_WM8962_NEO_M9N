@@ -11,3 +11,23 @@ This document records the additive MQTT delivery contract for the audit decision
 
 QoS changes are additive at the application delivery boundary. No MQTT topic
 version or wire protocol version is changed by this decision.
+
+## PUBACK boundary
+
+For sensor telemetry, `publishSensorData()` only means that the sample entered
+the MQTT task queue. It does **not** clear the durable spool.
+
+The exact sequence is:
+
+1. `SensorSpool::peek()` selects the pending durable record.
+2. `publishSensorData()` enqueues the record, including `originNodeId`.
+3. The MQTT task assigns a QoS1 packet identifier and registers the
+   packet-id/sample-id pair with `MqttAckRouter`.
+4. `waitForPubAck()` accepts completion only when a broker PUBACK with the exact
+   packet identifier is received.
+5. Only then does `MqttAckRouter::onPublishSuccess()` invoke the spool callback.
+6. The callback clears `DELIVERY_MQTT` for that exact sample.
+
+A timeout, transport failure, packet-id mismatch, or queue failure leaves the spool
+record pending for a later retry. There is no optimistic `markDelivered()` at
+queue-enqueue time.

@@ -205,6 +205,7 @@ bool SensorSpool::scan() {
       entry.source = record.source <= REMOTE_LORA ? record.source : LOCAL_BLE;
       entry.priority = static_cast<uint8_t>(record.priority & 0xFFU);
       entry.sourceSequence = record.sourceSequence;
+      entry.originNodeId = record.originNodeId;
       entry.recordSize = recordSize;
       entry.valid = true;
       if (entry.deliveredMask == entry.requiredMask) --count_;
@@ -354,6 +355,7 @@ bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requi
   record.sourceSequence = sourceSequence;
   record.schemaVersion = schemaVersion;
   record.firmwareVersion = firmwareVersion;
+  record.originNodeId = originNodeId;
   record.sample = sample;
 
   size_t currentBytes = 0;
@@ -388,6 +390,7 @@ bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requi
   entry.source = source;
   entry.priority = priority;
   entry.sourceSequence = sourceSequence;
+  entry.originNodeId = originNodeId;
   entry.recordSize = sizeof(DiskRecord);
   entry.valid = true;
   return true;
@@ -419,6 +422,7 @@ bool SensorSpool::peek(Pending& out) const {
   out.sourceSequence = entry.sourceSequence;
   out.schemaVersion = record.schemaVersion;
   out.firmwareVersion = record.firmwareVersion;
+  out.originNodeId = record.originNodeId;
   return true;
 }
 

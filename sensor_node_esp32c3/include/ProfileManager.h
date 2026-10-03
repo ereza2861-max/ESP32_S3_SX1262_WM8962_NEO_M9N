@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include "ProfileConfig.h"
+#include "ProfileBinding.h"
 
 // ProfileManager owns three responsibilities:
 //   1. Load/save the active profile from the "sensor" NVS namespace.
@@ -13,6 +14,11 @@
 
 class ProfileManager {
 public:
+  struct RuntimeConfig {
+    ProfileConfig::Profile profile = ProfileConfig::Profile::IslandSea;
+    ProfileBinding::Tag profileBindingTag{};
+  };
+
   using LongPressCallback = void (*)();
 
   // Loads the persisted runtime profile, configures buzzer + button GPIOs,
@@ -39,6 +45,7 @@ public:
 
   // Changes and persists the runtime profile.
   bool setProfile(ProfileConfig::Profile profile);
+  const RuntimeConfig& runtimeConfig() const { return runtimeConfig_; }
   bool profilePlaceholderDisabled(ProfileConfig::Profile profile) const;
   bool setProfilePlaceholderDisabled(ProfileConfig::Profile profile, bool disabled);
 
@@ -59,6 +66,7 @@ private:
   };
 
   ProfileConfig::Profile activeProfile_ = ProfileConfig::Profile::IslandSea;
+  RuntimeConfig runtimeConfig_{};
 
   ButtonState buttonState_ = ButtonState::Idle;
   uint32_t buttonStateSinceMs_ = 0;

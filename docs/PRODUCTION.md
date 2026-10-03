@@ -46,6 +46,32 @@ in `docs/PRODUCTION_ACCEPTANCE.md`. The acceptance remains **OPEN** until the re
 manufacturing evidence is supplied.
 
 
+## 1.3 Profile SKU binding — ESP32-C3 sensor node
+
+Production sensor profiles are separate PCB SKUs even though the MCU firmware uses
+the same runtime profile API. A profile change therefore assumes that sensors from
+the previous/unused profile have been physically disconnected/removed and that the
+installed sensor PCB matches the selected SKU.
+
+The ESP32-C3 stores a 32-byte `profileBindingTag` in NVS namespace `sensor`, key
+`profile_bind`. The tag is the SHA-256 binding hash of the firmware's compiled
+`FIELD_RADIO_PROFILE_SKU` value. A production build must set that value to the
+physical sensor-PCB SKU (`0..5`); the repository default is SKU `0`.
+
+At boot, if the persisted profile is non-zero and `profile_bind` does not match
+the running firmware's `firmwareProfileHash()`, the node fails closed by resetting
+the runtime profile to profile `0`, persists the current binding tag, and emits the
+audit event `PROFILE_BINDING_MISMATCH`.
+
+Manufacturing rule:
+
+- Build the firmware with `-DFIELD_RADIO_PROFILE_SKU=<0..5>` matching the PCB SKU.
+- Do not reuse a profile-1 firmware image on a profile-2 PCB, or vice versa.
+- Before changing profile, physically disconnect/remove sensors belonging to the
+  old profile and install the sensor PCB for the new profile.
+- No additional MCU GPIO or pin assignment is introduced by this binding.
+- `profile_bind` is an identity guard, not a substitute for physical inspection.
+
 ## 2. Prerequisites
 
 Use one consistent ESP-IDF/esptool toolchain for the whole manufacturing run.

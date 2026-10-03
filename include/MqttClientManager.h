@@ -40,7 +40,7 @@ public:
                           uint32_t sourceSequence = 0,
                           uint8_t schemaVersion = 0,
                           uint32_t firmwareVersion = 0,
-                          uint32_t originNodeId = 0);
+                          uint32_t originNodeId);
   // F1-TODO-3: Service certificate rotation readiness without contacting a backend.
   void serviceRotation();
   // F1-TODO-6: Verify a candidate certificate/CA pair without persisting it.
@@ -134,7 +134,7 @@ private:
   bool timeSynchronized() const;
   String topic(const char* leaf) const;
   bool publishSensorSample(const SensorSample& sample);
-  bool publishSensorSampleQos1(const String& mqttTopic, const String& payload);
+  bool publishSensorSampleQos1(const String& mqttTopic, const String& payload, uint32_t sampleId);
   Client& mqttTransport();
   bool waitForPubAck(uint16_t packetId, uint32_t timeoutMs);
   static size_t encodeMqttRemainingLength(uint8_t* out, size_t length);

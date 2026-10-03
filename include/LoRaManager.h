@@ -97,6 +97,8 @@ public:
   uint32_t forwardQueued() const;
   uint32_t forwardLastDropMs() const { return forwardLastDropMs_; }
   bool popRemoteSensorTelemetry(RemoteSensorTelemetry& out);
+  bool requeueRemoteSensorTelemetry(const RemoteSensorTelemetry& telemetry);
+  bool queueSensorBatchAck(uint32_t nodeId, uint16_t sensorId, uint32_t sourceSequence);
   struct SensorBatchAckRecord {
     uint32_t nodeId = 0;
     uint16_t sensorId = 0;
@@ -133,7 +135,6 @@ private:
   SemaphoreHandle_t remoteSensorMutex_ = nullptr;
   static constexpr size_t REMOTE_SENSOR_QUEUE_DEPTH = Config::SENSOR_LORA_QUEUE_DEPTH;
   static constexpr size_t SENSOR_BATCH_ACK_QUEUE_DEPTH = 16;
-  bool queueSensorBatchAck(uint32_t nodeId, uint16_t sensorId, uint32_t sourceSequence);
   void serviceSensorBatchAck();
   bool handleSensorBatchAck(const uint8_t* payload, size_t len);
   static LoRaManager* instance_;

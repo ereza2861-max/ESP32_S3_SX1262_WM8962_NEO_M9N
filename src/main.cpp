@@ -24,6 +24,8 @@
 #include "LoRaWANManager.h"
 #include "WifiStaManager.h"
 #include "MqttClientManager.h"
+#include "MqttAckRouter.h"
+#include "RemoteTelemetryBridge.h"
 #include "CertLifecycleManager.h"
 #include "AudioManager.h"
 #include "StorageManager.h"
@@ -85,6 +87,20 @@ static uint16_t lastBuzzerSosSeq = 0;
 static uint32_t lastLogPersistMs = 0;
 static size_t lastPersistedLoraLogCount = 0;
 static size_t lastPersistedHealthLogCount = 0;
+
+static void onMqttPublishSuccess(uint16_t packetId, void*) {
+  uint32_t sampleId = 0;
+  if (!MqttAckRouter::takeSampleId(packetId, sampleId)) {
+    Serial.printf("WARN: MQTT PUBACK packet %u has no spool mapping\n",
+                  static_cast<unsigned>(packetId));
+    return;
+  }
+  if (!sensorSpool.markDelivered(sampleId, SensorSpool::DELIVERY_MQTT)) {
+    Serial.printf("WARN: MQTT PUBACK packet %u could not mark spool sample %lu delivered\n",
+                  static_cast<unsigned>(packetId),
+                  static_cast<unsigned long>(sampleId));
+  }
+}
 
 static void buzzerInit() {
 #if defined(BUZZER_MODE_ACTIVE)
@@ -844,23 +860,37 @@ static void taskSensorForward(void*) {
     }
 
     // Remote LoRa telemetry is admitted to the same durable spool before MQTT.
-    // It is MQTT-only here because the authenticated LoRa copy has already arrived.
+    // The LoRa batch ACK is emitted only after this durable append succeeds.
+    static bool remoteRetryPending = false;
+    static LoRaManager::RemoteSensorTelemetry remoteRetry{};
     LoRaManager::RemoteSensorTelemetry remote{};
-    if (sensorSpool.ready() && lora.popRemoteSensorTelemetry(remote)) {
-      SensorReader::SensorSample sample{};
-      sample.nodeId = remote.nodeId;
-      sample.sensorId = remote.sensorId;
-      sample.value = remote.value;
-      sample.quality = remote.quality;
-      sample.timestampMs = remote.timestampMs;
-      sample.rssi = remote.rssi;
-      std::snprintf(sample.nodeName, sizeof(sample.nodeName), "LoRa-remote");
-      std::snprintf(sample.sensorName, sizeof(sample.sensorName), "sensor-%u",
-                    static_cast<unsigned>(remote.sensorId));
-      (void)sensorSpool.append(sample, SensorSpool::DELIVERY_MQTT,
-                               SensorSpool::REMOTE_LORA, 1,
-                               remote.sourceSequence, remote.schemaVersion,
-                               remote.firmwareVersion);
+    bool haveRemote = false;
+    if (remoteRetryPending) {
+      remote = remoteRetry;
+      haveRemote = true;
+    } else if (sensorSpool.ready()) {
+      haveRemote = lora.popRemoteSensorTelemetry(remote);
+    }
+    if (haveRemote) {
+      if (RemoteTelemetryBridge::admitRemoteTelemetry(remote, sensorSpool)) {
+        if (lora.queueSensorBatchAck(remote.nodeId, remote.sensorId,
+                                     remote.sourceSequence)) {
+          remoteRetryPending = false;
+          remoteRetry = {};
+        } else if (!lora.requeueRemoteSensorTelemetry(remote)) {
+          remoteRetry = remote;
+          remoteRetryPending = true;
+        } else {
+          remoteRetryPending = false;
+        }
+      } else if (!lora.requeueRemoteSensorTelemetry(remote)) {
+        // A concurrent producer may have consumed the one free queue slot.
+        // Retain the exact item locally until it can be returned/retried.
+        remoteRetry = remote;
+        remoteRetryPending = true;
+      } else {
+        remoteRetryPending = false;
+      }
     }
 
     // First make the RAM queue durable. Peek is intentional: a sample is not
@@ -923,8 +953,10 @@ static void taskSensorForward(void*) {
                                    pending.sample.unit, pending.sample.value,
                                    pending.sample.quality, pending.sample.rssi,
                                    pending.sample.timestampMs, pending.sourceSequence,
-                                   pending.schemaVersion, pending.firmwareVersion)) {
-          (void)sensorSpool.markDelivered(pending.sampleId, SensorSpool::DELIVERY_MQTT);
+                                   pending.schemaVersion, pending.firmwareVersion,
+                                   pending.originNodeId)) {
+          // Durable MQTT completion is owned exclusively by MqttAckRouter
+          // after a matching broker PUBACK.
         }
       }
 
@@ -1570,6 +1602,7 @@ void setup() {
   audio.setVolume(config.volume);
 
   setupWifi();
+  MqttAckRouter::setCallback(onMqttPublishSuccess, nullptr);
   (void)mqtt.begin();
   (void)certLifecycle.begin();
   web.begin();
