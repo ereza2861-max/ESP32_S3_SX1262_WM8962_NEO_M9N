@@ -5,12 +5,18 @@
 
 class SensorDedupStore {
 public:
+  enum class DedupResult : uint8_t {
+    New,
+    Duplicate,
+    PersistenceFailure,
+  };
+
   bool begin();
   bool healthy() const { return ready_; }
-  // Returns true when the application tuple was already persisted. New tuples
-  // replace the oldest slot and are committed to the inactive bank first.
-  bool seenOrUpdate(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence,
-                    uint8_t schemaVersion, uint32_t firmwareVersion);
+  // New commits the tuple; Duplicate means the tuple is already persisted;
+  // PersistenceFailure means the MRAM journal could not be durably updated.
+  DedupResult seenOrUpdate(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence,
+                           uint8_t schemaVersion, uint32_t firmwareVersion);
 
 private:
   struct Entry {

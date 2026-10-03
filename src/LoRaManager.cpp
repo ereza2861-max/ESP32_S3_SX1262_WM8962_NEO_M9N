@@ -3730,11 +3730,21 @@ void LoRaManager::task() {
         uint32_t identity = decoded.sourceSequence != 0
             ? decoded.sourceSequence : decoded.sampleId;
         if (identity == 0) identity = hashPayload(appPayload, appPayloadLen);
+        const SensorDedupStore::DedupResult dedupResult =
+            decoded.sourceSequence != 0
+                ? sensorDedupStore_.seenOrUpdate(
+                      decoded.nodeId, decoded.sensorId, decoded.sourceSequence,
+                      decoded.schemaVersion, decoded.firmwareVersion)
+                : SensorDedupStore::DedupResult::New;
         const bool persistentDuplicate =
-            decoded.sourceSequence != 0 &&
-            sensorDedupStore_.seenOrUpdate(
-                decoded.nodeId, decoded.sensorId, decoded.sourceSequence,
-                decoded.schemaVersion, decoded.firmwareVersion);
+            dedupResult == SensorDedupStore::DedupResult::Duplicate;
+        if (dedupResult == SensorDedupStore::DedupResult::PersistenceFailure) {
+          StateLock lock(gState);
+          if (lock.ok()) {
+            gState.lastError = "Sensor dedup persistence failure";
+            if (gState.sensorDedupFailures < UINT32_MAX) ++gState.sensorDedupFailures;
+          }
+        }
         bool duplicate = persistentDuplicate;
         for (size_t i = 0; i < Config::LORA_DEDUP_CACHE_SIZE; ++i) {
           if (seenSource[i] == rxSourceId && seenSample[i] == identity &&

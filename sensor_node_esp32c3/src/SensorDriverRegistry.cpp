@@ -538,14 +538,15 @@ public:
     sensors_ = entry->sensors;
     if (!sensors_ || sensors_->getDeviceCount() <= config_.channel) {
       releaseOneWireBus(config_.pinSda);
-      bus_ = nullptr; sensors_ = nullptr;
+      bus_ = nullptr;
+      sensors_ = nullptr;
       return false;
     }
-    // The channel identifies which device on the shared OneWire bus this
-    // driver instance reads. Actual device resolution is deferred until a
-    // hardware sample confirms the ROM layout; driver does not assume any
-    // ROM ordering.
-    return sensors_ != nullptr && sensors_->getDeviceCount() > config_.channel;
+
+    loadRom();
+    activeIndex_ = config_.channel;
+    if (romBound_ && !resolveBoundRom()) degraded_ = true;
+    return sensors_ != nullptr;
   }
 
   SensorProtocol::SensorType type() const override {
@@ -560,12 +561,29 @@ public:
       return false;
     }
     sensors_->requestTemperatures();
-    const float t = sensors_->getTempCByIndex(config_.channel);
+    if (romBound_ && degraded_) {
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      return false;
+    }
+
+    const float t = sensors_->getTempCByIndex(activeIndex_);
     if (t == DEVICE_DISCONNECTED_C || !std::isfinite(t)) {
       value = 0.0f;
       quality = SensorProtocol::QUALITY_STALE;
       return false;
     }
+
+    // The first successful channel read binds the physical ROM. Future boots
+    // resolve this ROM rather than relying on OneWire enumeration order.
+    if (!romBound_) {
+      uint8_t detected[8] = {};
+      if (sensors_->getAddress(detected, activeIndex_)) {
+        std::memcpy(rom_, detected, sizeof(rom_));
+        if (saveRom()) romBound_ = true;
+      }
+    }
+
     value = t;
     quality = SensorProtocol::QUALITY_VALID;
     return true;
@@ -575,9 +593,6 @@ public:
     SensorProtocol::SensorDescriptor d{};
     d.id = config_.sensorId;
     d.type = static_cast<uint8_t>(type());
-    // registerAddr selects the semantic role:
-    //   0 = water temperature (Profile 0)
-    //   1 = soil temperature (Profile 1, future)
     const bool isSoil = config_.registerAddr == 1;
     std::strncpy(d.name, isSoil ? "soil_temp" : "water_temp",
                  sizeof(d.name) - 1);
@@ -589,18 +604,88 @@ public:
     d.max = isSoil ? 60.0f : 50.0f;
     d.periodMs = config_.periodMs;
     d.flags = SensorProtocol::FLAG_ENABLED;
+    if (degraded_) d.flags |= SensorProtocol::FLAG_DEGRADED;
     return d;
   }
 
-public:
+  bool bindIndex(uint8_t index) {
+    if (!sensors_ || index >= sensors_->getDeviceCount()) return false;
+    uint8_t detected[8] = {};
+    if (!sensors_->getAddress(detected, index)) return false;
+    std::memcpy(rom_, detected, sizeof(rom_));
+    if (!saveRom()) return false;
+    activeIndex_ = index;
+    romBound_ = true;
+    degraded_ = false;
+    return true;
+  }
+
+  bool currentRom(uint8_t out[8]) const {
+    if (!out || !sensors_) return false;
+    if (romBound_) {
+      std::memcpy(out, rom_, sizeof(rom_));
+      return true;
+    }
+    return sensors_->getAddress(out, config_.channel);
+  }
+
   ~OneWireTempDriver() override {
     if (bus_) releaseOneWireBus(config_.pinSda);
   }
 
 private:
+  bool saveRom() const {
+    Preferences prefs;
+    if (!prefs.begin("sensor", false)) return false;
+    char key[16] = {};
+    std::snprintf(key, sizeof(key), "ow_rom_%04X",
+                  static_cast<unsigned>(config_.sensorId));
+    const bool ok = prefs.putBytes(key, rom_, sizeof(rom_)) == sizeof(rom_);
+    prefs.end();
+    return ok;
+  }
+
+  void loadRom() {
+    romBound_ = false;
+    degraded_ = false;
+    std::memset(rom_, 0, sizeof(rom_));
+    Preferences prefs;
+    if (!prefs.begin("sensor", true)) return;
+    char key[16] = {};
+    std::snprintf(key, sizeof(key), "ow_rom_%04X",
+                  static_cast<unsigned>(config_.sensorId));
+    if (prefs.getBytes(key, rom_, sizeof(rom_)) == sizeof(rom_)) {
+      for (uint8_t byte : rom_) {
+        if (byte != 0) {
+          romBound_ = true;
+          break;
+        }
+      }
+    }
+    prefs.end();
+  }
+
+  bool resolveBoundRom() {
+    if (!romBound_ || !sensors_) return false;
+    const uint8_t count = sensors_->getDeviceCount();
+    for (uint8_t i = 0; i < count; ++i) {
+      uint8_t detected[8] = {};
+      if (!sensors_->getAddress(detected, i)) continue;
+      if (std::memcmp(detected, rom_, sizeof(rom_)) == 0) {
+        activeIndex_ = i;
+        return true;
+      }
+    }
+    return false;
+  }
+
   OneWire* bus_ = nullptr;
   DallasTemperature* sensors_ = nullptr;
   DriverConfig config_{};
+  uint8_t rom_[8] = {};
+  uint8_t activeIndex_ = 0;
+  bool romBound_ = false;
+  bool degraded_ = false;
 };
 
 struct PulseSlot {
@@ -882,6 +967,31 @@ bool SensorDriverRegistry::loadCalibration(uint16_t sensorId, float& scale,
   return true;
 }
 
+namespace {
+bool loadSamplingPeriod(uint16_t sensorId, uint32_t& periodMs) {
+  Preferences prefs;
+  if (!prefs.begin("sensor", true)) return false;
+  char key[16] = {};
+  std::snprintf(key, sizeof(key), "period_%04X",
+                static_cast<unsigned>(sensorId));
+  const bool found = prefs.isKey(key);
+  if (found) periodMs = prefs.getUInt(key, 0);
+  prefs.end();
+  return found && periodMs > 0 && periodMs <= 86400000UL;
+}
+
+bool saveSamplingPeriod(uint16_t sensorId, uint32_t periodMs) {
+  Preferences prefs;
+  if (!prefs.begin("sensor", false)) return false;
+  char key[16] = {};
+  std::snprintf(key, sizeof(key), "period_%04X",
+                static_cast<unsigned>(sensorId));
+  const bool ok = prefs.putUInt(key, periodMs) == sizeof(uint32_t);
+  prefs.end();
+  return ok;
+}
+}
+
 bool SensorDriverRegistry::allocateSourceSequenceBlock(uint16_t sensorId,
                                                      uint32_t& firstSequence) {
   firstSequence = 0;
@@ -907,6 +1017,9 @@ bool SensorDriverRegistry::rebuild(SensorRegistry& registry) {
   registry.clear();
   for (size_t i = 0; i < count_; ++i) {
     const uint32_t previousSourceSequence = entries_[i].sourceSequence;
+    uint32_t persistedPeriod = 0;
+    if (loadSamplingPeriod(entries_[i].config.sensorId, persistedPeriod))
+      entries_[i].config.periodMs = persistedPeriod;
     delete entries_[i].driver;
     entries_[i].driver = createDriver(entries_[i].config);
     if (previousSourceSequence != 0) entries_[i].sourceSequence = previousSourceSequence;
@@ -1065,9 +1178,37 @@ private:
 
 }  // namespace
 
+bool SensorDriverRegistry::bindOneWireRom(uint16_t sensorId, uint8_t index) {
+  for (size_t i = 0; i < count_; ++i) {
+    if (entries_[i].config.sensorId != sensorId ||
+        entries_[i].config.driverType != DRIVER_ONEWIRE_TEMP) continue;
+    auto* driver = dynamic_cast<OneWireTempDriver*>(entries_[i].driver);
+    return driver && driver->bindIndex(index);
+  }
+  return false;
+}
+
+size_t SensorDriverRegistry::getOneWireRomList(OneWireRomInfo* out,
+                                               size_t maxEntries) const {
+  if (!out || maxEntries == 0) return 0;
+  size_t written = 0;
+  for (size_t i = 0; i < count_ && written < maxEntries; ++i) {
+    if (entries_[i].config.driverType != DRIVER_ONEWIRE_TEMP) continue;
+    const auto* driver =
+        dynamic_cast<const OneWireTempDriver*>(entries_[i].driver);
+    if (!driver || !driver->currentRom(out[written].rom)) continue;
+    out[written].sensorId = entries_[i].config.sensorId;
+    ++written;
+  }
+  return written;
+}
+
 bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
   bool ok = true;
   for (auto& entry : entries_) {
+    // FLAG_PLACEHOLDER_DISABLED is a hard telemetry gate. Do not consume a
+    // source sequence or publish a value for disabled/unverified hardware.
+    if (!SensorProtocol::isEnabled(entry.descriptor)) continue;
     if (!entry.driver) { ok = false; continue; }
     if (entry.lastSampleMs != 0 &&
         static_cast<uint32_t>(nowMs - entry.lastSampleMs) < entry.config.periodMs) continue;
@@ -1124,8 +1265,16 @@ bool SensorDriverRegistry::setSamplingPeriod(uint16_t sensorId, uint32_t periodM
   if (sensorId == 0 || periodMs == 0 || periodMs > 86400000UL) return false;
   for (size_t i = 0; i < count_; ++i) {
     if (entries_[i].config.sensorId != sensorId) continue;
+    const uint32_t oldPeriod = entries_[i].config.periodMs;
+    // Persist first. A failed NVS write must not alter the runtime schedule.
+    if (!saveSamplingPeriod(sensorId, periodMs)) return false;
     entries_[i].config.periodMs = periodMs;
-    return rebuild(registry);
+    if (rebuild(registry)) return true;
+    // Roll back both runtime and persisted state if driver rebuild fails.
+    (void)saveSamplingPeriod(sensorId, oldPeriod);
+    entries_[i].config.periodMs = oldPeriod;
+    (void)rebuild(registry);
+    return false;
   }
   return false;
 }

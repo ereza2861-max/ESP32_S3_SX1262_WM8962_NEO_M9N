@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <type_traits>
+#include <cstdio>
 
 namespace SensorProtocol {
 
@@ -21,6 +22,12 @@ constexpr char COMMAND_RESPONSE_UUID[] = "7f2a0000-7b2a-4a6e-9a9f-1b7f7e000006";
 constexpr uint8_t COMMAND_SET_SAMPLING_PERIOD = 1;
 constexpr uint8_t COMMAND_REQUEST_DESCRIPTOR_REFRESH = 2;
 constexpr uint8_t COMMAND_REQUEST_SENSOR_RESET = 3;
+inline void makeBleCommandIdentityToken(const uint8_t address[6], uint8_t type,
+                                        char out[15]) {
+  std::snprintf(out, 15, "%02X%02X%02X%02X%02X%02X%X",
+                address[0], address[1], address[2], address[3],
+                address[4], address[5], static_cast<unsigned>(type & 0x0F));
+}
 
 // Multi-byte fields use little-endian order and IEEE-754 binary32 floats.
 // Both ESP32-S3 (gateway) and ESP32-C3 (sensor node) are little-endian
@@ -146,6 +153,26 @@ struct CommandResponse {
   uint8_t result = 0;
   uint16_t errorCode = 0;
 };
+constexpr uint8_t COMMAND_BIND_ROM = 4;
+constexpr uint8_t COMMAND_GET_ROM_LIST = 5;
+
+// COMMAND_GET_ROM_LIST sends one or more notifications on
+// COMMAND_RESPONSE_UUID after its terminal CommandResponse. The notification
+// format is: magic(0x524F), version, chunkIndex, chunkCount, entryCount,
+// followed by entryCount {sensorId:uint16, rom:uint8[8]} records.
+constexpr uint16_t ROM_LIST_MAGIC = 0x524F;
+constexpr uint8_t ROM_LIST_VERSION = 1;
+struct RomListNotification {
+  uint16_t magic = ROM_LIST_MAGIC;
+  uint8_t version = ROM_LIST_VERSION;
+  uint8_t chunkIndex = 0;
+  uint8_t chunkCount = 0;
+  uint8_t entryCount = 0;
+  struct Entry {
+    uint16_t sensorId = 0;
+    uint8_t rom[8] = {};
+  } entries[8]{};
+};
 #pragma pack(pop)
 
 static_assert(sizeof(SensorDescriptor) == 63, "SensorDescriptor wire layout changed");
@@ -169,6 +196,10 @@ inline bool validDescriptor(const SensorDescriptor& descriptor) {
 
 inline bool validValue(const SensorValue& value) {
   return value.id != 0 && std::isfinite(value.value);
+}
+
+inline bool isEnabled(const SensorDescriptor& descriptor) {
+  return (descriptor.flags & FLAG_ENABLED) != 0;
 }
 
 } // namespace SensorProtocol

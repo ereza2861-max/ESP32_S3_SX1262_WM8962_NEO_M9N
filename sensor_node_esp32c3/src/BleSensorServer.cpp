@@ -10,6 +10,12 @@ namespace {
 BleSensorServer* gServer = nullptr;
 uint32_t gPasskey = 0;
 
+struct CommandJournal {
+  uint32_t sequence = 0;
+  SensorProtocol::CommandResponse response{};
+  uint8_t hasResponse = 0;
+};
+
 uint32_t loadOrCreatePasskey() {
   // A per-device random passkey is preferable to a derivation from the public
   // BLE address. It is printed only on the local provisioning console.
@@ -161,42 +167,99 @@ void BleSensorServer::handleCommand(NimBLECharacteristic* characteristic,
   response.sequence = request.sequence;
 
   Preferences prefs;
-  if (!prefs.begin("ble-cmd", false)) return;
+  char identityNamespace[15] = {};
+  SensorProtocol::makeBleCommandIdentityToken(
+      connInfo.getAddress().getValue(), connInfo.getAddress().getType(),
+      identityNamespace);
+  // NVS namespace length is also capped at 15 bytes. Partitioning the
+  // command journal by the complete identity eliminates cross-peer collisions.
+  if (!prefs.begin(identityNamespace, false)) return;
   char key[15] = {};
   const std::string address = connInfo.getAddress().toString();
   uint32_t addressHash = 2166136261UL;
   for (unsigned char c : address) { addressHash ^= c; addressHash *= 16777619UL; }
   std::snprintf(key, sizeof(key), "seq_%08lX",
                 static_cast<unsigned long>(addressHash));
-  const uint32_t lastSequence = prefs.getUInt(key, 0);
-  if (request.sequence == 0 || request.sequence <= lastSequence) {
-    // A duplicate is an acknowledged replay: do not execute it twice.
-    response.result = request.sequence == lastSequence ? 0 : 1;
-    response.errorCode = request.sequence == lastSequence ? 0 : 1;
+
+  CommandJournal journal{};
+  const bool journalLoaded =
+      prefs.getBytes(key, &journal, sizeof(journal)) == sizeof(journal) &&
+      journal.sequence != 0;
+  const uint32_t lastSequence = journalLoaded ? journal.sequence : 0;
+
+  if (request.sequence == 0) {
+    response.result = 1;
+    response.errorCode = 1;
     prefs.end();
     commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
     commandResponse_->notify();
     return;
   }
 
-  // Persist the command sequence before invoking any side effect. A failed
-  // NVS write must fail closed so reboot cannot replay an already executed command.
-  if (prefs.putUInt(key, request.sequence) != sizeof(uint32_t)) {
+  if (request.sequence == lastSequence) {
+    if (journal.hasResponse &&
+        journal.response.sequence == request.sequence &&
+        journal.response.commandId == request.commandId) {
+      // The terminal result is the idempotency record. A retry returns exactly
+      // the first execution result and never invokes the side effect again.
+      response = journal.response;
+      prefs.end();
+      commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
+      commandResponse_->notify();
+      return;
+    }
+    // The intent was persisted but its terminal result was not. This is the
+    // narrow NVS-failure window where retry may execute again; make it visible.
+    Serial.printf("BLE CMD: uncertain terminal result seq=%lu; retrying execution\n",
+                  static_cast<unsigned long>(request.sequence));
+  } else if (request.sequence < lastSequence) {
     response.result = 1;
-    response.errorCode = SensorProtocol::COMMAND_ERROR_PERSISTENCE_FAILED;
+    response.errorCode = 1;
     prefs.end();
     commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
     commandResponse_->notify();
     return;
+  } else {
+    // Persist intent before invoking any side effect.
+    journal = {};
+    journal.sequence = request.sequence;
+    if (prefs.putBytes(key, &journal, sizeof(journal)) != sizeof(journal)) {
+      response.result = 1;
+      response.errorCode = SensorProtocol::COMMAND_ERROR_PERSISTENCE_FAILED;
+      prefs.end();
+      commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
+      commandResponse_->notify();
+      return;
+    }
   }
 
   if (!commandHandler_(request, response)) {
     response.result = 1;
     if (response.errorCode == 0) response.errorCode = 2;
   }
+
+  journal.sequence = request.sequence;
+  journal.response = response;
+  journal.hasResponse = 1;
+  if (prefs.putBytes(key, &journal, sizeof(journal)) != sizeof(journal)) {
+    // The response is still returned to the current caller, but a subsequent
+    // retry is explicitly an uncertain re-execution window.
+    Serial.printf("BLE CMD: terminal result persistence failed seq=%lu; retry is uncertain\n",
+                  static_cast<unsigned long>(request.sequence));
+  }
   prefs.end();
   commandResponse_->setValue(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
   commandResponse_->notify();
+}
+
+void BleSensorServer::notifyRomList(
+    const SensorProtocol::RomListNotification* packets, size_t count) {
+  if (!commandResponse_ || !packets) return;
+  for (size_t i = 0; i < count; ++i) {
+    commandResponse_->setValue(
+        reinterpret_cast<const uint8_t*>(&packets[i]), sizeof(packets[i]));
+    commandResponse_->notify();
+  }
 }
 
 void BleSensorServer::startAdvertising() {
@@ -224,8 +287,10 @@ void BleSensorServer::updateDescriptorResponse(uint8_t index) {
 void BleSensorServer::notifyValues() {
   if (!registry_ || !value_ || !clientConnected_) return;
   for (size_t i = 0; i < registry_->count(); ++i) {
+    const SensorProtocol::SensorDescriptor* descriptor = registry_->descriptor(i);
     const SensorProtocol::SensorValue* value = registry_->value(i);
-    if (!value || !SensorProtocol::validValue(*value)) continue;
+    if (!descriptor || !SensorProtocol::isEnabled(*descriptor) ||
+        !value || !SensorProtocol::validValue(*value)) continue;
     SensorProtocol::SensorValue wire = *value;
     value_->notify(reinterpret_cast<const uint8_t*>(&wire), sizeof(wire));
   }

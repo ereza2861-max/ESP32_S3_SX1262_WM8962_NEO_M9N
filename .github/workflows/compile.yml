@@ -91,25 +91,42 @@ jobs:
           cppcheck --version
           cppcheck --enable=warning,performance,portability --inconclusive --error-exitcode=1 \
             --std=c++17 --language=c++ --suppress=missingIncludeSystem \
-            -I include src
+            -I include src \
+            -I sensor_node_esp32c3/include -I sensor_node_esp32c3/src \
+            sensor_node_esp32c3/src
 
-      - name: Run native certificate lifecycle tests
+      - name: Run native S3 tests
         shell: bash
         run: |
           set -o pipefail
           pio test -e native 2>&1 | tee native-test.log
 
+      - name: Run C3 native profile tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cd sensor_node_esp32c3
+          pio test -e native_test_profile 2>&1 | tee ../native-test-profile.log
+
+      - name: Run C3 native registry tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cd sensor_node_esp32c3
+          pio test -e native_test_registry 2>&1 | tee ../native-test-registry.log
+
       - name: Build ESP32-S3 gateway firmware
         shell: bash
         run: |
           set -o pipefail
-          make ci-build 2>&1 | tee build.log
+          pio run -e esp32s3 2>&1 | tee build.log
 
       - name: Build ESP32-C3 sensor-node firmware
         shell: bash
         run: |
           set -o pipefail
-          make sensor-node-build 2>&1 | tee sensor-node-build.log
+          cd sensor_node_esp32c3
+          pio run -e sensor_node_esp32c3 2>&1 | tee ../sensor-node-build.log
 
       - name: Collect CI diagnostics
         if: always()

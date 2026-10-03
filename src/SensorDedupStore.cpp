@@ -71,7 +71,8 @@ bool SensorDedupStore::seenOrUpdate(uint32_t sourceId, uint16_t sensorId,
                                     uint32_t sourceSequence,
                                     uint8_t schemaVersion,
                                     uint32_t firmwareVersion) {
-  if (!ready_ || sourceId == 0 || sensorId == 0 || sourceSequence == 0) return false;
+  if (!ready_ || sourceId == 0 || sensorId == 0 || sourceSequence == 0)
+    return DedupResult::PersistenceFailure;
   size_t target = Config::SENSOR_DEDUP_SLOT_COUNT;
   uint32_t oldestGeneration = UINT32_MAX;
   for (size_t i = 0; i < Config::SENSOR_DEDUP_SLOT_COUNT; ++i) {
@@ -80,9 +81,9 @@ bool SensorDedupStore::seenOrUpdate(uint32_t sourceId, uint16_t sensorId,
       continue;
     }
     if (entries_[i].sourceId == sourceId && entries_[i].sensorId == sensorId) {
-      if (entries_[i].sourceSequence == sourceSequence) return true;
+      if (entries_[i].sourceSequence == sourceSequence) return DedupResult::Duplicate;
       if (static_cast<int32_t>(sourceSequence - entries_[i].sourceSequence) <= 0)
-        return true;
+        return DedupResult::Duplicate;
       target = i;
       break;
     }
@@ -91,7 +92,8 @@ bool SensorDedupStore::seenOrUpdate(uint32_t sourceId, uint16_t sensorId,
       if (target == Config::SENSOR_DEDUP_SLOT_COUNT) target = i;
     }
   }
-  if (target == Config::SENSOR_DEDUP_SLOT_COUNT) return false;
+  if (target == Config::SENSOR_DEDUP_SLOT_COUNT)
+    return DedupResult::PersistenceFailure;
 
   Slot record{};
   record.entry.sourceId = sourceId;
@@ -116,10 +118,11 @@ bool SensorDedupStore::seenOrUpdate(uint32_t sourceId, uint16_t sensorId,
     }
   }
   const uint8_t targetBank = haveCurrent ? static_cast<uint8_t>(currentBank ^ 1U) : 0U;
-  if (!writeSlot(bankAddress(targetBank, target), record)) return true;
+  if (!writeSlot(bankAddress(targetBank, target), record))
+    return DedupResult::PersistenceFailure;
 
   entries_[target] = record.entry;
   generations_[target] = record.generation;
   valid_[target] = 1;
-  return false;
+  return DedupResult::New;
 }

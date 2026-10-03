@@ -101,8 +101,13 @@ profile's physical sensors are connected after reboot.
 ## OTA over Wi-Fi AP
 
 - Trigger: physical button long-press.
-- AP: open, with a 10-minute window.
-- Upload: requires the OTA password provisioned from serial.
+- AP: WPA2-protected with a derived 32-character passphrase; the plaintext OTA password is
+  never persisted.
+- Credential storage: salted PBKDF2-HMAC-SHA256, 16-byte salt, 100000 iterations, 32-byte hash.
+- `/profile` and `/update`: require the OTA password, authenticated session, fresh 16-byte nonce,
+  and HMAC-SHA256 request signature.
+- Nonces are retained in a 32-entry RAM replay cache.
+- `/update` signs the firmware binary payload delivered by the multipart upload handler.
 - Partitions: unchanged; available headroom is NOT VERIFIED.
 - ESP32-S3: has NO OTA.
 

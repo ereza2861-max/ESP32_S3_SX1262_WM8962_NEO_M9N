@@ -1,5 +1,10 @@
 #include "SensorRegistry.h"
 
+#ifndef UNIT_TEST
+#include <Preferences.h>
+#include <cstdio>
+#endif
+
 bool SensorRegistry::registerSensor(const SensorProtocol::SensorDescriptor& descriptor) {
   if (!SensorProtocol::validDescriptor(descriptor)) return false;
   const int existing = find(descriptor.id);
@@ -29,6 +34,31 @@ bool SensorRegistry::updateValue(uint16_t id, float value, uint8_t quality, uint
   values_[index] = sample;
   valueValid_[index] = true;
   return true;
+}
+
+uint32_t SensorRegistry::nextRfidSequence() {
+  constexpr uint16_t RFID_SENSOR_ID = 0x00F0;
+#ifdef UNIT_TEST
+  static uint32_t highWater = 1;
+  if (highWater == 0 || highWater == UINT32_MAX) return 0;
+  const uint32_t sequence = highWater++;
+  return sequence;
+#else
+  Preferences prefs;
+  if (!prefs.begin("seq", false)) return 0;
+  char key[12] = {};
+  std::snprintf(key, sizeof(key), "seqh%04X",
+                static_cast<unsigned>(RFID_SENSOR_ID));
+  const uint32_t highWater = prefs.getUInt(key, 1);
+  if (highWater == 0 || highWater == UINT32_MAX) {
+    prefs.end();
+    return 0;
+  }
+  const uint32_t next = highWater + 1U;
+  const bool ok = prefs.putUInt(key, next) == sizeof(uint32_t);
+  prefs.end();
+  return ok ? highWater : 0;
+#endif
 }
 
 bool SensorRegistry::removeSensor(uint16_t id) {

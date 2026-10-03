@@ -33,6 +33,13 @@ public:
   uint32_t minimumPeriodMs() const;
   bool setSamplingPeriod(uint16_t sensorId, uint32_t periodMs, SensorRegistry& registry);
 
+  struct OneWireRomInfo {
+    uint16_t sensorId = 0;
+    uint8_t rom[8] = {};
+  };
+  bool bindOneWireRom(uint16_t sensorId, uint8_t index);
+  size_t getOneWireRomList(OneWireRomInfo* out, size_t maxEntries) const;
+
 private:
   struct Entry {
     DriverConfig config{};

@@ -27,7 +27,8 @@ String nodeName;
 String otaPassword;
 constexpr size_t OTA_PASSWORD_MIN_LEN = 12;
 constexpr size_t OTA_PASSWORD_MAX_LEN = 64;
-constexpr uint8_t BOOT_LOOP_THRESHOLD = 3;\nconstexpr char WDT_FAULT_LATCH_KEY[] = "wdt_fault_latched";
+constexpr uint8_t BOOT_LOOP_THRESHOLD = 3;
+constexpr char WDT_FAULT_LATCH_KEY[] = "wdt_fault_latched";
 bool recoveryMode = false;
 bool bootLoopCleared = false;
 bool bleResetRequested = false;
@@ -98,11 +99,7 @@ bool validOtaPassword(const String& value) {
 }
 
 bool saveOtaProvisioning(const String& otaPass) {
-  Preferences otaPrefs;
-  if (!otaPrefs.begin("ota", false)) return false;
-  const bool ok = otaPrefs.putString("opass", otaPass) > 0;
-  otaPrefs.end();
-  return ok;
+  return otaApManager.provisionPassword(otaPass);
 }
 
 void onLongPressToggleAp() {
@@ -144,6 +141,8 @@ void printHelp() {
   Serial.println("  profile enable <0-5>   enable a validated profile roster");
   Serial.println("  profile disable <0-5>  disable an unvalidated profile roster");
   Serial.println("  recovery clear         clear boot-loop recovery and reboot");
+  Serial.println("  ow bind <sensorId> <index>  bind DS18B20 ROM to a channel");
+  Serial.println("  ow list                  list detected/bound DS18B20 ROMs");
 }
 void loadProvisioning() {
   if (!prefs.begin("sensor", false)) {
@@ -201,6 +200,38 @@ bool onBleCommand(const SensorProtocol::CommandRequest& request,
     case SensorProtocol::COMMAND_REQUEST_SENSOR_RESET:
       bleResetRequested = true;
       return true;
+    case SensorProtocol::COMMAND_BIND_ROM:
+      if (request.sensorId == 0 ||
+          !driverRegistry.bindOneWireRom(
+              request.sensorId, static_cast<uint8_t>(request.argument))) {
+        response.errorCode = 12;
+        return false;
+      }
+      return true;
+    case SensorProtocol::COMMAND_GET_ROM_LIST: {
+      SensorDriverRegistry::OneWireRomInfo list[SensorDriverRegistry::MAX_DRIVERS]{};
+      const size_t total = driverRegistry.getOneWireRomList(
+          list, SensorDriverRegistry::MAX_DRIVERS);
+      constexpr size_t ENTRIES_PER_PACKET = 8;
+      const size_t packetCount = total == 0 ? 1 :
+          (total + ENTRIES_PER_PACKET - 1) / ENTRIES_PER_PACKET;
+      SensorProtocol::RomListNotification packets[2]{};
+      const size_t boundedPacketCount = packetCount > 2 ? 2 : packetCount;
+      for (size_t p = 0; p < boundedPacketCount; ++p) {
+        packets[p].chunkIndex = static_cast<uint8_t>(p);
+        packets[p].chunkCount = static_cast<uint8_t>(boundedPacketCount);
+        const size_t first = p * ENTRIES_PER_PACKET;
+        const size_t remaining = total > first ? total - first : 0;
+        packets[p].entryCount = static_cast<uint8_t>(
+            remaining > ENTRIES_PER_PACKET ? ENTRIES_PER_PACKET : remaining);
+        for (size_t i = 0; i < packets[p].entryCount; ++i) {
+          packets[p].entries[i].sensorId = list[first + i].sensorId;
+          std::memcpy(packets[p].entries[i].rom, list[first + i].rom, 8);
+        }
+      }
+      bleServer.notifyRomList(packets, boundedPacketCount);
+      return true;
+    }
     default:
       response.errorCode = 11;
       return false;
@@ -230,6 +261,7 @@ bool registerRfidDescriptor() {
   descriptor.periodMs = ProfileConfig::RFID_POLL_INTERVAL_MS;
   descriptor.flags = SensorProtocol::FLAG_ENABLED |
                     SensorProtocol::FLAG_EVENT_DRIVEN |
+                    SensorProtocol::FLAG_HAS_SOURCE_SEQUENCE |
                     SensorProtocol::FLAG_READ_ONLY |
                     SensorProtocol::FLAG_HAS_SCHEMA_VERSION;
   descriptor.schemaVersion = 1;
@@ -307,6 +339,33 @@ void handleCommand(String line) {
     Serial.println("OK: name staged");
     return;
   }
+  if (line.startsWith("ow bind ")) {
+    const int separator = line.indexOf(' ', 8);
+    if (separator < 0) {
+      Serial.println("ERROR: use ow bind <sensorId> <index>");
+      return;
+    }
+    const uint16_t sensorId =
+        static_cast<uint16_t>(line.substring(8, separator).toInt());
+    const uint8_t index =
+        static_cast<uint8_t>(line.substring(separator + 1).toInt());
+    Serial.println(driverRegistry.bindOneWireRom(sensorId, index)
+                       ? "OK: OneWire ROM bound"
+                       : "ERROR: OneWire ROM bind failed");
+    return;
+  }
+  if (line == "ow list") {
+    SensorDriverRegistry::OneWireRomInfo list[SensorDriverRegistry::MAX_DRIVERS]{};
+    const size_t count = driverRegistry.getOneWireRomList(
+        list, SensorDriverRegistry::MAX_DRIVERS);
+    for (size_t i = 0; i < count; ++i) {
+      Serial.printf("OW 0x%04X ROM=%02X%02X%02X%02X%02X%02X%02X%02X\n",
+                    static_cast<unsigned>(list[i].sensorId),
+                    list[i].rom[0], list[i].rom[1], list[i].rom[2], list[i].rom[3],
+                    list[i].rom[4], list[i].rom[5], list[i].rom[6], list[i].rom[7]);
+    }
+    return;
+  }
   Serial.println("ERROR: unknown command; use help");
 }
 }  // namespace
@@ -370,21 +429,11 @@ void loop() {
   const uint32_t tickMs = max<uint32_t>(
       SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS, minPeriodMs);
   const uint32_t now = millis();
-  bool sampleOk = true;
   if (now - lastSampleMs >= tickMs) {
     lastSampleMs = now;
     // The driver registry owns per-sensor periodMs scheduling. The loop tick
     // is never shorter than the configured base period or registered minimum.
-    sampleOk = driverRegistry.sample(registry, now);
-  }
-  if (sampleOk && bleServer.isRunning() && !firstSuccessfulLoop) {
-    firstSuccessfulLoop = true;
-    // Successful BLE initialization plus one successful scheduler pass clears
-    // the persistent boot-loop guard.
-    if (!bootLoopCleared) {
-      (void)updateBootLoopCount(true);
-      bootLoopCleared = true;
-    }
+    (void)driverRegistry.sample(registry, now);
   }
   if (recoveryMode) {
     esp_task_wdt_reset();
@@ -397,6 +446,15 @@ void loop() {
   profileManager.task();
   otaApManager.task();
   bleServer.task();
+  if (bleServer.isRunning() && !firstSuccessfulLoop) {
+    firstSuccessfulLoop = true;
+    // A complete healthy BLE scheduler iteration is the boot-health gate.
+    // Sensor read failures do not participate in boot-loop recovery.
+    if (!bootLoopCleared) {
+      (void)updateBootLoopCount(true);
+      bootLoopCleared = true;
+    }
+  }
   rfidReader.task();
   if (bleResetRequested) {
     delay(100);

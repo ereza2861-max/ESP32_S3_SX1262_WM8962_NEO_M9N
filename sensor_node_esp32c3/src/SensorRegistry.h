@@ -16,6 +16,9 @@ public:
 
   bool registerSensor(const SensorProtocol::SensorDescriptor& descriptor);
   bool updateValue(uint16_t id, float value, uint8_t quality, uint32_t sourceSequence = 0);
+  // Persistent event sequence for RFID telemetry (sensor id 0x00F0).
+  // Returns 0 only when the high-water mark cannot be advanced.
+  uint32_t nextRfidSequence();
   bool removeSensor(uint16_t id);
   void clear();
 

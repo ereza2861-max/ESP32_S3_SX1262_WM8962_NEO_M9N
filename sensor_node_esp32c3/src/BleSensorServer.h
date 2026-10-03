@@ -19,6 +19,7 @@ public:
   void setCommandHandler(CommandHandler handler) { commandHandler_ = handler; }
   void refreshDescriptorCache() { updateDescriptorResponse(0); }
   void handleCommand(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo);
+  void notifyRomList(const SensorProtocol::RomListNotification* packets, size_t count);
 
 private:
   void updateDescriptorResponse(uint8_t index);

@@ -1345,6 +1345,7 @@ void WebUi::begin() {
   server_.on("/api/sensors/forget", HTTP_POST, [this]{ if (auth()) handleSensorForget(); });
   server_.on("/api/sensors/refresh", HTTP_POST, [this]{ if (auth()) handleSensorRefresh(); });
   server_.on("/api/sensors/queue-policy", HTTP_POST, [this]{ if (auth()) handleSensorQueuePolicy(); });
+  server_.on("/api/sensors/dedup-stats", HTTP_GET, [this]{ if (auth()) handleSensorDedupStats(); });
   server_.on("/api/sensors/spool", HTTP_GET, [this]{ if (auth()) handleSensorSpool(); });
   server_.on("/api/sensors/spool/clear", HTTP_POST, [this]{ if (auth()) handleSensorSpoolClear(); });
   server_.on("/api/ble/passkey", HTTP_POST, [this]{ if (auth()) handleBlePasskeySet(); });
@@ -2821,6 +2822,18 @@ void WebUi::handleSensorQueuePolicy() {
   else { server_.send(400, "application/json", "{\"ok\":false,\"error\":\"policy must be newest|oldest\"}"); return; }
   server_.send(200, "application/json", "{\"ok\":true,\"policy\":\"" + policy + "\"}");
 }
+void WebUi::handleSensorDedupStats() {
+  StateLock lock(gState);
+  if (!lock.ok()) {
+    server_.send(503, "application/json", "{\"ok\":false,\"error\":\"state unavailable\"}");
+    return;
+  }
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json",
+               "{\"ok\":true,\"persistenceFailures\":" +
+                   String(gState.sensorDedupFailures) + "}");
+}
+
 
 
 void WebUi::handleMqttProvision() {
