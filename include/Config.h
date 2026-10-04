@@ -216,6 +216,13 @@ constexpr uint32_t LORA_REPLAY_TIME_WINDOW_SEC = 300UL;
 #endif
 #define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 1
 constexpr bool LORA_ECDH_REKEY_ENABLED = true;
+#if defined(FIELDRADIO_PRODUCTION_BUILD)
+constexpr uint8_t PRODUCTION_ECDH_REKEY_POLICY = 0;
+static_assert(PRODUCTION_ECDH_REKEY_POLICY == 0,
+              "ECDH rekey must remain disabled in production builds");
+#else
+constexpr uint8_t PRODUCTION_ECDH_REKEY_POLICY = 1;
+#endif
 constexpr uint32_t LORA_ECDH_KEY_RETENTION_SEC =
     2UL * LORA_REKEY_PERIOD_SEC;
 constexpr uint8_t LORA_ECDH_PROTOCOL_VERSION = 1;
@@ -349,6 +356,8 @@ constexpr size_t SENSOR_LORA_MAX_PAYLOAD = 40;
 constexpr size_t SENSOR_LORA_QUEUE_DEPTH = 16;
 constexpr uint16_t SENSOR_SOURCE_SEQUENCE_BLOCK = 256;
 constexpr size_t SENSOR_BATCH_ACK_MAX_RECORDS = 12;
+constexpr uint8_t SENSOR_BATCH_ACK_MAX_RETRIES = 5;
+constexpr uint32_t SENSOR_BATCH_ACK_RETRY_BACKOFF_MS = 500UL;
 constexpr uint32_t SENSOR_BATCH_ACK_FLUSH_MS = 250UL;
 constexpr uint8_t LORA_FRAGMENT_WINDOW_SIZE = 8;
 constexpr uint32_t LORA_FRAGMENT_ACK_TIMEOUT_MS = 1500UL;

@@ -17,6 +17,11 @@ public:
   // PersistenceFailure means the MRAM journal could not be durably updated.
   DedupResult seenOrUpdate(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence,
                            uint8_t schemaVersion, uint32_t firmwareVersion);
+  DedupResult reserve(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence,
+                     uint8_t schemaVersion, uint32_t firmwareVersion);
+  bool commit(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence);
+  bool abort(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence);
+  bool hasCommitted(uint32_t sourceId, uint16_t sensorId, uint32_t sourceSequence) const;
 
 private:
   struct Entry {
@@ -42,6 +47,7 @@ private:
   Entry entries_[Config::SENSOR_DEDUP_SLOT_COUNT]{};
   uint32_t generations_[Config::SENSOR_DEDUP_SLOT_COUNT]{};
   uint8_t valid_[Config::SENSOR_DEDUP_SLOT_COUNT]{};
+  uint8_t pending_[Config::SENSOR_DEDUP_SLOT_COUNT]{};
   bool ready_ = false;
 
   static uint32_t crc32(const void* data, size_t len);

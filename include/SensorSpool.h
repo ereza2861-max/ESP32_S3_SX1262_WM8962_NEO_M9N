@@ -38,6 +38,8 @@ public:
   bool markDelivered(uint32_t sampleId, uint8_t delivery);
   bool markDeliveredBySourceSequence(uint32_t nodeId, uint16_t sensorId,
                                      uint32_t sourceSequence, uint32_t originNodeId = 0);
+  bool hasSourceSequence(uint32_t nodeId, uint16_t sensorId,
+                         uint32_t sourceSequence, uint32_t originNodeId = 0) const;
   bool clear();
   bool flush();
   size_t depth() const { return count_; }

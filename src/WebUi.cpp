@@ -2831,7 +2831,10 @@ void WebUi::handleSensorDedupStats() {
   server_.sendHeader("Cache-Control", "no-store");
   server_.send(200, "application/json",
                "{\"ok\":true,\"persistenceFailures\":" +
-                   String(gState.sensorDedupFailures) + "}");
+                   String(gState.sensorDedupFailures) +
+                   ",\"sensorBatchAckRetries\":" + String(gState.sensorBatchAckRetries) +
+                   ",\"sensorBatchAckFailures\":" + String(gState.sensorBatchAckFailures) +
+                   ",\"remoteSensorOverflowDrops\":" + String(gState.remoteSensorOverflowDrops) + "}");
 }
 
 

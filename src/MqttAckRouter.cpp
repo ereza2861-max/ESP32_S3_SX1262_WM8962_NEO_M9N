@@ -78,6 +78,16 @@ bool MqttAckRouter::takeSampleId(uint16_t packetId, uint32_t& sampleId) {
   return found;
 }
 
+bool MqttAckRouter::hasPending(uint16_t packetId) {
+  if (!ensureMutex()) return false;
+  if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(5)) != pdTRUE) return false;
+  bool found = false;
+  for (const auto& item : pending_)
+    if (item.valid && item.packetId == packetId) { found = true; break; }
+  xSemaphoreGive(mutex_);
+  return found;
+}
+
 void MqttAckRouter::onPublishSuccess(uint16_t packetId) {
   Callback cb = nullptr;
   void* ctx = nullptr;

@@ -13,3 +13,6 @@ execution. A source/build result cannot claim physical production acceptance.
 The acceptance script intentionally fails closed when any required artifact or
 security-state line is absent. It does not burn eFuses, sign firmware, or
 manufacture certificates.
+
+## C3/S3 sensor production gates
+Each profile requires four independent gates before production enablement: (1) electrical validation, (2) sensor protocol validation, (3) calibration validation/traceability, and (4) HIL/recovery validation. Source/build success alone does not set `PRODUCTION_READY`.

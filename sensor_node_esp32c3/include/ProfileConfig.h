@@ -28,6 +28,11 @@ enum class Profile : uint8_t {
 };
 
 constexpr uint8_t PROFILE_COUNT = 6;
+constexpr bool PRODUCTION_READY[PROFILE_COUNT] = {false, false, false, false, false, false};
+
+enum class SensorNodeState : uint8_t {
+  INIT = 0, READY, MEASURING, ERROR, DEGRADED, CALIBRATION, LOW_POWER, RECOVERY
+};
 
 // --- Runtime profile configuration -----------------------------------------
 // Profile selection is persisted in NVS namespace "sensor" under key "profile".

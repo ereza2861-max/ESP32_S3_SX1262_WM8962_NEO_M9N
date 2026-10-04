@@ -876,10 +876,12 @@ bool selectGpio3MuxForConfig(const DriverConfig& config) {
 
 namespace {
 constexpr uint32_t CALIBRATION_MAGIC = 0x43414C31UL; // "CAL1"
-constexpr uint8_t CALIBRATION_VERSION = 1;
+constexpr uint8_t CALIBRATION_VERSION_V1 = 1;
+constexpr uint8_t CALIBRATION_VERSION_V2 = 2;
+
 struct CalibrationBlobV1 {
   uint32_t magic = CALIBRATION_MAGIC;
-  uint8_t version = CALIBRATION_VERSION;
+  uint8_t version = CALIBRATION_VERSION_V1;
   uint16_t sensorId = 0;
   uint8_t reserved = 0;
   float scale = 1.0f;
@@ -887,10 +889,24 @@ struct CalibrationBlobV1 {
   uint32_t crc = 0;
 } __attribute__((packed));
 
-uint32_t calibrationCrc(const CalibrationBlobV1& blob) {
+struct CalibrationBlobV2 {
+  uint32_t magic = CALIBRATION_MAGIC;
+  uint8_t version = CALIBRATION_VERSION_V2;
+  uint16_t sensorId = 0;
+  uint8_t model = 0;
+  float scale = 1.0f;
+  float offset = 0.0f;
+  float temperatureCoeff = 0.0f;
+  float nonlinearityA = 0.0f;
+  float nonlinearityB = 0.0f;
+  uint32_t crc = 0;
+} __attribute__((packed));
+
+template <typename T>
+uint32_t calibrationCrc(const T& blob) {
   const uint8_t* p = reinterpret_cast<const uint8_t*>(&blob);
   uint32_t crc = 0xFFFFFFFFUL;
-  for (size_t i = 0; i < offsetof(CalibrationBlobV1, crc); ++i) {
+  for (size_t i = 0; i < offsetof(T, crc); ++i) {
     crc ^= p[i];
     for (uint8_t bit = 0; bit < 8; ++bit)
       crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
@@ -898,71 +914,77 @@ uint32_t calibrationCrc(const CalibrationBlobV1& blob) {
   return ~crc;
 }
 
-void calibrationKey(uint16_t sensorId, char key[16]) {
-  std::snprintf(key, 16, "calib.v1.%04X", static_cast<unsigned>(sensorId));
+void calibrationKey(uint16_t sensorId, const char* prefix, char key[16]) {
+  std::snprintf(key, 16, "%s%04X", prefix, static_cast<unsigned>(sensorId));
 }
 }
 
 bool SensorDriverRegistry::loadCalibration(uint16_t sensorId, float& scale,
-                                            float& offset, bool& invalid) {
-  scale = 1.0f;
-  offset = 0.0f;
-  invalid = false;
+                                            float& offset, float& temperatureCoeff,
+                                            float& nonlinearityA, float& nonlinearityB,
+                                            uint8_t& model, bool& invalid) {
+  scale = 1.0f; offset = 0.0f; temperatureCoeff = 0.0f;
+  nonlinearityA = 0.0f; nonlinearityB = 0.0f; model = 0; invalid = false;
   Preferences prefs;
   if (!prefs.begin("calib", true)) return false;
 
-  char blobKey[16] = {};
-  calibrationKey(sensorId, blobKey);
-  CalibrationBlobV1 blob{};
-  const bool hasBlob = prefs.isKey(blobKey);
-  bool blobValid = false;
-  if (hasBlob &&
-      prefs.getBytes(blobKey, &blob, sizeof(blob)) == sizeof(blob)) {
-    blobValid = blob.magic == CALIBRATION_MAGIC &&
-                blob.version == CALIBRATION_VERSION &&
-                blob.sensorId == sensorId &&
-                std::isfinite(blob.scale) && std::isfinite(blob.offset) &&
-                blob.scale != 0.0f &&
-                blob.crc == calibrationCrc(blob);
+  char v2Key[16] = {};
+  calibrationKey(sensorId, "calib.v2.", v2Key);
+  CalibrationBlobV2 v2{};
+  const bool hasV2 = prefs.isKey(v2Key);
+  if (hasV2 && prefs.getBytes(v2Key, &v2, sizeof(v2)) == sizeof(v2)) {
+    const bool valid = v2.magic == CALIBRATION_MAGIC && v2.version == CALIBRATION_VERSION_V2 &&
+                       v2.sensorId == sensorId && v2.model <= 2 &&
+                       std::isfinite(v2.scale) && std::isfinite(v2.offset) &&
+                       std::isfinite(v2.temperatureCoeff) &&
+                       std::isfinite(v2.nonlinearityA) && std::isfinite(v2.nonlinearityB) &&
+                       v2.scale != 0.0f && v2.crc == calibrationCrc(v2);
+    if (valid) {
+      scale = v2.scale; offset = v2.offset; temperatureCoeff = v2.temperatureCoeff;
+      nonlinearityA = v2.nonlinearityA; nonlinearityB = v2.nonlinearityB;
+      model = v2.model; prefs.end(); return true;
+    }
+    invalid = true;
   }
-  if (blobValid) {
-    scale = blob.scale;
-    offset = blob.offset;
-    prefs.end();
-    return true;
-  }
-  if (hasBlob) invalid = true;
 
-  // Legacy factory keys remain readable so migration never discards the last
-  // known-good calibration while a versioned blob is repaired.
-  char scaleKey[16] = {};
-  char offsetKey[16] = {};
-  std::snprintf(scaleKey, sizeof(scaleKey), "s%04X", static_cast<unsigned>(sensorId));
-  std::snprintf(offsetKey, sizeof(offsetKey), "o%04X", static_cast<unsigned>(sensorId));
-  const bool hasScale = prefs.isKey(scaleKey);
-  const bool hasOffset = prefs.isKey(offsetKey);
-  if (hasScale) scale = prefs.getFloat(scaleKey, 1.0f);
-  if (hasOffset) offset = prefs.getFloat(offsetKey, 0.0f);
-  const bool legacyValid = (hasScale || hasOffset) &&
-                           std::isfinite(scale) && std::isfinite(offset) &&
-                           scale != 0.0f;
-  prefs.end();
-  if (!legacyValid) {
-    scale = 1.0f;
-    offset = 0.0f;
-    return false;
-  }
-  if (!blobValid) {
-    CalibrationBlobV1 migrated{};
-    migrated.sensorId = sensorId;
-    migrated.scale = scale;
-    migrated.offset = offset;
+  char v1Key[16] = {};
+  calibrationKey(sensorId, "calib.v1.", v1Key);
+  CalibrationBlobV1 v1{};
+  if (prefs.isKey(v1Key) && prefs.getBytes(v1Key, &v1, sizeof(v1)) == sizeof(v1) &&
+      v1.magic == CALIBRATION_MAGIC && v1.version == CALIBRATION_VERSION_V1 &&
+      v1.sensorId == sensorId && std::isfinite(v1.scale) &&
+      std::isfinite(v1.offset) && v1.scale != 0.0f &&
+      v1.crc == calibrationCrc(v1)) {
+    scale = v1.scale; offset = v1.offset;
+    CalibrationBlobV2 migrated{};
+    migrated.sensorId = sensorId; migrated.scale = scale; migrated.offset = offset;
     migrated.crc = calibrationCrc(migrated);
+    prefs.end();
     Preferences writePrefs;
     if (writePrefs.begin("calib", false)) {
-      (void)writePrefs.putBytes(blobKey, &migrated, sizeof(migrated));
+      (void)writePrefs.putBytes(v2Key, &migrated, sizeof(migrated));
       writePrefs.end();
     }
+    return true;
+  }
+
+  char scaleKey[16] = {}, offsetKey[16] = {};
+  std::snprintf(scaleKey, sizeof(scaleKey), "s%04X", static_cast<unsigned>(sensorId));
+  std::snprintf(offsetKey, sizeof(offsetKey), "o%04X", static_cast<unsigned>(sensorId));
+  const bool hasScale = prefs.isKey(scaleKey), hasOffset = prefs.isKey(offsetKey);
+  if (hasScale) scale = prefs.getFloat(scaleKey, 1.0f);
+  if (hasOffset) offset = prefs.getFloat(offsetKey, 0.0f);
+  const bool legacyValid = (hasScale || hasOffset) && std::isfinite(scale) &&
+                           std::isfinite(offset) && scale != 0.0f;
+  prefs.end();
+  if (!legacyValid) { scale = 1.0f; offset = 0.0f; return false; }
+  CalibrationBlobV2 migrated{};
+  migrated.sensorId = sensorId; migrated.scale = scale; migrated.offset = offset;
+  migrated.crc = calibrationCrc(migrated);
+  Preferences writePrefs;
+  if (writePrefs.begin("calib", false)) {
+    (void)writePrefs.putBytes(v2Key, &migrated, sizeof(migrated));
+    writePrefs.end();
   }
   return true;
 }
@@ -1242,7 +1264,24 @@ bool SensorDriverRegistry::sample(SensorRegistry& registry, uint32_t nowMs) {
       if (!entry.calibrationDegraded)
         entry.descriptor.flags &= static_cast<uint16_t>(~SensorProtocol::FLAG_DEGRADED);
       (void)registry.registerSensor(entry.descriptor);
-      value = value * entry.descriptor.scale + entry.descriptor.offset;
+      const float calibrated = value * entry.calibrationScale + entry.calibrationOffset;
+      switch (entry.calibrationModel) {
+        case 0:
+          value = calibrated;
+          break;
+        case 1:
+          value = calibrated + entry.nonlinearityA * calibrated * calibrated +
+                  entry.nonlinearityB;
+          break;
+        case 2:
+          value = calibrated + entry.nonlinearityA * calibrated * calibrated +
+                  entry.nonlinearityB * calibrated * calibrated * calibrated;
+          break;
+        default:
+          value = calibrated;
+          quality = SensorProtocol::QUALITY_STALE;
+          break;
+      }
     }
     if (!registry.updateValue(entry.config.sensorId, value, quality, entry.sourceSequence)) {
       Serial.printf("SENSOR: registry update failed id=0x%04X\n",

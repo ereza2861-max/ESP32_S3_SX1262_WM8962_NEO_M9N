@@ -6,6 +6,7 @@
 #include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include "MqttDeliveryJournal.h"
 
 class MqttClientManager {
 public:
@@ -50,6 +51,12 @@ public:
                             uint64_t expectedExpiresAt);
   void task();
   bool isConnected() const { return connected_ && client_.connected(); }
+  using InboundCallback = void (*)(const String& topic, const String& payload, void* ctx);
+  void noteMqttDeliveryCompleted(uint16_t packetId, bool delivered);
+  bool recoverDeliveryJournal(class SensorSpool& spool);
+  void setInboundCallback(InboundCallback callback, void* ctx = nullptr) {
+    inboundCallback_ = callback; inboundCallbackCtx_ = ctx;
+  }
 
 private:
   // F1-TODO-4: Phase model reserved for the firmware-side rotation state machine.
@@ -137,8 +144,23 @@ private:
   bool publishSensorSampleQos1(const String& mqttTopic, const String& payload, uint32_t sampleId);
   Client& mqttTransport();
   bool waitForPubAck(uint16_t packetId, uint32_t timeoutMs);
+  bool handleIncomingMqttPacket(uint8_t header);
+  void drainInboundQueue();
   static size_t encodeMqttRemainingLength(uint8_t* out, size_t length);
   uint16_t nextPacketId_ = 1;
+  struct InboundMessage {
+    bool used = false;
+    String topic;
+    String payload;
+  };
+  static constexpr size_t MQTT_INBOUND_QUEUE_DEPTH = 8;
+  InboundMessage mqttInboundQueue_[MQTT_INBOUND_QUEUE_DEPTH]{};
+  size_t mqttInboundHead_ = 0;
+  size_t mqttInboundCount_ = 0;
+  InboundCallback inboundCallback_ = nullptr;
+  void* inboundCallbackCtx_ = nullptr;
+  uint32_t lastPingRespMs_ = 0;
+  MqttDeliveryJournal deliveryJournal_;
   String rotationPreviousSerial_;
   bool rotationRetirementPending_ = false;
   bool retirePreviousCredential();

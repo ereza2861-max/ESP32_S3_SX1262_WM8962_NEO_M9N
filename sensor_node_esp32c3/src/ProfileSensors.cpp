@@ -42,21 +42,21 @@ bool ProfileSensors::begin(ProfileConfig::Profile profile,
   Wire.begin(ProfileConfig::PROFILE0_I2C_SDA_PIN, ProfileConfig::PROFILE0_I2C_SCL_PIN);
   Wire.setClock(ProfileConfig::PROFILE0_I2C_HZ);
 
+  bool ok = false;
   switch (profile) {
-    case ProfileConfig::Profile::IslandSea:
-      return registerIslandSea(drivers, registry);
-    case ProfileConfig::Profile::TropicalForest:
-      return registerTropicalForest(drivers, registry);
-    case ProfileConfig::Profile::VolcanicMountain:
-      return registerVolcanicMountain(drivers, registry);
-    case ProfileConfig::Profile::SubZeroSnow:
-      return registerSubZeroSnow(drivers, registry);
-    case ProfileConfig::Profile::Desert:
-      return registerDesert(drivers, registry);
-    case ProfileConfig::Profile::MineTunnel:
-      return registerMineTunnel(drivers, registry);
+    case ProfileConfig::Profile::IslandSea: ok = registerIslandSea(drivers, registry); break;
+    case ProfileConfig::Profile::TropicalForest: ok = registerTropicalForest(drivers, registry); break;
+    case ProfileConfig::Profile::VolcanicMountain: ok = registerVolcanicMountain(drivers, registry); break;
+    case ProfileConfig::Profile::SubZeroSnow: ok = registerSubZeroSnow(drivers, registry); break;
+    case ProfileConfig::Profile::Desert: ok = registerDesert(drivers, registry); break;
+    case ProfileConfig::Profile::MineTunnel: ok = registerMineTunnel(drivers, registry); break;
   }
-  return false;
+  profileIncomplete_ = registeredCount_ < expectedCount_;
+  if (profileIncomplete_)
+    Serial.printf("PROFILE: INCOMPLETE registered=%u expected=%u\n",
+                  static_cast<unsigned>(registeredCount_),
+                  static_cast<unsigned>(expectedCount_));
+  return ok && !profileIncomplete_;
 }
 
 bool ProfileSensors::registerIslandSea(SensorDriverRegistry& drivers, SensorRegistry& registry) {

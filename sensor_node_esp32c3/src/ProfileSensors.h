@@ -41,6 +41,7 @@ public:
   // registeredCount() when a driver is unavailable). Used by integration to log a
   // clear "partial roster" warning.
   size_t expectedCount() const { return expectedCount_; }
+  bool profileIncomplete() const { return profileIncomplete_; }
 
 private:
   bool registerIslandSea(SensorDriverRegistry& drivers,
@@ -53,4 +54,5 @@ private:
 
   size_t registeredCount_ = 0;
   size_t expectedCount_ = 0;
+  bool profileIncomplete_ = false;
 };

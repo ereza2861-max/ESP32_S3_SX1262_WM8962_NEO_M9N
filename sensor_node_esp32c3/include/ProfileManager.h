@@ -44,7 +44,9 @@ public:
   bool saveProfileToNvs();
 
   // Changes and persists the runtime profile.
-  bool setProfile(ProfileConfig::Profile profile);
+  bool setProfile(ProfileConfig::Profile profile, bool force = false);
+  ProfileConfig::SensorNodeState currentState() const { return state_; }
+  void setState(ProfileConfig::SensorNodeState state) { state_ = state; }
   const RuntimeConfig& runtimeConfig() const { return runtimeConfig_; }
   bool profilePlaceholderDisabled(ProfileConfig::Profile profile) const;
   bool setProfilePlaceholderDisabled(ProfileConfig::Profile profile, bool disabled);
@@ -76,4 +78,5 @@ private:
   bool buzzerActive_ = false;
 
   LongPressCallback longPressCallback_ = nullptr;
+  ProfileConfig::SensorNodeState state_ = ProfileConfig::SensorNodeState::INIT;
 };

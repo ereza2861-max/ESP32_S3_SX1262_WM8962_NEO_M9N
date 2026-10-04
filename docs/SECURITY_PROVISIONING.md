@@ -84,3 +84,6 @@ addition to its password/session authentication.
 
 This policy is an additive authorization check; it does not change the existing
 OTA AP transport or introduce a new library.
+
+## ECDH production gate
+Production builds compile with ECDH rekey policy forced to zero. Development/HIL may exercise ECDH. Production enablement additionally requires the existing Secure Boot/Flash Encryption evidence gate.

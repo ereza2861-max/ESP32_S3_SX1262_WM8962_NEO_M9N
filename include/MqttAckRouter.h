@@ -20,6 +20,7 @@ public:
   static bool registerPending(uint16_t packetId, uint32_t sampleId);
   static void forgetPending(uint16_t packetId);
   static bool takeSampleId(uint16_t packetId, uint32_t& sampleId);
+  static bool hasPending(uint16_t packetId);
   static void onPublishSuccess(uint16_t packetId);
 
 private:

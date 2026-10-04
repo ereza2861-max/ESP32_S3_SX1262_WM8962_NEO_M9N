@@ -484,6 +484,31 @@ bool SensorSpool::markDeliveredBySourceSequence(uint32_t nodeId, uint16_t sensor
   return false;
 }
 
+bool SensorSpool::hasSourceSequence(uint32_t nodeId, uint16_t sensorId,
+                                      uint32_t sourceSequence,
+                                      uint32_t originNodeId) const {
+  if (!ready_ || nodeId == 0 || sensorId == 0 || sourceSequence == 0) return false;
+  SpiLock lock(pdMS_TO_TICKS(100));
+  if (!lock.ok()) return false;
+  File file = SD.open(PATH, FILE_READ);
+  if (!file) return false;
+  for (size_t i = 0; i < count_; ++i) {
+    const IndexEntry& entry = entries_[i];
+    if (!entry.valid || entry.sourceSequence != sourceSequence ||
+        entry.originNodeId != originNodeId) continue;
+    if (!file.seek(entry.offset)) continue;
+    DiskRecord record{};
+    size_t ignored = 0;
+    if (readDiskRecord(file, entry.offset, record, ignored) &&
+        record.sample.nodeId == nodeId && record.sample.sensorId == sensorId) {
+      file.close();
+      return true;
+    }
+  }
+  file.close();
+  return false;
+}
+
 bool SensorSpool::clear() {
   if (!ready_) return false;
   SpiLock lock(pdMS_TO_TICKS(100));

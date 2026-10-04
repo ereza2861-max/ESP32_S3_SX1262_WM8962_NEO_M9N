@@ -99,3 +99,9 @@ Remote telemetry is acknowledged with `LORA_TYPE_SENSOR_BATCH_ACK`. ACK records
 use a bounded bitmap window over `(nodeId, sensorId, sourceSequence)`. The
 sender keeps the LoRa delivery bit pending until the authenticated ACK is
 consumed from the durable sensor spool path.
+
+## 2026-10-04 delivery invariants
+- Remote LoRa telemetry uses `reserve → durable SensorSpool admission → dedup commit → batch ACK`.
+- A duplicate source sequence is ACKed only when the matching durable spool record exists.
+- LoRa batch ACK records remain pending until `transmitHopped()` succeeds and are mirrored to MRAM.
+- MQTT QoS1 waits parse unrelated inbound packets instead of treating them as PUBACK failures.

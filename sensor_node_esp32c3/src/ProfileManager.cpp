@@ -119,9 +119,20 @@ bool ProfileManager::setProfilePlaceholderDisabled(ProfileConfig::Profile profil
   return ok;
 }
 
-bool ProfileManager::setProfile(ProfileConfig::Profile profile) {
-  if (static_cast<uint8_t>(profile) >= ProfileConfig::PROFILE_COUNT) {
+bool ProfileManager::setProfile(ProfileConfig::Profile profile, bool force) {
+  const uint8_t index = static_cast<uint8_t>(profile);
+  if (index >= ProfileConfig::PROFILE_COUNT) {
     Serial.println("ERROR: requested profile is out of range");
+    return false;
+  }
+  if (!force && !ProfileConfig::PRODUCTION_READY[index]) {
+    Serial.printf("ERROR: profile %u is not production-ready\n",
+                  static_cast<unsigned>(index));
+    return false;
+  }
+  if (!force && profilePlaceholderDisabled(profile)) {
+    Serial.printf("ERROR: profile %u contains disabled placeholder sensors\n",
+                  static_cast<unsigned>(index));
     return false;
   }
   activeProfile_ = profile;
@@ -172,6 +183,7 @@ bool ProfileManager::begin() {
 
   Serial.printf("PROFILE: %s (runtime NVS)\n",
                 ProfileConfig::profileName(activeProfile_));
+  state_ = ProfileConfig::SensorNodeState::READY;
   return true;
 }
 

@@ -12,6 +12,7 @@
 #include "LoRaEcdhRekey.h"
 #include "SensorBatchAck.h"
 #include "SensorDedupStore.h"
+#include "SensorAckStore.h"
 #include "SensorProtocol.h"
 
 struct ChannelScanResult {
@@ -99,6 +100,10 @@ public:
   bool popRemoteSensorTelemetry(RemoteSensorTelemetry& out);
   bool requeueRemoteSensorTelemetry(const RemoteSensorTelemetry& telemetry);
   bool queueSensorBatchAck(uint32_t nodeId, uint16_t sensorId, uint32_t sourceSequence);
+  bool reserveSensorTelemetry(const RemoteSensorTelemetry& telemetry);
+  bool commitSensorTelemetry(const RemoteSensorTelemetry& telemetry);
+  bool abortSensorTelemetry(const RemoteSensorTelemetry& telemetry);
+  void setRemoteTelemetrySpool(class SensorSpool* spool) { remoteTelemetrySpool_ = spool; }
   struct SensorBatchAckRecord {
     uint32_t nodeId = 0;
     uint16_t sensorId = 0;
@@ -336,6 +341,10 @@ private:
   SensorBatchAckRecord pendingSensorAcks_[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
   size_t pendingSensorAckCount_ = 0;
   uint32_t pendingSensorAckSinceMs_ = 0;
+  uint8_t pendingSensorAckRetries_ = 0;
+  uint32_t pendingSensorAckRetryNotBeforeMs_ = 0;
+  SensorAckStore sensorAckStore_;
+  class SensorSpool* remoteTelemetrySpool_ = nullptr;
   uint32_t forwardRetryPersistId_ = 0;
   uint16_t fragmentMessageId_ = 0;
   struct VoiceTxSlot {

@@ -1,6 +1,8 @@
 #include "MqttClientManager.h"
 #include "MqttAckRouter.h"
 #include "SensorSpool.h"
+#include "MqttAckRouter.h"
+#include "SensorSpool.h"
 #include "Config.h"
 #include "PersistentConfig.h"
 #include "MqttCaCert.h"
@@ -812,6 +814,7 @@ void MqttClientManager::auditEvent(const char* event, int mqttState) {
 
 
 bool MqttClientManager::begin() {
+  (void)deliveryJournal_.begin();
   RuntimeConfig config{}; if (!configSnapshot(config)) return false;
   if (Config::mqttTlsIsMandatory() && !config.mqttTlsRequired) {
     StateLock lock(gState);
@@ -923,50 +926,117 @@ size_t MqttClientManager::encodeMqttRemainingLength(uint8_t* out, size_t length)
   return count;
 }
 
+bool MqttClientManager::handleIncomingMqttPacket(uint8_t header) {
+  Client& transport = mqttTransport();
+  size_t multiplier = 1, remainingLength = 0;
+  bool complete = false;
+  for (uint8_t i = 0; i < 4; ++i) {
+    const int byte = transport.read();
+    if (byte < 0) return false;
+    remainingLength += static_cast<size_t>(byte & 0x7f) * multiplier;
+    if ((byte & 0x80) == 0) { complete = true; break; }
+    multiplier *= 128;
+  }
+  if (!complete || remainingLength > 4096U) return false;
+
+  uint8_t* scratch = nullptr;
+  if (remainingLength) {
+    scratch = static_cast<uint8_t*>(malloc(remainingLength));
+    if (!scratch) return false;
+    const bool readOk = transport.readBytes(scratch, remainingLength) == remainingLength;
+    if (!readOk) { free(scratch); return false; }
+  }
+
+  const uint8_t type = header & 0xF0U;
+  if (type == 0x40U && remainingLength == 2U) {
+    const uint16_t ackId = static_cast<uint16_t>(scratch[0] << 8 | scratch[1]);
+    free(scratch);
+    return ackId == 0 ? true : (ackId == 0xFFFFU ? false : (ackId == ackId));
+  }
+  if (type == 0xD0U && remainingLength == 0U) {
+    lastPingRespMs_ = millis();
+    free(scratch);
+    return true;
+  }
+  if ((header & 0xF0U) == 0x30U) {
+    if (remainingLength < 2U) { free(scratch); return true; }
+    const uint16_t topicLen = static_cast<uint16_t>(scratch[0] << 8 | scratch[1]);
+    const uint8_t qos = static_cast<uint8_t>((header >> 1U) & 0x03U);
+    const size_t packetIdBytes = qos ? 2U : 0U;
+    if (topicLen == 0 || 2U + topicLen + packetIdBytes > remainingLength ||
+        topicLen > 128U || qos == 3U) { free(scratch); return true; }
+    const size_t payloadOffset = 2U + topicLen + packetIdBytes;
+    const size_t payloadLen = remainingLength - payloadOffset;
+    if (payloadLen > 2048U) { free(scratch); return true; }
+    if (mqttInboundCount_ >= MQTT_INBOUND_QUEUE_DEPTH) {
+      mqttInboundHead_ = (mqttInboundHead_ + 1U) % MQTT_INBOUND_QUEUE_DEPTH;
+      --mqttInboundCount_;
+    }
+    const size_t tail = (mqttInboundHead_ + mqttInboundCount_) % MQTT_INBOUND_QUEUE_DEPTH;
+    mqttInboundQueue_[tail].used = true;
+    mqttInboundQueue_[tail].topic = String(reinterpret_cast<const char*>(scratch + 2), topicLen);
+    mqttInboundQueue_[tail].payload = String(reinterpret_cast<const char*>(scratch + payloadOffset), payloadLen);
+    ++mqttInboundCount_;
+    if (qos == 1U) {
+      const uint16_t id = static_cast<uint16_t>(
+          scratch[2U + topicLen] << 8 | scratch[3U + topicLen]);
+      const uint8_t puback[4] = {0x40U, 0x02U,
+                                 static_cast<uint8_t>(id >> 8),
+                                 static_cast<uint8_t>(id & 0xffU)};
+      (void)transport.write(puback, sizeof(puback));
+    }
+    free(scratch);
+    return true;
+  }
+  // SUBACK, UNSUBACK and unknown packets are consumed and ignored deliberately;
+  // a valid packet must not abort an unrelated PUBACK wait.
+  free(scratch);
+  return true;
+}
+
+void MqttClientManager::drainInboundQueue() {
+  while (mqttInboundCount_ != 0) {
+    InboundMessage& item = mqttInboundQueue_[mqttInboundHead_];
+    if (item.used && inboundCallback_) inboundCallback_(item.topic, item.payload, inboundCallbackCtx_);
+    item = {};
+    mqttInboundHead_ = (mqttInboundHead_ + 1U) % MQTT_INBOUND_QUEUE_DEPTH;
+    --mqttInboundCount_;
+  }
+}
+
 bool MqttClientManager::waitForPubAck(uint16_t packetId, uint32_t timeoutMs) {
   Client& transport = mqttTransport();
   const uint32_t deadline = millis() + timeoutMs;
-  uint8_t packetBytes[2] = {};
-
   while (static_cast<int32_t>(millis() - deadline) < 0) {
     if (!transport.connected()) return false;
-    if (!transport.available()) {
-      delay(1);
-      continue;
-    }
-
+    if (!transport.available()) { delay(1); continue; }
     const int first = transport.read();
     if (first < 0) continue;
     const uint8_t header = static_cast<uint8_t>(first);
-    size_t multiplier = 1;
-    size_t remainingLength = 0;
-    bool completeLength = false;
-    for (uint8_t i = 0; i < 4; ++i) {
-      const int byte = transport.read();
-      if (byte < 0) return false;
-      remainingLength += static_cast<size_t>(byte & 0x7f) * multiplier;
-      if ((byte & 0x80) == 0) {
-        completeLength = true;
-        break;
+    if ((header & 0xF0U) == 0x40U) {
+      // PUBACK is the only packet that completes this wait; all other valid
+      // packets are parsed/queued and the wait continues.
+      size_t multiplier = 1, remainingLength = 0;
+      bool complete = false;
+      uint8_t bytes[2] = {};
+      for (uint8_t i = 0; i < 4; ++i) {
+        const int byte = transport.read();
+        if (byte < 0) return false;
+        remainingLength += static_cast<size_t>(byte & 0x7f) * multiplier;
+        if ((byte & 0x80) == 0) { complete = true; break; }
+        multiplier *= 128;
       }
-      multiplier *= 128;
+      if (!complete || remainingLength != 2U) return false;
+      if (transport.readBytes(bytes, sizeof(bytes)) != sizeof(bytes)) return false;
+      const uint16_t ackId = static_cast<uint16_t>(bytes[0] << 8 | bytes[1]);
+      if (ackId == packetId) return true;
+      continue;
     }
-    if (!completeLength || remainingLength > 2) return false;
-
-    if ((header & 0xf0U) == 0x40U && remainingLength == 2U) {
-      if (transport.readBytes(packetBytes, sizeof(packetBytes)) != sizeof(packetBytes)) return false;
-      const uint16_t ackId = static_cast<uint16_t>(packetBytes[0] << 8 | packetBytes[1]);
-      return ackId == packetId;
-    }
-
-    // PubSubClient owns inbound MQTT dispatch. A sensor QoS-1 publish must not
-    // consume unrelated broker traffic while waiting for its PUBACK. Any
-    // unexpected packet makes the current transport state ambiguous, so force
-    // reconnect rather than acknowledging the spool record.
-    return false;
+    if (!handleIncomingMqttPacket(header)) return false;
   }
   return false;
 }
+
 
 bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const String& payload, uint32_t sampleId) {
   if (mqttTopic.isEmpty() || payload.isEmpty() || mqttTopic.length() > 128 || payload.length() > 2048) {
@@ -983,7 +1053,11 @@ bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const S
 
   uint16_t packetId = nextPacketId_++;
   if (packetId == 0) packetId = nextPacketId_++;
-  if (!MqttAckRouter::registerPending(packetId, sampleId)) return false;
+  if (!deliveryJournal_.pending(packetId, sampleId)) return false;
+  if (!MqttAckRouter::registerPending(packetId, sampleId)) {
+    (void)deliveryJournal_.complete(packetId, false);
+    return false;
+  }
 
   const auto writeFully = [&transport](const uint8_t* data, size_t len) -> bool {
     return transport.write(data, len) == len;
@@ -991,6 +1065,7 @@ bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const S
   const uint8_t fixedHeader = 0x32U;
   if (!writeFully(&fixedHeader, 1) || !writeFully(remaining, remainingLengthBytes)) {
     MqttAckRouter::forgetPending(packetId);
+    (void)deliveryJournal_.complete(packetId, false);
     client_.disconnect();
     connected_ = false;
     return false;
@@ -1006,6 +1081,7 @@ bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const S
       !writeFully(packetIdBytes, sizeof(packetIdBytes)) ||
       !writeFully(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length())) {
     MqttAckRouter::forgetPending(packetId);
+    (void)deliveryJournal_.complete(packetId, false);
     client_.disconnect();
     connected_ = false;
     return false;
@@ -1013,6 +1089,7 @@ bool MqttClientManager::publishSensorSampleQos1(const String& mqttTopic, const S
   transport.flush();
   if (!waitForPubAck(packetId, 2000)) {
     MqttAckRouter::forgetPending(packetId);
+    (void)deliveryJournal_.complete(packetId, false);
     client_.disconnect();
     connected_ = false;
     return false;
@@ -1153,6 +1230,17 @@ bool MqttClientManager::applyConfig(const RuntimeConfig& config) {
   return !host_.isEmpty() && port_ != 0;
 }
 
+void MqttClientManager::noteMqttDeliveryCompleted(uint16_t packetId, bool delivered) {
+  (void)deliveryJournal_.complete(packetId, delivered);
+}
+
+bool MqttClientManager::recoverDeliveryJournal(SensorSpool& spool) {
+  return deliveryJournal_.recover([&spool](uint16_t packetId, uint32_t sampleId) {
+    if (MqttAckRouter::hasPending(packetId)) return true;
+    return spool.markDelivered(sampleId, SensorSpool::DELIVERY_MQTT);
+  });
+}
+
 void MqttClientManager::task() {
   RuntimeConfig config;
   if (!enabled_ || !configSnapshot(config)) return;
@@ -1229,6 +1317,7 @@ void MqttClientManager::task() {
   }
 
   connected_ = client_.loop();
+  drainInboundQueue();
   if (connected_ && sensorQueue_) {
     SensorSample sample{};
     while (xQueuePeek(sensorQueue_, &sample, 0) == pdTRUE) {

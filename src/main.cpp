@@ -95,7 +95,9 @@ static void onMqttPublishSuccess(uint16_t packetId, void*) {
                   static_cast<unsigned>(packetId));
     return;
   }
-  if (!sensorSpool.markDelivered(sampleId, SensorSpool::DELIVERY_MQTT)) {
+  const bool delivered = sensorSpool.markDelivered(sampleId, SensorSpool::DELIVERY_MQTT);
+  mqtt.noteMqttDeliveryCompleted(packetId, delivered);
+  if (!delivered) {
     Serial.printf("WARN: MQTT PUBACK packet %u could not mark spool sample %lu delivered\n",
                   static_cast<unsigned>(packetId),
                   static_cast<unsigned long>(sampleId));
@@ -873,7 +875,8 @@ static void taskSensorForward(void*) {
     }
     if (haveRemote) {
       if (RemoteTelemetryBridge::admitRemoteTelemetry(remote, sensorSpool)) {
-        if (lora.queueSensorBatchAck(remote.nodeId, remote.sensorId,
+        if (lora.commitSensorTelemetry(remote) &&
+            lora.queueSensorBatchAck(remote.nodeId, remote.sensorId,
                                      remote.sourceSequence)) {
           remoteRetryPending = false;
           remoteRetry = {};
@@ -1595,6 +1598,7 @@ void setup() {
   if (!sensorSpoolOk) Serial.println("WARN: sensor spool unavailable; BLE forwarding will remain in RAM until SD recovers");
   bool gpsOk = gnss.begin();
   bool loraOk = lora.begin();
+  lora.setRemoteTelemetrySpool(&sensorSpool);
   bool lorawanOk = lorawan.begin();
   bool audioOk = audio.begin();
   const bool batteryGaugeOk = fuelGauge.begin();
@@ -1604,6 +1608,7 @@ void setup() {
   setupWifi();
   MqttAckRouter::setCallback(onMqttPublishSuccess, nullptr);
   (void)mqtt.begin();
+  (void)mqtt.recoverDeliveryJournal(sensorSpool);
   (void)certLifecycle.begin();
   web.begin();
 

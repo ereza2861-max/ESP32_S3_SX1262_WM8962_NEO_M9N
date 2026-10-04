@@ -220,3 +220,6 @@ sensor node is the intended gateway mode. If enabled, the node advertises for
 500 ms and then sleeps for five seconds when no client is connected. This mode
 requires gateway-side reconnect/discovery logic and is not a transparent
 substitute for a continuously connected GATT peripheral.
+
+## Production profile enablement
+`ProfileConfig::PRODUCTION_READY[]` is intentionally `false` for every profile in the greenfield repository. Flip an entry only after the corresponding PCB, sensor fixture, electrical/protocol/calibration and HIL gates are complete. The serial-only `profile force <n>` command is reserved for provisioning/HIL and is not exposed through WebUI.

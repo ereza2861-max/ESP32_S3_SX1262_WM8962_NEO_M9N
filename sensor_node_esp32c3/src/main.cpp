@@ -138,6 +138,7 @@ void printHelp() {
   Serial.println("  ota password <secret>   stage OTA password (min 12 chars)");
   Serial.println("  ota save                save OTA provisioning and reboot");
   Serial.println("  save                    save provisioning and reboot");
+  Serial.println("  profile force <0-5>    force a non-production profile for provisioning");
   Serial.println("  profile enable <0-5>   enable a validated profile roster");
   Serial.println("  profile disable <0-5>  disable an unvalidated profile roster");
   Serial.println("  recovery clear         clear boot-loop recovery and reboot");
@@ -181,6 +182,11 @@ void showProvisioning() {
                 static_cast<unsigned>(driverRegistry.count()),
                 static_cast<unsigned>(registry.count()),
                 rfidReader.isReady() ? "ready" : "unavailable");
+  const uint8_t profileIndex = static_cast<uint8_t>(profileManager.activeProfile());
+  Serial.printf("profile_state=%u incomplete=%s production_ready=%s\\n",
+                static_cast<unsigned>(profileManager.currentState()),
+                profileSensors.profileIncomplete() ? "yes" : "no",
+                ProfileConfig::PRODUCTION_READY[profileIndex] ? "yes" : "no");
   Serial.println("ota=managed-by-OtaApManager");
 }
 
@@ -274,6 +280,16 @@ void handleCommand(String line) {
   if (line == "help") { printHelp(); return; }
   if (line == "show") { showProvisioning(); return; }
   if (line == "save") { saveProvisioning(); return; }
+  if (line.startsWith("profile force ")) {
+    const int raw = line.substring(14).toInt();
+    if (raw >= 0 && raw < ProfileConfig::PROFILE_COUNT &&
+        profileManager.setProfile(static_cast<ProfileConfig::Profile>(raw), true)) {
+      Serial.printf("OK: profile %d forced for provisioning; reboot required\n", raw);
+    } else {
+      Serial.println("ERROR: profile force failed");
+    }
+    return;
+  }
   if (line.startsWith("profile enable ")) {
     const int raw = line.substring(15).toInt();
     if (raw >= 0 && raw < ProfileConfig::PROFILE_COUNT &&
@@ -405,6 +421,7 @@ void setup() {
   const uint32_t loopCount = bootLoopCount();
   if (loopCount >= BOOT_LOOP_THRESHOLD || watchdogFaultLatched()) {
     recoveryMode = true;
+    profileManager.setState(ProfileConfig::SensorNodeState::RECOVERY);
     Serial.printf("RECOVERY: boot_loop_count=%lu; BLE disabled, OTA AP window only\n",
                   static_cast<unsigned long>(loopCount));
     otaApManager.beginRecoveryWindow();
@@ -433,7 +450,9 @@ void loop() {
     lastSampleMs = now;
     // The driver registry owns per-sensor periodMs scheduling. The loop tick
     // is never shorter than the configured base period or registered minimum.
-    (void)driverRegistry.sample(registry, now);
+    profileManager.setState(ProfileConfig::SensorNodeState::MEASURING);
+    const bool sampleOk = driverRegistry.sample(registry, now);
+    profileManager.setState(sampleOk ? ProfileConfig::SensorNodeState::READY : ProfileConfig::SensorNodeState::DEGRADED);
   }
   if (recoveryMode) {
     esp_task_wdt_reset();

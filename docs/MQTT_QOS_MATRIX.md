@@ -31,3 +31,6 @@ The exact sequence is:
 A timeout, transport failure, packet-id mismatch, or queue failure leaves the spool
 record pending for a later retry. There is no optimistic `markDelivered()` at
 queue-enqueue time.
+
+## Delivery journal
+QoS1 sensor publishes write a PENDING completion marker to MRAM before waiting for PUBACK. After the exact PUBACK, the spool completion callback changes the journal to DELIVERED; if spool completion fails, the journal remains PENDING_RETRY and the spool item remains eligible for retry. MQTT delivery remains at-least-once.

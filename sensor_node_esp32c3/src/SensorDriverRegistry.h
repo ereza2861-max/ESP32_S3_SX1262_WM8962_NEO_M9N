@@ -48,6 +48,12 @@ private:
     uint32_t sourceSequence = 0;
     uint8_t consecutiveReadFailures = 0;
     bool calibrationDegraded = false;
+    float calibrationScale = 1.0f;
+    float calibrationOffset = 0.0f;
+    float temperatureCoeff = 0.0f;
+    float nonlinearityA = 0.0f;
+    float nonlinearityB = 0.0f;
+    uint8_t calibrationModel = 0;
     SensorProtocol::SensorDescriptor descriptor{};
   };
 
@@ -57,6 +63,8 @@ private:
   static SensorDriver* createDriver(const DriverConfig& config);
   static bool validConfig(const DriverConfig& config);
   bool rebuild(SensorRegistry& registry);
-  static bool loadCalibration(uint16_t sensorId, float& scale, float& offset, bool& invalid);
+  static bool loadCalibration(uint16_t sensorId, float& scale, float& offset,
+                              float& temperatureCoeff, float& nonlinearityA,
+                              float& nonlinearityB, uint8_t& model, bool& invalid);
   static bool allocateSourceSequenceBlock(uint16_t sensorId, uint32_t& firstSequence);
 };
