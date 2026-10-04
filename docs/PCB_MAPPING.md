@@ -149,3 +149,11 @@ The MAX17048 at I2C address `0x36` is polled every 10 seconds on the shared I2C 
 50 ms I2C timeout and a mutex serialize access to the bus. VCELL and SOC are validated before
 they replace the ADC-derived battery state. If the gauge is absent or becomes unresponsive,
 the existing ADC1 battery measurement remains the fallback.
+
+
+## Audit hardware constraint — 2026-10-04
+
+The audit remediation adds **no new physical pins**, changes no existing pin
+mapping, and adds no hardware components. Q13 therefore remains the existing
+GPIO3/mux design with electrical validation still required; firmware changes
+must not be interpreted as PCB evidence.

@@ -287,6 +287,16 @@ constexpr uint16_t PERSISTENT_CONFIG_MRAM_MARKER = 0x3010;
 constexpr uint16_t PERSISTENT_CONFIG_MRAM_MARKER_BYTES = 16;
 constexpr uint16_t PERSISTENT_CONFIG_MRAM_SLOT_BYTES = 4096;
 constexpr uint8_t PERSISTENT_CONFIG_MRAM_COMMIT = 0xA5;
+
+// Append-only configuration transaction audit journal. This region is the
+// unused gap immediately before the persistent-config commit marker.
+constexpr uint16_t CONFIG_TXN_MRAM_ADDR = 0x2A00;
+constexpr uint16_t CONFIG_TXN_MRAM_RECORD_BYTES = 52;
+constexpr uint8_t CONFIG_TXN_MRAM_RECORD_COUNT = 28;
+constexpr uint16_t CONFIG_TXN_MRAM_BYTES =
+    CONFIG_TXN_MRAM_RECORD_BYTES * CONFIG_TXN_MRAM_RECORD_COUNT;
+static_assert(CONFIG_TXN_MRAM_ADDR + CONFIG_TXN_MRAM_BYTES <=
+              PERSISTENT_CONFIG_MRAM_MARKER, "config txn journal overlaps config marker");
 constexpr size_t REPLAY_NVS_JOURNAL_RECORDS = 64;
 constexpr uint8_t REPLAY_NVS_COMPACT_PERCENT = 75;
 

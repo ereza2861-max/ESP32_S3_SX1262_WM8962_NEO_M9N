@@ -54,11 +54,13 @@ private:
   static constexpr char PATH[] = "/SENSOR/SPOOL.Q";
   static constexpr char TMP_PATH[] = "/SENSOR/SPOOL.TMP";
   static constexpr uint32_t MAGIC = 0x53504C51UL; // "SPLQ"
-  // V3 adds schema/firmware metadata; V1 and V2 readers remain supported.
-  static constexpr uint8_t VERSION = 4;
+  // V5 adds a truncated HMAC-SHA256 after crc32. V1-V4 remain readable.
+  static constexpr uint8_t VERSION = 5;
   static constexpr uint8_t LEGACY_VERSION = 1;
   static constexpr uint8_t LEGACY_VERSION_V2 = 2;
   static constexpr uint8_t LEGACY_VERSION_V3 = 3;
+  static constexpr uint8_t LEGACY_VERSION_V4 = 4;
+  static constexpr size_t HMAC_BYTES = 16;
   static constexpr uint8_t TYPE_DATA = 1;
   static constexpr uint8_t TYPE_ACK = 2;
 
@@ -79,6 +81,7 @@ private:
     uint32_t firmwareVersion = 0;
     uint32_t originNodeId = 0;
     uint32_t crc32 = 0;
+    uint8_t hmac[HMAC_BYTES] = {};
   };
 #pragma pack(pop)
 
@@ -128,11 +131,31 @@ private:
     uint32_t firmwareVersion = 0;
     uint32_t crc32 = 0;
   };
+
+  struct LegacyDiskRecordV4 {
+    uint32_t magic = MAGIC;
+    uint8_t version = LEGACY_VERSION_V4;
+    uint8_t type = 0;
+    uint8_t flags = 0;
+    uint8_t source = LOCAL_BLE;
+    uint32_t recordId = 0;
+    uint32_t sampleId = 0;
+    uint16_t payloadLen = 0;
+    uint16_t priority = 0;
+    SensorReader::SensorSample sample{};
+    uint32_t sourceSequence = 0;
+    uint8_t schemaVersion = 0;
+    uint32_t firmwareVersion = 0;
+    uint32_t originNodeId = 0;
+    uint32_t crc32 = 0;
+  };
 #pragma pack(pop)
   static_assert(sizeof(LegacyDiskRecordV3) == sizeof(LegacyDiskRecordV2) + sizeof(uint8_t) + sizeof(uint32_t),
                 "sensor spool v3 record layout changed");
-  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecordV3) + sizeof(uint32_t),
+  static_assert(sizeof(LegacyDiskRecordV4) == sizeof(LegacyDiskRecordV3) + sizeof(uint32_t),
                 "sensor spool v4 record layout changed");
+  static_assert(sizeof(DiskRecord) == sizeof(LegacyDiskRecordV4) + HMAC_BYTES,
+                "sensor spool v5 record layout changed");
   static_assert(sizeof(LegacyDiskRecordV2) == sizeof(LegacyDiskRecord) + sizeof(uint32_t),
                 "sensor spool v2 record layout changed");
   static_assert(std::is_trivially_copyable<SensorReader::SensorSample>::value, "sensor sample must be wire-copyable");
@@ -162,6 +185,7 @@ private:
   bool compact();
   bool evictOldest();
   static uint32_t crc32(const uint8_t* data, size_t len);
+  static bool computeHmac(const DiskRecord& record, uint8_t out[HMAC_BYTES]);
   static uint8_t requiredMaskFromFlags(uint8_t flags) { return flags & 0x03U; }
   static uint8_t deliveredMaskFromFlags(uint8_t flags) {
     return static_cast<uint8_t>((flags >> 2U) & 0x03U);

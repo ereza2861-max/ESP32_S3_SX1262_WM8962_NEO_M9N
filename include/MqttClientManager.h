@@ -54,6 +54,7 @@ public:
   using InboundCallback = void (*)(const String& topic, const String& payload, void* ctx);
   void noteMqttDeliveryCompleted(uint16_t packetId, bool delivered);
   bool recoverDeliveryJournal(class SensorSpool& spool);
+  String deliveryJournalStatusJson() const;
   void setInboundCallback(InboundCallback callback, void* ctx = nullptr) {
     inboundCallback_ = callback; inboundCallbackCtx_ = ctx;
   }

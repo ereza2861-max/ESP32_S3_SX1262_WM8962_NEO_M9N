@@ -81,6 +81,80 @@ constexpr uint8_t CONFIG_TXN_COMMITTED = 0xC2;
 }
 
 // ENH-2: Map transaction events to the required serial audit names.
+namespace {
+#pragma pack(push, 1)
+struct ConfigTxnMramRecord {
+  uint32_t magic = 0x4354584AUL; // CTXJ
+  uint8_t version = 1;
+  uint8_t event = 0;
+  uint16_t reserved = 0;
+  uint32_t generation = 0;
+  uint32_t timestampMs = 0;
+  char detail[32] = {};
+  uint32_t crc = 0;
+};
+#pragma pack(pop)
+static_assert(sizeof(ConfigTxnMramRecord) == Config::CONFIG_TXN_MRAM_RECORD_BYTES,
+              "config txn MRAM record size mismatch");
+
+uint32_t configTxnMramCrc(const ConfigTxnMramRecord& record) {
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(&record);
+  uint32_t c = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < offsetof(ConfigTxnMramRecord, crc); ++i) {
+    c ^= p[i];
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      c = (c & 1U) ? (c >> 1U) ^ 0xEDB88320UL : c >> 1U;
+  }
+  return ~c;
+}
+
+bool configTxnMramRecordValid(const ConfigTxnMramRecord& record) {
+  return record.magic == 0x4354584AUL && record.version == 1 &&
+         record.crc == configTxnMramCrc(record);
+}
+
+size_t configTxnMramCount() {
+  MramStorage& mram = MramStorage::shared();
+  if (!mram.begin()) return 0;
+  size_t count = 0;
+  for (uint8_t i = 0; i < Config::CONFIG_TXN_MRAM_RECORD_COUNT; ++i) {
+    ConfigTxnMramRecord record{};
+    if (!mram.read(static_cast<uint16_t>(
+                       Config::CONFIG_TXN_MRAM_ADDR +
+                       i * Config::CONFIG_TXN_MRAM_RECORD_BYTES),
+                   &record, sizeof(record))) break;
+    if (!configTxnMramRecordValid(record)) break;
+    ++count;
+  }
+  return count;
+}
+
+bool appendConfigTxnMram(ConfigTxnEvent event, uint32_t generation,
+                         const char* detail) {
+  MramStorage& mram = MramStorage::shared();
+  if (!mram.begin()) return false;
+  for (uint8_t i = 0; i < Config::CONFIG_TXN_MRAM_RECORD_COUNT; ++i) {
+    ConfigTxnMramRecord existing{};
+    const uint16_t address = static_cast<uint16_t>(
+        Config::CONFIG_TXN_MRAM_ADDR +
+        i * Config::CONFIG_TXN_MRAM_RECORD_BYTES);
+    if (!mram.read(address, &existing, sizeof(existing))) return false;
+    if (configTxnMramRecordValid(existing)) continue;
+
+    ConfigTxnMramRecord record{};
+    record.event = static_cast<uint8_t>(event);
+    record.generation = generation;
+    record.timestampMs = millis();
+    if (detail) std::strncpy(record.detail, detail, sizeof(record.detail) - 1);
+    record.crc = configTxnMramCrc(record);
+    return mram.write(address, &record, sizeof(record));
+  }
+  return false;
+}
+}  // namespace
+
+// ENH-2: Map transaction events to the required serial audit names and persist
+// the same event append-only in MRAM.
 void configTxnAudit(ConfigTxnEvent event, uint32_t generation,
                     const char* detail) {
   const char* name = "Unknown";
@@ -97,6 +171,16 @@ void configTxnAudit(ConfigTxnEvent event, uint32_t generation,
   Serial.printf("[CFG-TXN] event=%s gen=%lu detail=%s\n",
                 name, static_cast<unsigned long>(generation),
                 detail ? detail : "");
+  (void)appendConfigTxnMram(event, generation, detail);
+}
+
+String configTxnJournalStatusJson() {
+  const size_t count = configTxnMramCount();
+  String out = "{\"records\":";
+  out += String(static_cast<unsigned>(count));
+  out += ",\"capacity\":" + String(static_cast<unsigned>(Config::CONFIG_TXN_MRAM_RECORD_COUNT));
+  out += ",\"appendOnly\":true}";
+  return out;
 }
 
 bool configSnapshot(RuntimeConfig& out) { uint32_t generation = 0; return configSnapshot(out, generation); }

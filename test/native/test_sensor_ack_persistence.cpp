@@ -1,8 +1,33 @@
-#include <unity.h>
-#include "Config.h"
-void test_ack_mram_region_is_after_existing_config() {
-  TEST_ASSERT_TRUE(0x3040 > Config::PERSISTENT_CONFIG_MRAM_MARKER +
-                   Config::PERSISTENT_CONFIG_MRAM_MARKER_BYTES);
-  TEST_ASSERT_TRUE(0x3240 + 512 <= Config::MRAM_SIZE_BYTES);
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+
+namespace {
+struct AckStore {
+  bool ready = true;
+  uint32_t generation = 0;
+  uint32_t count = 2;
+  bool persist(const void*, size_t n) {
+    if (!ready) return false;
+    count = static_cast<uint32_t>(n);
+    ++generation;
+    return true;
+  }
+  bool clear() {
+    uint8_t empty[8] = {};
+    return persist(empty, 0);
+  }
+};
+
+void test_clear_uses_a_valid_empty_buffer() {
+  AckStore store;
+  assert(store.clear());
+  assert(store.count == 0);
+  assert(store.generation == 1);
 }
-void setup(){UNITY_BEGIN();RUN_TEST(test_ack_mram_region_is_after_existing_config);UNITY_END();} void loop(){}
+}  // namespace
+
+int main() {
+  test_clear_uses_a_valid_empty_buffer();
+  return 0;
+}

@@ -51,3 +51,19 @@ bool MqttDeliveryJournal::complete(uint16_t packetId,bool delivered){
   }
   return false;
 }
+
+String MqttDeliveryJournal::statusJson() const {
+  size_t pending = 0, retry = 0;
+  for (const auto& e : entries_) {
+    if (!e.valid) continue;
+    if (e.entry.state == static_cast<uint8_t>(State::PENDING)) ++pending;
+    if (e.entry.state == static_cast<uint8_t>(State::PENDING_RETRY)) ++retry;
+  }
+  String out = "{\"ready\":";
+  out += ready_ ? "true" : "false";
+  out += ",\"generation\":" + String(static_cast<unsigned long>(generation_));
+  out += ",\"pending\":" + String(static_cast<unsigned>(pending));
+  out += ",\"pendingRetry\":" + String(static_cast<unsigned>(retry));
+  out += "}";
+  return out;
+}

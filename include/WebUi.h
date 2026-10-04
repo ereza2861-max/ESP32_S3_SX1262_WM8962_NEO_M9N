@@ -168,4 +168,5 @@ private:
   void handleSensorDedupStats();
   void handleSensorSpool();
   void handleSensorSpoolClear();
+  void handleDiagFull();
 };

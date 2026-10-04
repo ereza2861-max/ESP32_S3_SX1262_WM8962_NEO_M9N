@@ -1,6 +1,7 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
+#include <mbedtls/ctr_drbg.h>
 #include "ConfigContract.h"
 
 /*
@@ -157,7 +158,7 @@ class KeyMaterial {
 public:
   static constexpr size_t KEY_BYTES = PUBLIC_KEY_BYTES;
 
-  KeyMaterial() = default;
+  KeyMaterial();
   ~KeyMaterial();
 
   // Loads/creates the persistent long-term key and creates a fresh
@@ -215,6 +216,8 @@ private:
                        const uint8_t publicKey[KEY_BYTES]);
   bool validStoredKeyPair(const uint8_t privateKey[KEY_BYTES],
                           const uint8_t publicKey[KEY_BYTES]) const;
+  static int ctrDrbgRng(void* context, unsigned char* output, size_t length);
+  bool initCtrDrbg();
 
   uint8_t longTermPrivate_[KEY_BYTES] = {};
   uint8_t longTermPublic_[KEY_BYTES] = {};
@@ -223,6 +226,8 @@ private:
   uint32_t ephemeralEpoch_ = 0;
   bool longTermValid_ = false;
   bool ephemeralValid_ = false;
+  mbedtls_ctr_drbg_context ctrDrbg_{};
+  bool ctrDrbgReady_ = false;
   static constexpr size_t SESSION_PEER_CACHE_SIZE = 16;
   SessionKeySlot sessionSlots_[SESSION_PEER_CACHE_SIZE][2] = {};
   size_t sessionNextPeer_ = 0;

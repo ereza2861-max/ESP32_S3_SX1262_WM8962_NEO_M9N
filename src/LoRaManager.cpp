@@ -331,6 +331,17 @@ void LoRaManager::refundDutyBudget(uint32_t airtimeUs) {
   if (clamped) Serial.println("WARN: LoRa duty budget refund clamped");
 }
 
+String LoRaManager::sensorAckStatusJson() const {
+  SensorAckStore::Record records[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
+  size_t count = 0;
+  const bool ok = sensorAckStore_.load(records, Config::SENSOR_BATCH_ACK_MAX_RECORDS, count);
+  String out = "{\"ready\":";
+  out += ok ? "true" : "false";
+  out += ",\"pending\":" + String(static_cast<unsigned>(count));
+  out += "}";
+  return out;
+}
+
 uint64_t LoRaManager::dutyMaxBudgetUs() const {
   return (static_cast<uint64_t>(Config::LORA_DUTY_WINDOW_MS) *
           Config::LORA_DUTY_CYCLE_PERCENT * 1000ULL) / 100ULL;
@@ -3508,6 +3519,12 @@ void LoRaManager::task() {
   // managers update state after releasing SPI, so this lock ordering avoids
   // a cross-task deadlock.
   if (spiOk && readSt == RADIOLIB_ERR_NONE) {
+    RuntimeConfig sniffConfig{};
+    if (configSnapshot(sniffConfig) && sniffConfig.ecdhRekeyPolicy == 0) {
+      // Q-FEAT-02: opportunistically sniff a standard LoRaWAN Class B beacon
+      // from frames already observed by the SX1262. No V5/ECDH path is changed.
+      sniffLoRaWanClassBBeacon(msg, rssi);
+    }
 
     uint8_t plain[220] = {};
     uint8_t type = 0;
@@ -3833,7 +3850,9 @@ void LoRaManager::task() {
 
           RemoteSensorTelemetry remote{};
           remote.nodeId = rxSourceId;
-          remote.originNodeId = decoded.nodeId != rxSourceId ? decoded.nodeId : 0;
+          // Q03/Q07: origin is mandatory on routed/remote telemetry. Keep the
+          // actual source identity even when the receiving node is the origin.
+          remote.originNodeId = decoded.originNodeId ? decoded.originNodeId : decoded.nodeId;
           remote.sensorId = decoded.sensorId;
           remote.value = decoded.value;
           remote.quality = decoded.quality;
@@ -5585,6 +5604,60 @@ void LoRaManager::serviceVoiceAckRetry() {
       slot.nextAttemptMs = now + Config::LORA_VOICE_ACK_TIMEOUT_MS;
     }
   }
+}
+
+void LoRaManager::sniffLoRaWanClassBBeacon(const String& payload, int16_t rssi) {
+  // Class B beacons use an implicit LoRa payload. AS923-style beacons are
+  // 17 bytes (3-byte NetID, 4-byte time, 1-byte common CRC, 7-byte
+  // GwSpecific, 2-byte CRC); 19-byte variants use a 2-byte common CRC and
+  // one RFU byte.
+  const size_t len = payload.length();
+  if (len != 17U && len != 19U) return;
+
+  auto byteAt = [&payload](size_t i) -> uint8_t {
+    return static_cast<uint8_t>(payload[i]);
+  };
+  uint16_t crc = 0;
+  for (size_t i = 0; i < 7U; ++i) {
+    crc ^= static_cast<uint16_t>(byteAt(i)) << 8U;
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      crc = (crc & 0x8000U) ? static_cast<uint16_t>((crc << 1U) ^ 0x1021U)
+                            : static_cast<uint16_t>(crc << 1U);
+  }
+  if ((crc & 0xFFU) != byteAt(7)) return;
+  if (len == 19U && byteAt(8) != static_cast<uint8_t>(crc >> 8U)) return;
+
+  const size_t gwOffset = len == 17U ? 8U : 9U;
+  const size_t gwCrcOffset = len - 2U;
+  uint16_t gwCrc = 0;
+  for (size_t i = gwOffset; i < gwCrcOffset; ++i) {
+    gwCrc ^= static_cast<uint16_t>(byteAt(i)) << 8U;
+    for (uint8_t bit = 0; bit < 8; ++bit)
+      gwCrc = (gwCrc & 0x8000U) ? static_cast<uint16_t>((gwCrc << 1U) ^ 0x1021U)
+                               : static_cast<uint16_t>(gwCrc << 1U);
+  }
+  const uint16_t receivedGwCrc = static_cast<uint16_t>(
+      byteAt(gwCrcOffset) | (static_cast<uint16_t>(byteAt(gwCrcOffset + 1U)) << 8U));
+  if (gwCrc != receivedGwCrc) return;
+
+  const uint32_t netId = static_cast<uint32_t>(byteAt(0)) |
+                         (static_cast<uint32_t>(byteAt(1)) << 8U) |
+                         (static_cast<uint32_t>(byteAt(2)) << 16U);
+  const uint32_t beaconTime = static_cast<uint32_t>(byteAt(3)) |
+                              (static_cast<uint32_t>(byteAt(4)) << 8U) |
+                              (static_cast<uint32_t>(byteAt(5)) << 16U) |
+                              (static_cast<uint32_t>(byteAt(6)) << 24U);
+  if (beaconTime == 0U) return;
+
+  ++classBBeaconCount_;
+  classBLastBeaconTime_ = beaconTime;
+  classBLastBeaconMs_ = millis();
+  classBLastNetId_ = netId;
+  classBLastRssi_ = rssi;
+  Serial.printf("LORAWAN CLASS-B BEACON: netId=%06lX time=%lu rssi=%d\n",
+                static_cast<unsigned long>(netId),
+                static_cast<unsigned long>(beaconTime),
+                static_cast<int>(rssi));
 }
 
 void LoRaManager::serviceNeighborBeacon() {

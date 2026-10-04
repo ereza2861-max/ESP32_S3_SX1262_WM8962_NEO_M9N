@@ -1348,6 +1348,7 @@ void WebUi::begin() {
   server_.on("/api/sensors/dedup-stats", HTTP_GET, [this]{ if (auth()) handleSensorDedupStats(); });
   server_.on("/api/sensors/spool", HTTP_GET, [this]{ if (auth()) handleSensorSpool(); });
   server_.on("/api/sensors/spool/clear", HTTP_POST, [this]{ if (auth()) handleSensorSpoolClear(); });
+  server_.on("/api/diag/full", HTTP_GET, [this]{ if (auth()) handleDiagFull(); });
   server_.on("/api/ble/passkey", HTTP_POST, [this]{ if (auth()) handleBlePasskeySet(); });
   server_.on("/api/ble/passkey", HTTP_DELETE, [this]{ if (auth()) handleBlePasskeyDelete(); });
   server_.on("/api/ble/passkey", HTTP_GET, [this]{ if (auth()) handleBlePasskeyList(); });
@@ -4286,4 +4287,56 @@ void WebUi::handleReboot() {
   server_.send(200, "text/plain", "rebooting");
   delay(100);
   ESP.restart();
+}
+
+
+void WebUi::handleDiagFull() {
+  RuntimeConfig config{};
+  if (!configSnapshot(config)) {
+    server_.send(503, "application/json", "{\"ok\":false,\"error\":\"configuration snapshot unavailable\"}");
+    return;
+  }
+
+  uint32_t wdt[5] = {};
+  uint32_t heapFree = 0, heapLargest = 0;
+  {
+    StateLock lock(gState);
+    if (lock.ok()) {
+      std::memcpy(wdt, gState.wdtResetCounts, sizeof(wdt));
+      heapFree = gState.heapFree;
+      heapLargest = gState.heapLargestFree;
+    }
+  }
+
+  String j = "{\"ok\":true";
+  j += ",\"spool\":" + sensorSpool.statusJson();
+  j += ",\"dedup\":{\"hits\":" + String(lora.dedupHits());
+  j += ",\"misses\":" + String(lora.dedupMisses());
+  j += ",\"evictions\":" + String(lora.dedupEvictions());
+  j += ",\"replayRejects\":" + String(lora.replayRejects()) + "}";
+  j += ",\"ack\":" + lora.sensorAckStatusJson();
+  j += ",\"journal\":" + mqtt.deliveryJournalStatusJson();
+  j += ",\"configTxn\":" + configTxnJournalStatusJson();
+  j += ",\"config\":{\"generation\":" + String(static_cast<unsigned long>(configGeneration()));
+  j += ",\"mqttEnabled\":" + String(config.mqttEnabled ? "true" : "false");
+  j += ",\"mqttTlsRequired\":" + String(config.mqttTlsRequired ? "true" : "false");
+  j += ",\"lorawanEnabled\":" + String(config.lorawanEnabled ? "true" : "false");
+  j += ",\"lorawanMode\":" + String(config.lorawanMode);
+  j += ",\"ecdhRekeyPolicy\":" + String(config.ecdhRekeyPolicy);
+  j += ",\"sensorReaderEnabled\":" + String(config.sensorReaderEnabled ? "true" : "false");
+  j += ",\"queuePolicy\":\"" +
+       String(bleSensorReader.sensorReader().queuePolicy() ==
+                      SensorReader::SampleQueuePolicy::DROP_OLDEST
+                  ? "DROP_OLDEST" : "DROP_NEWEST") + "\"";
+  j += ",\"secretsRedacted\":true}";
+  j += ",\"wdt\":{\"gnss\":" + String(static_cast<unsigned long>(wdt[0]));
+  j += ",\"lora\":" + String(static_cast<unsigned long>(wdt[1]));
+  j += ",\"audio\":" + String(static_cast<unsigned long>(wdt[2]));
+  j += ",\"web\":" + String(static_cast<unsigned long>(wdt[3]));
+  j += ",\"lorawan\":" + String(static_cast<unsigned long>(wdt[4])) + "}";
+  j += ",\"heap\":{\"free\":" + String(static_cast<unsigned long>(heapFree));
+  j += ",\"largestFree\":" + String(static_cast<unsigned long>(heapLargest)) + "}";
+  j += "}";
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.send(200, "application/json", j);
 }

@@ -135,6 +135,7 @@ enum class ConfigTxnEvent : uint8_t {
 
 void configTxnAudit(ConfigTxnEvent event, uint32_t generation,
                     const char* detail);
+String configTxnJournalStatusJson();
 
 bool configSnapshot(RuntimeConfig& out);
 bool configSnapshot(RuntimeConfig& out, uint32_t& generation);

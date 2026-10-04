@@ -35,6 +35,7 @@ public:
     uint64_t timestampMs = 0;
     uint32_t sampleId = 0;
     uint32_t sourceSequence = 0;
+    uint32_t originNodeId = 0;
     uint8_t schemaVersion = 0;
     uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION;
     int8_t rssi = -127;
@@ -118,6 +119,7 @@ public:
   uint32_t dedupHits() const { return dedupHits_; }
   uint32_t dedupMisses() const { return dedupMisses_; }
   uint32_t dedupEvictions() const { return dedupEvictions_; }
+  String sensorAckStatusJson() const;
   uint8_t lqi() const;
   const RfDetector& rfDetector() const { return rfDetector_; }
   PhysicalLayer* radioLayer() { return &radio_; }
@@ -174,6 +176,7 @@ private:
   int16_t voiceAckPendingRssi_ = -127;
   float voiceAckPendingSnr_ = -20.0f;
   void serviceNeighborBeacon();
+  void sniffLoRaWanClassBBeacon(const String& payload, int16_t rssi);
   bool sendVoiceAck(uint16_t ackedSeq, uint32_t ackedSourceId, int16_t rssi, float snr);
   void handleVoiceAckPayload(uint32_t ackSenderSourceId, const uint8_t* payload, size_t len);
   void updateNeighborMetric(uint32_t sourceId, int16_t rssi, float snr);
@@ -325,6 +328,11 @@ private:
   };
   TxQueueEntry txQueue_[TX_QUEUE_DEPTH] = {};
   uint32_t lastNeighborBeaconMs_ = 0;
+  uint32_t classBBeaconCount_ = 0;
+  uint32_t classBLastBeaconTime_ = 0;
+  uint32_t classBLastBeaconMs_ = 0;
+  uint32_t classBLastNetId_ = 0;
+  int16_t classBLastRssi_ = -127;
   bool forwardInFlightActive_ = false;
   uint32_t forwardInFlightNextHop_ = 0;
   ForwardPacket forwardInFlight_{};

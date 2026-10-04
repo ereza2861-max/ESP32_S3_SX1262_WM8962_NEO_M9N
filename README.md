@@ -248,3 +248,14 @@ NVS A/B commit-marker scheme. Automatic lifecycle is disabled by default.
 The configured EST URL is an RFC 7030 endpoint (or backend adapter), while the
 MQTT broker remains the certificate-validation authority for MQTT mTLS. See
 `docs/MQTT_PKI_LIFECYCLE.md`.
+
+
+## Audit Decisions Applied
+
+The 2026-10-04 audit remediation is mapped in
+`KEPUTUSAN_AUDIT_APPLIED.md`. The patch fixes the source-level BLOCKER/CRITICAL/HIGH
+findings, applies Q01–Q16, and adds the requested Q-SEC-06..08 and Q-FEAT-01..02
+enhancements without adding hardware or changing the existing pin mapping.
+
+Production acceptance remains conditional on the documented hardware/HIL evidence;
+this section does not convert greenfield source readiness into a hardware PASS.

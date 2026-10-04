@@ -1,4 +1,5 @@
 #pragma once
+#include <Arduino.h>
 #include <cstddef>
 #include <cstdint>
 #include "Config.h"
@@ -11,14 +12,23 @@ public:
   bool pending(uint16_t packetId, uint32_t sampleId);
   bool complete(uint16_t packetId, bool delivered);
   template <typename Callback>
-  bool recover(Callback&& cb) const {
-    for (const auto& e : entries_) {
-      if (e.valid && e.entry.sampleId && e.entry.state == static_cast<uint8_t>(State::PENDING)) {
-        if (!cb(e.entry.packetId, e.entry.sampleId)) return false;
-      }
+  bool recover(Callback&& cb) {
+    // PENDING and PENDING_RETRY both mean that broker delivery is uncertain.
+    // Remove the stale packet-id journal entry after recovery; the SD spool
+    // remains authoritative and will retry the same deterministic sampleId.
+    bool changed = false;
+    for (auto& e : entries_) {
+      if (!e.valid || !e.entry.sampleId ||
+          (e.entry.state != static_cast<uint8_t>(State::PENDING) &&
+           e.entry.state != static_cast<uint8_t>(State::PENDING_RETRY))) continue;
+      if (!cb(e.entry.packetId, e.entry.sampleId)) return false;
+      e = Cached{};
+      changed = true;
     }
-    return true;
+    return !changed || persistAll();
   }
+
+  String statusJson() const;
 private:
   struct DiskEntry {
     Entry entry{};

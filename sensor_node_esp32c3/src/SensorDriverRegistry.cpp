@@ -507,6 +507,9 @@ struct OneWireBusEntry {
   OneWire* bus = nullptr;
   DallasTemperature* sensors = nullptr;
   size_t refCount = 0;
+  uint32_t conversionReadyAtMs = 0;
+  size_t conversionReadCount = 0;
+  bool conversionActive = false;
 };
 constexpr size_t ONEWIRE_POOL_MAX = 4;
 OneWireBusEntry gOneWirePool[ONEWIRE_POOL_MAX];
@@ -515,7 +518,15 @@ OneWireBusEntry* acquireOneWireBus(int pin) {
   for (auto& e : gOneWirePool) if (e.bus && e.pin == pin) { ++e.refCount; return &e; }
   for (auto& e : gOneWirePool) if (!e.bus) {
     e.pin = pin; e.bus = new OneWire(pin); e.sensors = new DallasTemperature(e.bus);
-    e.sensors->begin(); e.refCount = 1; return &e;
+    e.sensors->begin();
+    // Q05: conversion is explicitly non-blocking and shared by every driver
+    // on this physical OneWire bus.
+    e.sensors->setWaitForConversion(false);
+    e.refCount = 1;
+    e.conversionReadyAtMs = 0;
+    e.conversionReadCount = 0;
+    e.conversionActive = false;
+    return &e;
   }
   return nullptr;
 }
@@ -534,6 +545,7 @@ public:
     config_ = config;
     OneWireBusEntry* entry = acquireOneWireBus(config_.pinSda);
     if (!entry) return false;
+    busEntry_ = entry;
     bus_ = entry->bus;
     sensors_ = entry->sensors;
     if (!sensors_ || sensors_->getDeviceCount() <= config_.channel) {
@@ -560,8 +572,30 @@ public:
       quality = SensorProtocol::QUALITY_STALE;
       return false;
     }
-    sensors_->requestTemperatures();
+    // One conversion is shared by every logical sensor on the same bus.
+    // DallasTemperature is in non-blocking mode; a conversion can therefore
+    // never stall the sampling task.
+    const uint32_t now = millis();
+    if (!busEntry_->conversionActive) {
+      sensors_->requestTemperatures();
+      // 12-bit DS18B20 conversion is the conservative upper bound. Every
+      // driver on this bus reuses this single conversion result.
+      busEntry_->conversionReadyAtMs = now + 750U;
+      busEntry_->conversionReadCount = 0;
+      busEntry_->conversionActive = true;
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      return false;
+    }
+    if (static_cast<int32_t>(now - busEntry_->conversionReadyAtMs) < 0) {
+      value = 0.0f;
+      quality = SensorProtocol::QUALITY_STALE;
+      return false;
+    }
     if (romBound_ && degraded_) {
+      ++busEntry_->conversionReadCount;
+      if (busEntry_->conversionReadCount >= busEntry_->refCount)
+        busEntry_->conversionActive = false;
       value = 0.0f;
       quality = SensorProtocol::QUALITY_STALE;
       return false;
@@ -569,6 +603,9 @@ public:
 
     const float t = sensors_->getTempCByIndex(activeIndex_);
     if (t == DEVICE_DISCONNECTED_C || !std::isfinite(t)) {
+      ++busEntry_->conversionReadCount;
+      if (busEntry_->conversionReadCount >= busEntry_->refCount)
+        busEntry_->conversionActive = false;
       value = 0.0f;
       quality = SensorProtocol::QUALITY_STALE;
       return false;
@@ -584,6 +621,9 @@ public:
       }
     }
 
+    ++busEntry_->conversionReadCount;
+    if (busEntry_->conversionReadCount >= busEntry_->refCount)
+      busEntry_->conversionActive = false;
     value = t;
     quality = SensorProtocol::QUALITY_VALID;
     return true;
@@ -681,6 +721,7 @@ private:
 
   OneWire* bus_ = nullptr;
   DallasTemperature* sensors_ = nullptr;
+  OneWireBusEntry* busEntry_ = nullptr;
   DriverConfig config_{};
   uint8_t rom_[8] = {};
   uint8_t activeIndex_ = 0;

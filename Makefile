@@ -103,7 +103,7 @@ download-ci:
 test:
 	@set -eu; \
 	command -v "$(PIO)" >/dev/null 2>&1 || { echo "ERROR: PlatformIO CLI '$(PIO)' tidak ditemukan."; exit 127; }; \
-	$(PIO) -d "$(PROJECT_PATH)" test -e native
+	cd "$(PROJECT_PATH)" && "$(PIO)" test -e native
 
 test-hil:
 	@echo "HIL is manual hardware validation; see test/hil/*.md"

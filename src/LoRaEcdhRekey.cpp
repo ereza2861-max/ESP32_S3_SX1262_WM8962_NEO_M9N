@@ -6,6 +6,7 @@
 #include <esp_system.h>
 #include <mbedtls/ecdh.h>
 #include <mbedtls/hkdf.h>
+#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/platform_util.h>
 #include <cstring>
 
@@ -42,6 +43,11 @@ bool isAllZero(const uint8_t* data, size_t length) {
 
 }  // namespace
 
+KeyMaterial::KeyMaterial() {
+  mbedtls_ctr_drbg_init(&ctrDrbg_);
+  ctrDrbgReady_ = initCtrDrbg();
+}
+
 KeyMaterial::~KeyMaterial() {
   clearEphemeral();
   for (size_t i = 0; i < SESSION_PEER_CACHE_SIZE; ++i) {
@@ -50,7 +56,47 @@ KeyMaterial::~KeyMaterial() {
   }
   mbedtls_platform_zeroize(longTermPrivate_, sizeof(longTermPrivate_));
   mbedtls_platform_zeroize(longTermPublic_, sizeof(longTermPublic_));
+  mbedtls_ctr_drbg_free(&ctrDrbg_);
+  ctrDrbgReady_ = false;
   longTermValid_ = false;
+}
+
+bool KeyMaterial::initCtrDrbg() {
+  // Q-SEC-06: seed an independent CTR-DRBG from the ESP hardware RNG.
+  mbedtls_ctr_drbg_free(&ctrDrbg_);
+  mbedtls_ctr_drbg_init(&ctrDrbg_);
+  uint8_t seed[32] = {};
+  esp_fill_random(seed, sizeof(seed));
+  const int rc = mbedtls_ctr_drbg_seed(
+      &ctrDrbg_, nullptr,
+      [](void*, unsigned char* output, size_t length) -> int {
+        if (!output && length != 0) return -1;
+        esp_fill_random(output, length);
+        return 0;
+      },
+      seed, sizeof(seed));
+  mbedtls_platform_zeroize(seed, sizeof(seed));
+  return rc == 0;
+}
+
+int KeyMaterial::ctrDrbgRng(void* context, unsigned char* output, size_t length) {
+  auto* self = static_cast<KeyMaterial*>(context);
+  if (!self || !output || !self->ctrDrbgReady_) return -1;
+  if (mbedtls_ctr_drbg_random(&self->ctrDrbg_, output, length) != 0) return -1;
+
+  // Defense-in-depth: combine the DRBG stream with a fresh hardware-RNG
+  // stream; esp_fill_random is not replaced by the DRBG.
+  uint8_t hardware[32] = {};
+  size_t offset = 0;
+  while (offset < length) {
+    const size_t chunk = (length - offset) < sizeof(hardware)
+        ? (length - offset) : sizeof(hardware);
+    esp_fill_random(hardware, chunk);
+    for (size_t i = 0; i < chunk; ++i) output[offset + i] ^= hardware[i];
+    offset += chunk;
+  }
+  mbedtls_platform_zeroize(hardware, sizeof(hardware));
+  return 0;
 }
 
 bool KeyMaterial::validStoredKeyPair(
@@ -76,7 +122,8 @@ bool KeyMaterial::generateKeyPair(
   bool ok = false;
   if (mbedtls_ecp_group_load(&ecdh.grp, MBEDTLS_ECP_DP_CURVE25519) == 0 &&
       mbedtls_ecdh_gen_public(&ecdh.grp, &ecdh.d, &ecdh.Q,
-                              espRandomRng, nullptr) == 0 &&
+                              ctrDrbgReady_ ? ctrDrbgRng : espRandomRng,
+                              ctrDrbgReady_ ? this : nullptr) == 0 &&
       mbedtls_mpi_write_binary(&ecdh.d, privateKey, KEY_BYTES) == 0 &&
       mbedtls_mpi_write_binary(&ecdh.Q.X, publicKey, KEY_BYTES) == 0) {
     ok = validStoredKeyPair(privateKey, publicKey);

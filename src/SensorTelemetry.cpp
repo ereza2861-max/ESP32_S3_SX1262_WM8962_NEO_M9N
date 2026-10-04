@@ -70,6 +70,8 @@ bool deserializeSensorTelemetry(const uint8_t* in, size_t len, Decoded& out) {
               sizeof(out.firmwareVersion));
   std::memcpy(&out.sourceSequence, in + PADDING_SOURCE_SEQUENCE_OFFSET,
               sizeof(out.sourceSequence));
+  std::memcpy(&out.originNodeId, in + PADDING_ORIGIN_NODE_ID_OFFSET,
+              sizeof(out.originNodeId));
   return out.nodeId != 0 && out.sensorId != 0 && std::isfinite(out.value);
 }
 

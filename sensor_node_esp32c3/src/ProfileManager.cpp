@@ -125,6 +125,8 @@ bool ProfileManager::setProfile(ProfileConfig::Profile profile, bool force) {
     Serial.println("ERROR: requested profile is out of range");
     return false;
   }
+  // Q06=C: normal profile changes are only accepted through the authenticated
+  // maintenance/WebUI path; force=true remains provisioning/HIL-only.
   if (!force && !ProfileConfig::PRODUCTION_READY[index]) {
     Serial.printf("ERROR: profile %u is not production-ready\n",
                   static_cast<unsigned>(index));

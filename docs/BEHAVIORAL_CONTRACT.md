@@ -105,3 +105,33 @@ consumed from the durable sensor spool path.
 - A duplicate source sequence is ACKed only when the matching durable spool record exists.
 - LoRa batch ACK records remain pending until `transmitHopped()` succeeds and are mirrored to MRAM.
 - MQTT QoS1 waits parse unrelated inbound packets instead of treating them as PUBACK failures.
+
+
+## Audit decision contract — 2026-10-04
+
+### Origin identity
+Remote/routed telemetry carries `originNodeId` separately from the receiving/forwarding
+`nodeId`. The sample identity is `(originNodeId, sensorId, sourceSequence)` plus the
+gateway spool `sampleId`. Local BLE telemetry keeps `originNodeId=0`. The LoRa decoder
+preserves the origin field already present in the 40-byte telemetry payload, and MQTT
+forwards it as `origin_node_id`.
+
+### Retry and delivery
+MQTT QoS 1 is broker-authoritative: a matching PUBACK is required before the MQTT
+delivery bit is marked complete. A missing/mismatched PUBACK leaves the spool record
+pending and reconnect uses the configured exponential backoff. After restart, both
+`PENDING` and `PENDING_RETRY` journal states are recovered by removing the stale MQTT
+packet-id entry while retaining the spool record, so the next publish retries the same
+`sampleId`. LoRa ACKs are recovered from MRAM and retried automatically.
+
+### Deduplication
+Gateway deduplication is performed before remote admission/ACK and durable sensor
+deduplication is keyed by origin/source identity. Backend deduplication remains
+required because MQTT retry is at-least-once by design. Unsupported protocol versions
+are rejected through explicit compatibility/version checks rather than silently
+interpreted as a different schema.
+
+### OneWire sampling
+All logical OneWire temperature sensors sharing one physical bus use one
+non-blocking conversion per bus cycle. Placeholder drivers remain descriptors with
+`QUALITY_STALE` until a production-ready profile is validated.

@@ -595,6 +595,7 @@ static void updateBattery(uint32_t now) {
         isfinite(previousBatteryV) &&
         voltage >= Config::BATTERY_RECHARGE_START_V &&
         voltage > previousBatteryV + 0.003f;
+    // Q14=C: GPIO41 is only a charge-probable heuristic; it is not charger STAT.
     gState.chargerState = gState.batteryChargeProbable
         ? BatteryChargerState::CHARGE_PROBABLE
         : BatteryChargerState::DISCHARGE_PROBABLE;

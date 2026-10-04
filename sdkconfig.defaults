@@ -37,6 +37,7 @@ CONFIG_FREERTOS_CHECK_STACKOVERFLOW=2
 CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 
 # Protect persisted LoRaWAN and other credentials at rest.
+# Q-SEC-02: NVS encryption is mandatory in the default security profile.
 CONFIG_NVS_ENCRYPTION=y
 
 

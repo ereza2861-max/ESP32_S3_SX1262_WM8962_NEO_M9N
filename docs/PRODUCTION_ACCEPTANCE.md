@@ -59,3 +59,11 @@ The following are intentionally **not** claimed until the evidence exists:
 
 Development and host/native tests may support firmware correctness, but they do
 not replace the manufacturing evidence above.
+
+
+## Q16 — Hybrid acceptance policy
+
+**Q16=C (hybrid)** is the official acceptance policy. Automated production gates
+must collect reproducible build/security/test evidence, while hardware-dependent
+RF/audio/power/provisioning checks still require the designated manual fixture
+procedure and signed evidence. Host/native tests cannot claim HIL acceptance.

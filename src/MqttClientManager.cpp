@@ -948,10 +948,12 @@ bool MqttClientManager::handleIncomingMqttPacket(uint8_t header) {
   }
 
   const uint8_t type = header & 0xF0U;
-  if (type == 0x40U && remainingLength == 2U) {
-    const uint16_t ackId = static_cast<uint16_t>(scratch[0] << 8 | scratch[1]);
+  if (type == 0x40U) {
+    // PUBACK is consumed only by waitForPubAck(), where the packet identifier
+    // is compared with the outstanding publish. This parser has no expected
+    // packet-id context, so never accept a PUBACK here.
     free(scratch);
-    return ackId == 0 ? true : (ackId == 0xFFFFU ? false : (ackId == ackId));
+    return false;
   }
   if (type == 0xD0U && remainingLength == 0U) {
     lastPingRespMs_ = millis();
@@ -1234,11 +1236,16 @@ void MqttClientManager::noteMqttDeliveryCompleted(uint16_t packetId, bool delive
   (void)deliveryJournal_.complete(packetId, delivered);
 }
 
+String MqttClientManager::deliveryJournalStatusJson() const {
+  return deliveryJournal_.statusJson();
+}
+
 bool MqttClientManager::recoverDeliveryJournal(SensorSpool& spool) {
-  return deliveryJournal_.recover([&spool](uint16_t packetId, uint32_t sampleId) {
-    if (MqttAckRouter::hasPending(packetId)) return true;
-    return spool.markDelivered(sampleId, SensorSpool::DELIVERY_MQTT);
-  });
+  (void)spool;
+  // The journal packet id is no longer usable after a restart. Do not mark the
+  // spool delivered: Q01 requires retrying the same deterministic sampleId.
+  // The stale packet-id entry is removed; the spool remains authoritative.
+  return deliveryJournal_.recover([](uint16_t, uint32_t) { return true; });
 }
 
 void MqttClientManager::task() {

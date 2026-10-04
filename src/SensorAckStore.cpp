@@ -101,5 +101,6 @@ bool SensorAckStore::load(SensorAckStore::Record* out, size_t capacity, size_t& 
 
 bool SensorAckStore::clear() {
   if (!ready_) return false;
-  return persist(nullptr, 0);
+  Record empty[Config::SENSOR_BATCH_ACK_MAX_RECORDS]{};
+  return persist(empty, 0);
 }

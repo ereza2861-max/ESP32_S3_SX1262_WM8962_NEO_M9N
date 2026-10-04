@@ -82,7 +82,7 @@ jobs:
           set -euo pipefail
           test ! -e include/LocalConfig.h
 
-      - name: Run cppcheck static analysis
+      - name: Run cppcheck S3 static analysis
         shell: bash
         run: |
           set -euo pipefail
@@ -91,9 +91,16 @@ jobs:
           cppcheck --version
           cppcheck --enable=warning,performance,portability --inconclusive --error-exitcode=1 \
             --std=c++17 --language=c++ --suppress=missingIncludeSystem \
-            -I include src \
-            -I sensor_node_esp32c3/include -I sensor_node_esp32c3/src \
-            sensor_node_esp32c3/src
+            -I include src
+
+      - name: Run cppcheck C3 static analysis
+        shell: bash
+        working-directory: sensor_node_esp32c3
+        run: |
+          set -euo pipefail
+          cppcheck --enable=warning,performance,portability --inconclusive --error-exitcode=1 \
+            --std=c++17 --language=c++ --suppress=missingIncludeSystem \
+            -I include -I src -I ../shared src
 
       - name: Run native S3 tests
         shell: bash

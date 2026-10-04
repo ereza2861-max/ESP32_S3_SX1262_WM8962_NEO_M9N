@@ -637,10 +637,3 @@ void OtaApManager::handleUploadDone() {
     ESP.restart();
   }
 }
-  uint8_t salt[16] = {};
-  uint8_t hash[32] = {};
-  uint32_t iterations = 0;
-  if (loadOtaSigningMaterial(salt, hash, iterations)) {
-    j += ",\"signingSalt\":\"" + signingHexBytes(salt, sizeof(salt)) + "\"";
-    j += ",\"signingIterations\":" + String(iterations);
-  }

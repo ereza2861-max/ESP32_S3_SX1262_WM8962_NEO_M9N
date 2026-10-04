@@ -1,6 +1,8 @@
 #include "SensorSpool.h"
 #include "AppState.h"
 #include "StorageManager.h"
+#include "PersistentConfig.h"
+#include <mbedtls/md.h>
 
 extern StorageManager storage;
 #include <SD.h>
@@ -24,22 +26,42 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
   const size_t prefixLen = offsetof(DiskRecord, sample);
   uint8_t prefix[offsetof(DiskRecord, sample)] = {};
   if (file.read(prefix, prefixLen) != prefixLen) return false;
-  uint8_t version = prefix[offsetof(DiskRecord, version)];
-  if (version != VERSION && version != LEGACY_VERSION_V3 && version != LEGACY_VERSION_V2 && version != LEGACY_VERSION) return false;
+  const uint8_t version = prefix[offsetof(DiskRecord, version)];
+  if (version != VERSION && version != LEGACY_VERSION_V4 && version != LEGACY_VERSION_V3 &&
+      version != LEGACY_VERSION_V2 && version != LEGACY_VERSION) return false;
   uint32_t magic = 0;
   std::memcpy(&magic, prefix, sizeof(magic));
   if (magic != MAGIC) return false;
   out = {};
   std::memcpy(reinterpret_cast<uint8_t*>(&out), prefix, prefixLen);
+
   if (version == VERSION) {
     if (file.read(reinterpret_cast<uint8_t*>(&out.sample), sizeof(out.sample)) != sizeof(out.sample) ||
         file.read(reinterpret_cast<uint8_t*>(&out.sourceSequence), sizeof(out.sourceSequence)) != sizeof(out.sourceSequence) ||
         file.read(reinterpret_cast<uint8_t*>(&out.schemaVersion), sizeof(out.schemaVersion)) != sizeof(out.schemaVersion) ||
         file.read(reinterpret_cast<uint8_t*>(&out.firmwareVersion), sizeof(out.firmwareVersion)) != sizeof(out.firmwareVersion) ||
         file.read(reinterpret_cast<uint8_t*>(&out.originNodeId), sizeof(out.originNodeId)) != sizeof(out.originNodeId) ||
-        file.read(reinterpret_cast<uint8_t*>(&out.crc32), sizeof(out.crc32)) != sizeof(out.crc32))
+        file.read(reinterpret_cast<uint8_t*>(&out.crc32), sizeof(out.crc32)) != sizeof(out.crc32) ||
+        file.read(out.hmac, sizeof(out.hmac)) != sizeof(out.hmac))
       return false;
     recordSize = sizeof(DiskRecord);
+  } else if (version == LEGACY_VERSION_V4) {
+    LegacyDiskRecordV4 legacy{};
+    std::memcpy(reinterpret_cast<uint8_t*>(&legacy), prefix, prefixLen);
+    if (file.read(reinterpret_cast<uint8_t*>(&legacy.sample), sizeof(legacy.sample)) != sizeof(legacy.sample) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.sourceSequence), sizeof(legacy.sourceSequence)) != sizeof(legacy.sourceSequence) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.schemaVersion), sizeof(legacy.schemaVersion)) != sizeof(legacy.schemaVersion) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.firmwareVersion), sizeof(legacy.firmwareVersion)) != sizeof(legacy.firmwareVersion) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.originNodeId), sizeof(legacy.originNodeId)) != sizeof(legacy.originNodeId) ||
+        file.read(reinterpret_cast<uint8_t*>(&legacy.crc32), sizeof(legacy.crc32)) != sizeof(legacy.crc32))
+      return false;
+    out.sourceSequence = legacy.sourceSequence;
+    out.schemaVersion = legacy.schemaVersion;
+    out.firmwareVersion = legacy.firmwareVersion;
+    out.originNodeId = legacy.originNodeId;
+    out.sample = legacy.sample;
+    out.crc32 = legacy.crc32;
+    recordSize = sizeof(LegacyDiskRecordV4);
   } else if (version == LEGACY_VERSION_V3) {
     LegacyDiskRecordV3 legacy{};
     std::memcpy(reinterpret_cast<uint8_t*>(&legacy), prefix, prefixLen);
@@ -66,6 +88,7 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
     out.sourceSequence = legacy.sourceSequence;
     out.schemaVersion = 0;
     out.firmwareVersion = 0;
+    out.originNodeId = 0;
     out.sample = legacy.sample;
     out.crc32 = legacy.crc32;
     recordSize = sizeof(LegacyDiskRecordV2);
@@ -78,15 +101,25 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
     out.sourceSequence = 0;
     out.schemaVersion = 0;
     out.firmwareVersion = 0;
+    out.originNodeId = 0;
     out.sample = legacy.sample;
     out.crc32 = legacy.crc32;
     recordSize = sizeof(LegacyDiskRecord);
   }
-  const uint32_t expected = crc32(
-      reinterpret_cast<const uint8_t*>(&out),
-      offsetof(DiskRecord, crc32));
-  // Legacy CRCs cover their historical record layout, not the widened V3 record.
-  if (version == LEGACY_VERSION_V3) {
+
+  if (version == LEGACY_VERSION_V4) {
+    LegacyDiskRecordV4 legacy{};
+    std::memcpy(reinterpret_cast<uint8_t*>(&legacy), reinterpret_cast<const uint8_t*>(&out),
+                offsetof(LegacyDiskRecordV4, sample));
+    legacy.sample = out.sample;
+    legacy.sourceSequence = out.sourceSequence;
+    legacy.schemaVersion = out.schemaVersion;
+    legacy.firmwareVersion = out.firmwareVersion;
+    legacy.originNodeId = out.originNodeId;
+    legacy.crc32 = out.crc32;
+    if (legacy.crc32 != crc32(reinterpret_cast<const uint8_t*>(&legacy),
+                               offsetof(LegacyDiskRecordV4, crc32))) return false;
+  } else if (version == LEGACY_VERSION_V3) {
     LegacyDiskRecordV3 legacy{};
     std::memcpy(reinterpret_cast<uint8_t*>(&legacy), reinterpret_cast<const uint8_t*>(&out),
                 offsetof(LegacyDiskRecordV3, sample));
@@ -114,8 +147,14 @@ bool SensorSpool::readDiskRecord(File& file, size_t offset, DiskRecord& out, siz
     legacy.crc32 = out.crc32;
     if (legacy.crc32 != crc32(reinterpret_cast<const uint8_t*>(&legacy),
                                offsetof(LegacyDiskRecordV2, crc32))) return false;
-  } else if (out.crc32 != expected) {
-    return false;
+  } else {
+    if (out.crc32 != crc32(reinterpret_cast<const uint8_t*>(&out),
+                           offsetof(DiskRecord, crc32))) return false;
+    uint8_t expectedHmac[HMAC_BYTES] = {};
+    if (!computeHmac(out, expectedHmac)) return false;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < HMAC_BYTES; ++i) diff |= expectedHmac[i] ^ out.hmac[i];
+    if (diff != 0) return false;
   }
   return true;
 }
@@ -128,6 +167,38 @@ uint32_t SensorSpool::crc32(const uint8_t* data, size_t len) {
       crc = (crc >> 1U) ^ (0xEDB88320U & static_cast<uint32_t>(-(static_cast<int32_t>(crc & 1U))));
   }
   return crc ^ 0xFFFFFFFFU;
+}
+
+bool SensorSpool::computeHmac(const DiskRecord& record, uint8_t out[HMAC_BYTES]) {
+  if (!out) return false;
+  RuntimeConfig config{};
+  if (!configSnapshot(config) || config.loraKeyHex.length() != 32) return false;
+
+  auto hexNibble = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  uint8_t key[16] = {};
+  for (size_t i = 0; i < sizeof(key); ++i) {
+    const int hi = hexNibble(config.loraKeyHex[i * 2]);
+    const int lo = hexNibble(config.loraKeyHex[i * 2 + 1]);
+    if (hi < 0 || lo < 0) return false;
+    key[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+
+  const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md) return false;
+  uint8_t digest[32] = {};
+  if (mbedtls_md_hmac(md, key, sizeof(key),
+                      reinterpret_cast<const uint8_t*>(&record),
+                      offsetof(DiskRecord, hmac),
+                      digest, sizeof(digest)) != 0) {
+    return false;
+  }
+  std::memcpy(out, digest, HMAC_BYTES);
+  return true;
 }
 
 uint32_t SensorSpool::sampleId(const SensorReader::SensorSample& sample) {
@@ -146,8 +217,10 @@ bool SensorSpool::ensureDirectory() const {
 
 bool SensorSpool::appendRecord(const DiskRecord& input) {
   DiskRecord record = input;
+  record.version = VERSION;
   record.crc32 = crc32(reinterpret_cast<const uint8_t*>(&record),
                        offsetof(DiskRecord, crc32));
+  if (!computeHmac(record, record.hmac)) return false;
   SpiLock lock(pdMS_TO_TICKS(100));
   if (!lock.ok()) return false;
   File file = SD.open(PATH, FILE_APPEND);
@@ -268,6 +341,12 @@ bool SensorSpool::compact() {
       record.flags = flagsFor(entries_[i].requiredMask, entries_[i].deliveredMask);
       record.crc32 = crc32(reinterpret_cast<const uint8_t*>(&record),
                             offsetof(DiskRecord, crc32));
+      if (!computeHmac(record, record.hmac)) {
+        source.close();
+        tmp.close();
+        SD.remove(TMP_PATH);
+        return false;
+      }
       if (tmp.write(reinterpret_cast<const uint8_t*>(&record), sizeof(record)) != sizeof(record)) {
         source.close();
         tmp.close();

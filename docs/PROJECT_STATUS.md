@@ -61,3 +61,17 @@ migration, high-water source sequences, MRAM application deduplication,
 authenticated sensor-origin handling, LoRa sensor batch ACKs, persist-first
 BLE commands, explicit charger-state semantics, placeholder-profile disable
 flags, and a persistent watchdog maintenance latch.
+
+
+## Audit closure — 2026-10-04
+
+The source-level BLOCKER, CRITICAL, and HIGH findings from the target audit are
+resolved in this patch: remote origin structure/wire propagation, C3 OTA source
+scope, ACK-store clear, MQTT `PENDING_RETRY` recovery, PUBACK packet matching,
+target-separated cppcheck, and the `make test` invocation. Reliability tests and
+the requested security/diagnostic enhancements were added.
+
+Hardware-dependent findings remain explicitly pending because the repository is
+greenfield: no PCB fabrication, electrical validation, RF HIL, or manufacturing
+eFuse evidence is claimed. This distinction is intentional and is required by
+the audit decisions.
