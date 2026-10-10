@@ -31,6 +31,7 @@
 #include "StorageManager.h"
 #include "SensorSpool.h"
 #include "WebUi.h"
+#include "HttpdServer.h"
 #include "PersistentConfig.h"
 #include "BleSensorReader.h"
 #include "SensorTelemetry.h"
@@ -45,7 +46,7 @@ CertLifecycleManager certLifecycle(mqtt);
 AudioManager audio;
 StorageManager storage;
 SensorSpool sensorSpool;
-ESPWebServerSecure server(Config::WEB_PORT);
+HttpdServer server;
 WebUi web(server);
 FuelGaugeMax17048 fuelGauge;
 BleSensorReader bleSensorReader;

@@ -1,3 +1,41 @@
+Iterasi C — Pesan 4 dari 7: WebUi.h (Lengkap)
+
+Catatan Sebelum Salin
+
+Ini adalah header lengkap WebUi.h yang menggantikan versi lama. Perubahan dari versi lama Anda:
+
+1. #include <ESPWebServerSecure.hpp> → #include "HttpdServer.h" + #include "HttpdRequest.h" + #include "HttpdResponse.h".
+2. ESPWebServerSecure& server_ → HttpdServer& server_.
+3. Semua 121 signature handler diubah dari void handleXxx() → void handleXxx(HttpdRequest& req, HttpdResponse& res).
+4. Helper auth/security diubah signature-nya untuk menerima req/res:
+   · auth() → auth(HttpdRequest& req, HttpdResponse& res)
+   · sameOrigin(HttpdRequest& req)
+   · rateLimit(HttpdRequest& req, HttpdResponse& res, uint32_t& last, uint32_t interval)
+   · sessionValid(HttpdRequest& req)
+   · csrfValid(HttpdRequest& req)
+   · issueSession(HttpdRequest& req, HttpdResponse& res)
+   · csrfTokenHexForActiveSession() (tidak berubah)
+   · findSessionSlot(const uint8_t token[32], uint32_t clientIp) (tidak berubah)
+   · auditAuth(HttpdRequest& req, bool success)
+   · basicAuthMatches(HttpdRequest& req, const String& user, const RuntimeConfig& config) — sekarang jadi member, bukan free function, karena butuh req
+5. Helper tambahan yang dibutuhkan konversi handler:
+   · parseSensorNodeId(HttpdRequest& req, size_t& id) — sudah ada sebagai free function, saya pindah ke member
+   · parseBleAddressArg(HttpdRequest& req, SensorProtocol::BleAddress& out) — sudah ada sebagai free function, saya pindah ke member
+6. handleUpload butuh state machine multipart — saya tambahkan method handleUploadFileChunk(...) yang menerima chunk dari HttpdMultipart::FileCallback. Tapi karena callback signature berbeda, saya buat dua method:
+   · handleUploadStart(HttpdRequest& req, HttpdResponse& res) — yang dipanggil handler
+   · handleUploadChunk(const char* name, const char* filename, const char* mime, const uint8_t* data, size_t len, bool firstChunk, bool lastChunk) — internal, dipanggil dari lambda
+7. handleSensorNodes punya percabangan if (hasArg("id")) — sekarang jadi if (req.hasArg("id")).
+8. Field activeSessionSlot_ tetap ada (dipakai csrfValid dan csrfTokenHexForActiveSession).
+9. uploadFile_, uploadPath_, uploadBytes_, uploadFailed_ tetap ada — dipakai state machine.
+10. Semua field lain tidak berubah.
+
+---
+
+File 9: src/WebUi.h
+
+Salin seluruh isi ke src/WebUi.h (ganti yang lama):
+
+```cpp
 #pragma once
 #include <Arduino.h>
 #include "HttpdServer.h"
@@ -6,8 +44,7 @@
 #include "HttpdMultipart.h"
 #include <FS.h>
 #include <IPAddress.h>
-#include "Config.h"
-#include "../shared/SensorProtocol.h"
+#include "SensorProtocol.h"
 
 class WebUi {
 public:
@@ -239,3 +276,57 @@ private:
   // ---- Reboot ----
   void handleReboot(HttpdRequest& req, HttpdResponse& res);
 };
+```
+
+---
+
+Yang Perlu Anda Perhatikan
+
+1. #include "SensorProtocol.h" — dibutuhkan karena parseBleAddressArg menerima SensorProtocol::BleAddress&. File ini ada di shared/SensorProtocol.h, dan build flag -I../shared sudah ada di platformio.ini Anda. Kalau build error 'SensorProtocol.h' file not found, ganti jadi #include "shared/SensorProtocol.h".
+2. #include "HttpdMultipart.h" — dibutuhkan karena handleUpload akan pakai HttpdMultipart::parse di WebUi.cpp.
+3. Urutan include: HttpdServer.h → HttpdRequest.h → HttpdResponse.h → HttpdMultipart.h. Itu saya tulis alfabetis-ish. Tidak penting.
+4. handleSensorNodeDetail dan handleSensorNodes — saya pisah jadi dua method terpisah. Di WebUi.cpp lama, keduanya di-dispatch dari satu handler /api/sensors/nodes yang cek if (hasArg("id")). Di begin() nanti saya akan tetap satu lambda yang dispatch, tapi sekarang dua method-nya eksplisit.
+5. basicAuthMatches — pindah dari free function di WebUi.cpp ke member class. Signature berubah. Ini karena butuh req.header("Authorization").
+6. parseSensorNodeId dan parseBleAddressArg — pindah dari free function ke member. Signature sekarang menerima HttpdRequest& req bukan ESPWebServerSecure& server.
+7. handleUploadChunk — method baru. Ini dipanggil dari lambda di dalam handleUpload saat HttpdMultipart memanggil FileCallback. Signature menerima (name, filename, mime, data, len, firstChunk, lastChunk). State disimpan di uploadFile_, uploadPath_, uploadBytes_, uploadFailed_.
+8. lastBlePasskeyMs_ dan lastSensorQueuePolicyMs_ — sudah ada di versi lama. Saya pertahankan.
+9. recordScheduleStart_, recordScheduleDurationSec_, recordScheduleActive_ — sudah ada. Dipertahankan.
+10. activeSessionSlot_ — ada di versi lama. Dipertahankan karena csrfValid dan csrfTokenHexForActiveSession masih pakai.
+
+---
+
+Yang Tidak Ada di Header Ini
+
+· server_.on(...) — tidak ada di header, semua di WebUi.cpp::begin().
+· WebUi::task() — tetap ada deklarasi, implementasi di WebUi.cpp.
+· WebUi::begin() — tetap ada deklarasi, implementasi di WebUi.cpp.
+· auditConfigChange — free function di WebUi.cpp lama. Saya pertahankan sebagai free function (tidak butuh req/res).
+· jsonEscape, hexEncodeUi, hexDecodeUi, configBackupPlaintext, backupKey, encryptConfigBackup, decryptConfigBackup, parseBackupLine, isValidUploadedWav, eraseStorageTree, sensorAddressJson, sensorNodeJson — semua free function di WebUi.cpp lama. Dipertahankan sebagai free function, saya akan tulis ulang di WebUi.cpp baru.
+· basicAuthMatches — dipindah ke member. Ini satu-satunya free function yang saya ubah.
+
+---
+
+Setelah 1 File Ini Tersalin
+
+File Status
+HttpdServer.h ✅ Pesan 1
+HttpdServer.cpp ✅ Pesan 1
+HttpdRequest.h ✅ Pesan 2
+HttpdRequest.cpp ✅ Pesan 2
+HttpdResponse.h ✅ Pesan 2
+HttpdResponse.cpp ✅ Pesan 2 (perbaikan manual)
+HttpdMultipart.h ✅ Pesan 3
+HttpdMultipart.cpp ✅ Pesan 3
+WebUi.h ✅ Pesan 4 (ini)
+
+Belum bisa build. WebUi.cpp masih versi lama dengan server_.on(uri, HTTP_GET, [this]{...}) yang akan gagal compile karena server_ sekarang HttpdServer, bukan ESPWebServerSecure.
+
+Konfirmasi kalau WebUi.h sudah tersalin, saya lanjut ke Pesan 5: WebUi.cpp bagian 1 — ini pesan terpanjang di seluruh iterasi C karena berisi:
+
+· Semua free function helpers (~500 baris)
+· begin() dengan 121 server_.on(...) (~400 baris)
+· task() (~30 baris)
+· Auth/session/CSRF helper (~350 baris)
+· ~30 handler pertama
+
+Pesan 5 akan sangat panjang. Saya sarankan Anda siapkan teks editor yang nyaman dan mungkin kopi.

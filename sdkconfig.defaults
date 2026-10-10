@@ -57,3 +57,7 @@ CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=n
 # audit: CONFIG_MBEDTLS_* availability is controlled by the ESP-IDF selected by platformio.ini; verify against the generated sdkconfig.
 CONFIG_NVS_ENCRYPTION=y
 CONFIG_SECURE_FLASH_ENC_ENABLED=y
+
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=256
