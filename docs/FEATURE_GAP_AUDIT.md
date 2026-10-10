@@ -144,3 +144,17 @@ RF/HIL interoperability, Secure Boot/Flash Encryption/eFuse manufacturing
 evidence, brownout/power-loss hardware evidence, and electrical validation of
 the GPIO3 mux and sensor fixtures. These cannot be proven by a source patch
 without inventing hardware evidence.
+
+
+## Audit response — 2026-10-10
+
+- Legacy telemetry (`sourceSequence == 0`) is gated by the runtime migration
+  flag and tracked through accepted/rejected counters. Durable spool admission
+  remains the ACK boundary.
+- Telemetry serialization now emits version 2 CRC coverage while retaining a
+  version 1 decoder path. Regression coverage targets the final timestamp byte.
+- CI artifact collection uses PlatformIO environment names rather than board IDs.
+- Native MQTT ACK routing tests call the production `MqttAckRouter` seam. Full
+  durable spool and broker integration remain integration/HIL acceptance items.
+- Placeholder profiles remain non-production and gated off. No pin or hardware
+  changes are included.

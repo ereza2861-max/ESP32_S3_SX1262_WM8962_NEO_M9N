@@ -30,6 +30,7 @@ private:
   SemaphoreHandle_t mutex_ = nullptr;
   uint32_t nextCheckMs_ = 0;
   uint32_t lastRenewalMs_ = 0;
+  uint64_t lastMqttRotationEpoch_ = 0;
   uint16_t renewalFailures_ = 0;
   String lastRenewalStatus_ = "NEVER";
   uint64_t expiryEpoch_ = 0;

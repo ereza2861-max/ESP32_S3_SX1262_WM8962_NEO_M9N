@@ -13,6 +13,10 @@ constexpr char DEFAULT_NODE_NAME[] = "FieldRadio-Sensor-C3";
 
 constexpr uint32_t SERIAL_BAUD = 115200;
 constexpr uint32_t SENSOR_SAMPLE_PERIOD_MS = 1000;
+constexpr uint32_t effectiveSamplePeriodMs(uint32_t minimumPeriodMs) {
+  return SENSOR_SAMPLE_PERIOD_MS > minimumPeriodMs
+      ? SENSOR_SAMPLE_PERIOD_MS : minimumPeriodMs;
+}
 // Driver descriptors are authoritative for sampling; BLE reporting remains a
 // fixed one-second notification cadence to keep the v1 GATT contract stable.
 constexpr uint32_t SENSOR_NOTIFICATION_PERIOD_MS = 1000;

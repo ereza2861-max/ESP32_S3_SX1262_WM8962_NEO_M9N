@@ -16,3 +16,16 @@ manufacture certificates.
 
 ## C3/S3 sensor production gates
 Each profile requires four independent gates before production enablement: (1) electrical validation, (2) sensor protocol validation, (3) calibration validation/traceability, and (4) HIL/recovery validation. Source/build success alone does not set `PRODUCTION_READY`.
+
+
+## Explicit release gates — audit response
+
+- Hardware/PCB: **NOT VALIDATED**. PCB is not assumed fabricated; pin map remains
+  candidate Rev-C. Do not claim production-ready based on source changes.
+- HIL: **PENDING**. Run `test/hil/run_hil.py` with the planned attenuator and
+  existing USB Serial/Wi-Fi paths; complete and sign `test/hil/CHECKLIST.md`.
+- MQTT rotation: demonstrate EST issuance, old/new credential overlap, successful
+  connection with the replacement, retirement of the prior credential, and audit
+  events in `/LOG/MQTT-AUTH.LOG`.
+- Sensor profiles: electrical, protocol, calibration and HIL gates must all pass;
+  `PRODUCTION_READY[]` must remain false until then.

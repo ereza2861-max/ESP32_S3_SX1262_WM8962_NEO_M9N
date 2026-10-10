@@ -180,7 +180,7 @@ jobs:
 
           mkdir -p artifacts
 
-          BUILD_DIR=".pio/build/esp32-s3-wroom-1"
+          BUILD_DIR=".pio/build/esp32s3"
 
           test -d "$BUILD_DIR"
 
@@ -205,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          BUILD_DIR="sensor_node_esp32c3/.pio/build/esp32-c3-devkitm-1"
+          BUILD_DIR="sensor_node_esp32c3/.pio/build/sensor_node_esp32c3"
           test -d "$BUILD_DIR"
           mkdir -p sensor-node-artifacts
 

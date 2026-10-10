@@ -5,7 +5,8 @@
 namespace SensorTelemetry {
 
 constexpr uint8_t MAGIC = 0x53; // "S"
-constexpr uint8_t VERSION = 1;
+constexpr uint8_t VERSION = 2;
+constexpr uint8_t LEGACY_VERSION = 1;
 
 struct Decoded {
   uint32_t nodeId = 0;
@@ -32,7 +33,8 @@ constexpr size_t PADDING_ORIGIN_NODE_ID_OFFSET = 36;
 // Padding is additive: sampleId(4), schemaVersion(1), firmwareVersion(4),
 // sourceSequence(4), and originNodeId(4) are present when non-zero; legacy
 // zero padding decodes as 0.
-// CRC is CRC-16/CCITT-FALSE over bytes 0..19.
+// V1 used CRC-16/CCITT-FALSE over bytes 0..19. V2 covers 22 bytes with
+// the low CRC byte (offset 21) zeroed during calculation, including all timestamp bytes.
 size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
                                 uint16_t sensorId, float value, uint8_t quality,
                                 uint64_t timestampMs);

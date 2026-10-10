@@ -24,6 +24,12 @@ uint16_t crc16Ccitt(const uint8_t* data, size_t len) {
   }
   return crc;
 }
+uint16_t crcV2(const uint8_t* data) {
+  uint8_t covered[SERIALIZED_FIELDS_BYTES]{};
+  std::memcpy(covered, data, sizeof(covered));
+  covered[21] = 0; // CRC storage overlaps the 22-byte compatibility coverage window.
+  return crc16Ccitt(covered, sizeof(covered));
+}
 } // namespace
 
 size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
@@ -46,7 +52,7 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
   std::memcpy(out + 8, &value, sizeof(value));
   out[12] = quality;
   putU64(out + 13, timestampMs);
-  putU16(out + 21, crc16Ccitt(out, SERIALIZED_FIELDS_BYTES - 2));
+  putU16(out + 21, crcV2(out));
   putU32(out + PADDING_SAMPLE_ID_OFFSET, sampleId);
   out[PADDING_SCHEMA_VERSION_OFFSET] = schemaVersion;
   putU32(out + PADDING_FIRMWARE_VERSION_OFFSET, firmwareVersion);
@@ -56,9 +62,14 @@ size_t serializeSensorTelemetry(uint8_t out[PAYLOAD_BYTES], uint32_t nodeId,
 }
 
 bool deserializeSensorTelemetry(const uint8_t* in, size_t len, Decoded& out) {
-  if (!in || len != PAYLOAD_BYTES || in[0] != MAGIC || in[1] != VERSION) return false;
-  if (crc16Ccitt(in, SERIALIZED_FIELDS_BYTES - 2) !=
-      static_cast<uint16_t>(in[21] | (static_cast<uint16_t>(in[22]) << 8))) return false;
+  if (!in || len != PAYLOAD_BYTES || in[0] != MAGIC ||
+      (in[1] != LEGACY_VERSION && in[1] != VERSION)) return false;
+  const uint16_t storedCrc = static_cast<uint16_t>(in[21] |
+      (static_cast<uint16_t>(in[22]) << 8));
+  const uint16_t expectedCrc = in[1] == LEGACY_VERSION
+      ? crc16Ccitt(in, SERIALIZED_FIELDS_BYTES - 2)
+      : crcV2(in);
+  if (expectedCrc != storedCrc) return false;
   std::memcpy(&out.nodeId, in + 2, sizeof(out.nodeId));
   std::memcpy(&out.sensorId, in + 6, sizeof(out.sensorId));
   std::memcpy(&out.value, in + 8, sizeof(out.value));

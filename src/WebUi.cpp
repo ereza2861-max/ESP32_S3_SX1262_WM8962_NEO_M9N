@@ -1380,6 +1380,23 @@ void WebUi::begin() {
   });
 
   // ---- MQTT ----
+  reg("/api/sensors/legacy-migration", HTTP_POST, [this](HttpdRequest& req, HttpdResponse& res) {
+    if (!auth(req, res)) return;
+    const String value = req.arg("enabled");
+    if (value != "true" && value != "false" && value != "1" && value != "0") {
+      res.sendJson(400, "{\"ok\":false,\"error\":\"enabled must be true|false\"}");
+      return;
+    }
+    if (!gConfigMutex || xSemaphoreTake(gConfigMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+      res.sendJson(503, "{\"ok\":false,\"error\":\"config unavailable\"}");
+      return;
+    }
+    gConfig.migrationWindowActive = (value == "true" || value == "1");
+    gConfigGeneration.fetch_add(1, std::memory_order_release);
+    xSemaphoreGive(gConfigMutex);
+    res.sendJson(200, String("{\"ok\":true,\"migrationWindowActive\":") +
+                      (gConfig.migrationWindowActive ? "true}" : "false}"));
+  });
   reg("/api/mqtt/provision", HTTP_POST, [this](HttpdRequest& req, HttpdResponse& res) {
     if (auth(req, res)) handleMqttProvision(req, res);
   });
@@ -1391,6 +1408,13 @@ void WebUi::begin() {
   });
   reg("/api/mqtt/cert-renew", HTTP_POST, [this](HttpdRequest& req, HttpdResponse& res) {
     if (auth(req, res)) handleMqttCertRenew(req, res);
+  });
+  reg("/api/mqtt/credential-rotate", HTTP_POST, [this](HttpdRequest& req, HttpdResponse& res) {
+    if (!auth(req, res)) return;
+    const bool ok = certLifecycle.renewCertificate(true);
+    res.sendJson(ok ? 200 : 503, ok
+        ? "{\"ok\":true,\"status\":\"rotation completed\"}"
+        : "{\"ok\":false,\"error\":\"credential rotation failed; inspect lifecycle status and audit log\"}");
   });
   reg("/api/mqtt/cert-history", HTTP_GET, [this](HttpdRequest& req, HttpdResponse& res) {
     if (auth(req, res)) handleMqttCertHistory(req, res);
@@ -3821,7 +3845,9 @@ void WebUi::handleSensorDedupStats(HttpdRequest& /*req*/, HttpdResponse& res) {
                    String(gState.sensorDedupFailures) +
                    ",\"sensorBatchAckRetries\":" + String(gState.sensorBatchAckRetries) +
                    ",\"sensorBatchAckFailures\":" + String(gState.sensorBatchAckFailures) +
-                   ",\"remoteSensorOverflowDrops\":" + String(gState.remoteSensorOverflowDrops) + "}");
+                   ",\"remoteSensorOverflowDrops\":" + String(gState.remoteSensorOverflowDrops) +
+                   ",\"remoteSensorLegacyAccepted\":" + String(gState.remoteSensorLegacyAccepted) +
+                   ",\"remoteSensorLegacyRejected\":" + String(gState.remoteSensorLegacyRejected) + "}");
 }
 
 void WebUi::handleSensorSpool(HttpdRequest& req, HttpdResponse& res) {

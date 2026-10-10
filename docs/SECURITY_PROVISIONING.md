@@ -87,3 +87,14 @@ OTA AP transport or introduce a new library.
 
 ## ECDH production gate
 Production builds compile with ECDH rekey policy forced to zero. Development/HIL may exercise ECDH. Production enablement additionally requires the existing Secure Boot/Flash Encryption evidence gate.
+
+
+## Mandatory production gate
+
+`enforceProductionSecurity()` in `src/main.cpp` must remain a hard gate. Secure
+Boot v2 and flash encryption are not asserted by a successful normal firmware
+build. Before production acceptance, record signed-image verification, eFuse
+Secure Boot state, flash-encryption state, key custody and recovery procedure in
+the acceptance artifacts. Never disable the gate merely to make development
+builds pass; use the documented development configuration and explicitly record
+that it is not production provisioning.

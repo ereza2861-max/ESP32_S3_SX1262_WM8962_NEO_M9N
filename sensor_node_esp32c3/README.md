@@ -223,3 +223,14 @@ substitute for a continuously connected GATT peripheral.
 
 ## Production profile enablement
 `ProfileConfig::PRODUCTION_READY[]` is intentionally `false` for every profile in the greenfield repository. Flip an entry only after the corresponding PCB, sensor fixture, electrical/protocol/calibration and HIL gates are complete. The serial-only `profile force <n>` command is reserved for provisioning/HIL and is not exposed through WebUI.
+
+
+## Placeholder sensor driver status
+
+All profile entries in `ProfileConfig::PRODUCTION_READY[]` remain `false`.
+Placeholder drivers are intentionally marked with `DriverConfig::FLAG_PLACEHOLDER_DISABLED`
+and must remain disabled in `SensorDriverRegistry::sample()` until electrical,
+protocol, calibration/traceability and HIL acceptance are documented for the exact
+board/profile combination. A successful compile or BLE descriptor listing is not
+acceptance evidence. Do not enable a placeholder as a default or use it to claim
+production readiness.

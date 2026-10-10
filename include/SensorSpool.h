@@ -33,7 +33,7 @@ public:
                uint8_t source = LOCAL_BLE, uint8_t priority = 0,
                uint32_t sourceSequence = 0, uint8_t schemaVersion = 0,
                uint32_t firmwareVersion = SensorProtocol::FIRMWARE_VERSION,
-               uint32_t originNodeId = 0);
+               uint32_t originNodeId = 0, uint32_t sampleIdOverride = 0);
   bool peek(Pending& out) const;
   bool markDelivered(uint32_t sampleId, uint8_t delivery);
   bool markDeliveredBySourceSequence(uint32_t nodeId, uint16_t sensorId,

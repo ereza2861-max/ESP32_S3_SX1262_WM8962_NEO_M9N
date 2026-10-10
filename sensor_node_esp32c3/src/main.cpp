@@ -443,8 +443,7 @@ void loop() {
   static uint32_t lastSampleMs = 0;
   static bool firstSuccessfulLoop = false;
   const uint32_t minPeriodMs = driverRegistry.minimumPeriodMs();
-  const uint32_t tickMs = max<uint32_t>(
-      SensorNodeConfig::SENSOR_SAMPLE_PERIOD_MS, minPeriodMs);
+  const uint32_t tickMs = SensorNodeConfig::effectiveSamplePeriodMs(minPeriodMs);
   const uint32_t now = millis();
   if (now - lastSampleMs >= tickMs) {
     lastSampleMs = now;

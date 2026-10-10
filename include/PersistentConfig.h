@@ -60,7 +60,8 @@ struct RuntimeConfig {
   uint32_t mqttHealthPeriodMs = Config::MQTT_HEALTH_PERIOD_MS;
   bool mqttRetainTelemetry = Config::MQTT_RETAIN_TELEMETRY;
   bool mqttRetainAvailability = Config::MQTT_RETAIN_AVAILABILITY;
-  uint16_t mqttCredentialRotationDays = 90; // compatibility metadata only; never an automatic rotation trigger
+  uint16_t mqttCredentialRotationDays = 90;
+  bool migrationWindowActive = true; // One-release compatibility window for sourceSequence-less telemetry
   String estServerUrl = Config::EST_SERVER_URL;
   String estLabel = Config::EST_LABEL;
   uint16_t certRenewalThresholdDays = Config::CERT_RENEWAL_THRESHOLD_DAYS;

@@ -53,6 +53,13 @@ bool CertLifecycleManager::begin() {
   mutex_ = xSemaphoreCreateMutex();
   if (!mutex_) return false;
   loadPersistentState();
+  {
+    Preferences prefs;
+    if (prefs.begin(NVS_NS, true)) {
+      lastMqttRotationEpoch_ = prefs.getULong64("mqtt_rot_epoch", 0);
+      prefs.end();
+    }
+  }
   RuntimeConfig cfg;
   if (configSnapshot(cfg) && cfg.estAuthMode == 2 && cfg.estBootstrapTokenConsumed)
     enrolled_ = true;
@@ -391,6 +398,18 @@ bool CertLifecycleManager::renewCertificate(bool manual) {
       }
     }
     lastRenewalMs_ = millis();
+    {
+      uint64_t epoch = 0;
+      { StateLock lock(gState); if (lock.ok()) epoch = gState.gps.utcEpoch; }
+      if (epoch != 0) {
+        Preferences prefs;
+        if (prefs.begin(NVS_NS, false)) {
+          (void)prefs.putULong64("mqtt_rot_epoch", epoch);
+          prefs.end();
+        }
+        lastMqttRotationEpoch_ = epoch;
+      }
+    }
     renewalFailures_ = 0;
     enrolled_ = true;
     lastRenewalStatus_ = "OK";
@@ -473,7 +492,19 @@ void CertLifecycleManager::task() {
     if (parseCertificate(mqtt_.clientCertificatePem(), true)) audit("VALIDATED");
   }
   if (expiryEpoch_ != 0 && now >= expiryEpoch_) audit("EXPIRED");
-  if (dueForRenewal(now)) (void)renewCertificate(false);
+  if (lastMqttRotationEpoch_ == 0 && now != 0) {
+    lastMqttRotationEpoch_ = now;
+    Preferences prefs;
+    if (prefs.begin(NVS_NS, false)) {
+      (void)prefs.putULong64("mqtt_rot_epoch", now);
+      prefs.end();
+    }
+  }
+  const uint64_t rotationInterval = static_cast<uint64_t>(cfg.mqttCredentialRotationDays) * 86400ULL;
+  const bool mqttRotationDue = now != 0 && lastMqttRotationEpoch_ != 0 &&
+      now >= lastMqttRotationEpoch_ && now - lastMqttRotationEpoch_ >= rotationInterval;
+  if (mqttRotationDue) audit("MQTT_CREDENTIAL_ROTATION_DUE");
+  if (dueForRenewal(now) || mqttRotationDue) (void)renewCertificate(false);
   {
     StateLock lock(gState);
     if (lock.ok()) {
@@ -582,5 +613,14 @@ void CertLifecycleManager::audit(const char* event) {
              static_cast<unsigned long long>(notBeforeEpoch_),
              static_cast<unsigned long long>(expiryEpoch_), event);
     f.close();
+  }
+  const char* authPath = "/LOG/MQTT-AUTH.LOG";
+  File auth = SD.open(authPath, FILE_APPEND);
+  if (auth) {
+    uint64_t epoch = 0;
+    { StateLock lock2(gState); if (lock2.ok()) epoch = lock2.ok() ? gState.gps.utcEpoch : 0; }
+    auth.printf("%llu,%s,%s\n", static_cast<unsigned long long>(epoch),
+                Config::DEVICE_ID, event);
+    auth.close();
   }
 }

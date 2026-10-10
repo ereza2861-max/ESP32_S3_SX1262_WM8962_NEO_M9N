@@ -135,3 +135,22 @@ interpreted as a different schema.
 All logical OneWire temperature sensors sharing one physical bus use one
 non-blocking conversion per bus cycle. Placeholder drivers remain descriptors with
 `QUALITY_STALE` until a production-ready profile is validated.
+
+
+## Legacy remote telemetry migration
+
+Remote LoRa telemetry with `sourceSequence == 0` is accepted only while
+`RuntimeConfig::migrationWindowActive` is true (default true for the migration
+release). Use authenticated `POST /api/sensors/legacy-migration` with
+`enabled=true|false` to change the runtime flag. The setting is intentionally
+runtime-only; it resets to the default after reboot. Legacy acceptance is still
+subject to durable spool admission, and accepted/rejected attempts are exposed
+by the sensor dedup statistics endpoint. Turn the flag off after the migration
+window; do not treat the compatibility path as permanent protocol policy.
+
+## Sensor telemetry CRC versions
+
+SensorTelemetry wire version 1 retains its legacy CRC check for backward
+compatibility. Version 2 covers the full timestamp through byte 20 and uses a
+22-byte CRC coverage window with the CRC-low storage byte zeroed during
+calculation. New serializers emit version 2; decoders continue accepting v1.

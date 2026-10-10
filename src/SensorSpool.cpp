@@ -403,14 +403,14 @@ bool SensorSpool::begin() {
 bool SensorSpool::append(const SensorReader::SensorSample& sample, uint8_t requiredMask,
                            uint8_t source, uint8_t priority, uint32_t sourceSequence,
                            uint8_t schemaVersion, uint32_t firmwareVersion,
-                           uint32_t originNodeId) {
+                           uint32_t originNodeId, uint32_t sampleIdOverride) {
   if (!ready_ || requiredMask == 0 || sample.nodeId == 0 || sample.sensorId == 0 ||
       source > REMOTE_LORA || !std::isfinite(sample.value)) {
     ++drops_;
     return false;
   }
   // Preserve provenance metadata in the durable record; legacy records remain readable.
-  const uint32_t id = sampleId(sample);
+  const uint32_t id = sampleIdOverride != 0 ? sampleIdOverride : sampleId(sample);
   for (size_t i = 0; i < count_; ++i)
     if (entries_[i].valid && entries_[i].sampleId == id) return true;
 

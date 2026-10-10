@@ -75,3 +75,11 @@ Hardware-dependent findings remain explicitly pending because the repository is
 greenfield: no PCB fabrication, electrical validation, RF HIL, or manufacturing
 eFuse evidence is claimed. This distinction is intentional and is required by
 the audit decisions.
+
+
+**Audit response update (2026-10-10):** Legacy remote telemetry migration
+controls, versioned telemetry CRC coverage, MQTT credential rotation scheduling,
+CI artifact-path corrections and an operator-assisted HIL runner are being added
+as source-level changes. These changes are not hardware validation. MQTT rotation
+requires a functioning EST enrollment path and broker-side overlap policy; its
+successful operation must be demonstrated in HIL before release.
