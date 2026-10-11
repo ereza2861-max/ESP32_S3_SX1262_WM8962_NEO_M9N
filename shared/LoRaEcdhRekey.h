@@ -1,8 +1,15 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#include <mbedtls/ctr_drbg.h>
 #include "ConfigContract.h"
+
+#ifndef FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+#define FIELDRADIO_LORA_ECDH_REKEY_ENABLED 0
+#endif
+
+#if FIELDRADIO_LORA_ECDH_REKEY_ENABLED
+#include <mbedtls/ctr_drbg.h>
+#endif
 
 /*
  * X25519/ECDH rekey protocol implementation.
