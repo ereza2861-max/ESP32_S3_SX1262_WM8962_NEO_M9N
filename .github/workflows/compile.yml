@@ -54,15 +54,23 @@ jobs:
         run: pio project config
 
       - name: Check C3 partition size
+        id: partition_check
+        continue-on-error: true
         run: python3 tools/check_partition_size.py sensor_node_esp32c3/partitions.csv
 
       - name: Check configuration ownership
+        id: config_ownership
+        continue-on-error: true
         run: python3 tools/check_gconfig_direct.py
 
       - name: Run repository preflight
+        id: repository_preflight
+        continue-on-error: true
         run: make preflight
 
       - name: Verify generated files are ignored
+        id: generated_files
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -77,12 +85,16 @@ jobs:
           done
 
       - name: Verify local credential file is absent
+        id: local_credentials
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           test ! -e include/LocalConfig.h
 
       - name: Run cppcheck S3 static analysis
+        id: cppcheck_s3
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -94,6 +106,8 @@ jobs:
             -I include src
 
       - name: Run cppcheck C3 static analysis
+        id: cppcheck_c3
+        continue-on-error: true
         shell: bash
         working-directory: sensor_node_esp32c3
         run: |
@@ -103,12 +117,16 @@ jobs:
             -I include -I src -I ../shared src
 
       - name: Run native S3 tests
+        id: native_s3
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
           pio test -e native 2>&1 | tee native-test.log
 
       - name: Run C3 native profile tests
+        id: native_c3_profile
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -116,6 +134,8 @@ jobs:
           pio test -e native_test_profile 2>&1 | tee ../native-test-profile.log
 
       - name: Run C3 native registry tests
+        id: native_c3_registry
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -170,10 +190,11 @@ jobs:
             native-test.log
             sensor-node-build.log
             ci-context.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Collect firmware artifacts
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
@@ -182,7 +203,10 @@ jobs:
 
           BUILD_DIR=".pio/build/esp32s3"
 
-          test -d "$BUILD_DIR"
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "No S3 build directory; compile may have failed before producing firmware."
+            exit 0
+          fi
 
           find "$BUILD_DIR" \
             -type f \
@@ -201,12 +225,16 @@ jobs:
           find artifacts -type f -print
 
       - name: Collect sensor-node firmware artifacts
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
 
           BUILD_DIR="sensor_node_esp32c3/.pio/build/sensor_node_esp32c3"
-          test -d "$BUILD_DIR"
+          if [ ! -d "$BUILD_DIR" ]; then
+            echo "No C3 build directory; compile may have failed before producing firmware."
+            exit 0
+          fi
           mkdir -p sensor-node-artifacts
 
           find "$BUILD_DIR" \
@@ -224,17 +252,50 @@ jobs:
           find sensor-node-artifacts -type f -print
 
       - name: Upload sensor-node firmware artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: esp32-c3-sensor-node-${{ github.sha }}
           path: sensor-node-artifacts/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload firmware artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: esp32-s3-firmware-${{ github.sha }}
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
+
+      # Keep source-policy and test failures visible, but only after the
+      # compiler logs and any partial artifacts have been uploaded.
+      - name: Enforce non-build quality gates
+        if: always()
+        shell: bash
+        env:
+          PARTITION_CHECK: ${{ steps.partition_check.outcome }}
+          CONFIG_OWNERSHIP: ${{ steps.config_ownership.outcome }}
+          REPOSITORY_PREFLIGHT: ${{ steps.repository_preflight.outcome }}
+          GENERATED_FILES: ${{ steps.generated_files.outcome }}
+          LOCAL_CREDENTIALS: ${{ steps.local_credentials.outcome }}
+          CPPCHECK_S3: ${{ steps.cppcheck_s3.outcome }}
+          CPPCHECK_C3: ${{ steps.cppcheck_c3.outcome }}
+          NATIVE_S3: ${{ steps.native_s3.outcome }}
+          NATIVE_C3_PROFILE: ${{ steps.native_c3_profile.outcome }}
+          NATIVE_C3_REGISTRY: ${{ steps.native_c3_registry.outcome }}
+        run: |
+          set -u
+          failed=0
+          for gate in \
+            PARTITION_CHECK CONFIG_OWNERSHIP REPOSITORY_PREFLIGHT \
+            GENERATED_FILES LOCAL_CREDENTIALS CPPCHECK_S3 CPPCHECK_C3 \
+            NATIVE_S3 NATIVE_C3_PROFILE NATIVE_C3_REGISTRY; do
+            value="${!gate}"
+            if [ "$value" != "success" ]; then
+              echo "::error::$gate did not pass (outcome: $value)"
+              failed=1
+            fi
+          done
+          exit "$failed"
