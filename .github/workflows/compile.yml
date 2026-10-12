@@ -54,6 +54,23 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio
 
+      # Install generic host prerequisites used by ESP-IDF/PlatformIO and
+      # native diagnostics before any compile/test steps are attempted.
+      - name: Provision generic build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git curl \
+            libssl-dev python3-dev
+          python -m pip install --upgrade pip setuptools wheel
+          mkdir -p "$PLATFORMIO_CORE_DIR"
+          pio --version
+          python --version
+          cmake --version
+          ninja --version
+
       - name: Show PlatformIO information
         run: pio system info
 
