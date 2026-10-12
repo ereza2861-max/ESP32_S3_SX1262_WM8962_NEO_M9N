@@ -127,6 +127,7 @@ jobs:
           cppcheck --version
           cppcheck --enable=warning,performance,portability --inconclusive --error-exitcode=1 \
             --std=c++17 --language=c++ --suppress=missingIncludeSystem \
+            -DBOARD_HAS_PSRAM -DFIELD_RADIO_ESP32_S3_WROOM_1_N16R8 \
             -I include src
 
       - name: Run cppcheck C3 static analysis
@@ -347,7 +348,8 @@ jobs:
           for gate in \
             PARTITION_CHECK CONFIG_OWNERSHIP REPOSITORY_PREFLIGHT \
             GENERATED_FILES LOCAL_CREDENTIALS CPPCHECK_S3 CPPCHECK_C3 \
-            NATIVE_S3 NATIVE_C3_PROFILE NATIVE_C3_REGISTRY; do
+            NATIVE_S3 NATIVE_C3_PROFILE NATIVE_C3_REGISTRY \
+            BUILD_S3 BUILD_C3; do
             value="${!gate}"
             if [ "$value" != "success" ]; then
               echo "::error::$gate did not pass (outcome: $value)"
