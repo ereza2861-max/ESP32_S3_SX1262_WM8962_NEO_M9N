@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstring>
+#include "Config.h"
 #include "LoRaEcdhRekey.h"
 
 namespace {

@@ -1,5 +1,6 @@
 name: ESP32-S3 PlatformIO Build
 
+# CI is diagnostic-first: always retain logs, then fail the job at the final quality gate.
 on:
   push:
     branches:
@@ -19,6 +20,11 @@ concurrency:
 jobs:
   build:
     name: Build ESP32-S3
+    env:
+      CI: "true"
+      PLATFORMIO_CORE_DIR: ~/.platformio
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -37,6 +43,7 @@ jobs:
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
+          enableCrossOsArchive: false
           path: |
             ~/.platformio/.cache
             ~/.cache/pip
@@ -119,6 +126,7 @@ jobs:
       - name: Run native S3 tests
         id: native_s3
         continue-on-error: true
+        timeout-minutes: 10
         shell: bash
         run: |
           set -o pipefail
@@ -143,12 +151,36 @@ jobs:
           pio test -e native_test_registry 2>&1 | tee ../native-test-registry.log
 
       - name: Build ESP32-S3 gateway firmware
+        id: build_s3
+        continue-on-error: true
         shell: bash
         run: |
-          set -o pipefail
-          pio run -e esp32s3 2>&1 | tee build.log
+          set -u
+          : > build.log
+          set +e
+          pio run -e esp32s3 -v 2>&1 | tee -a build.log
+          build_status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$build_status" -ne 0 ] && \
+             grep -Fq "Two environments with different actions were specified for the same target:" build.log; then
+            echo "::warning::Detected duplicate USB UAC descriptor registration; applying a guarded local dependency workaround."
+            python3 tools/fix_usb_uac_component.py
+            echo "=== Retry after USB UAC component workaround ===" | tee -a build.log
+            set +e
+            pio run -e esp32s3 -v 2>&1 | tee -a build.log
+            build_status=${PIPESTATUS[0]}
+            set -e
+          fi
+
+          if [ "$build_status" -ne 0 ]; then
+            echo "::error::ESP32-S3 build failed; inspect build.log for the first underlying error."
+            exit "$build_status"
+          fi
 
       - name: Build ESP32-C3 sensor-node firmware
+        id: build_c3
+        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -169,6 +201,9 @@ jobs:
             echo "runner_arch=${RUNNER_ARCH}"
             echo "event=${GITHUB_EVENT_NAME}"
             echo "repository=${GITHUB_REPOSITORY}"
+            echo "workspace=${GITHUB_WORKSPACE}"
+            echo "runner_temp=${RUNNER_TEMP}"
+            echo "python=${pythonLocation:-unknown}"
             echo
             echo "=== PlatformIO version ==="
             pio --version || true
@@ -188,6 +223,8 @@ jobs:
           path: |
             build.log
             native-test.log
+            native-test-profile.log
+            native-test-registry.log
             sensor-node-build.log
             ci-context.txt
           if-no-files-found: warn
@@ -283,6 +320,8 @@ jobs:
           CPPCHECK_S3: ${{ steps.cppcheck_s3.outcome }}
           CPPCHECK_C3: ${{ steps.cppcheck_c3.outcome }}
           NATIVE_S3: ${{ steps.native_s3.outcome }}
+          BUILD_S3: ${{ steps.build_s3.outcome }}
+          BUILD_C3: ${{ steps.build_c3.outcome }}
           NATIVE_C3_PROFILE: ${{ steps.native_c3_profile.outcome }}
           NATIVE_C3_REGISTRY: ${{ steps.native_c3_registry.outcome }}
         run: |
